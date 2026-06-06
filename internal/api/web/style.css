@@ -1,0 +1,1299 @@
+/* ============================================================
+   Tresor Web UI — Styles
+   Dark theme (default) + Light theme via [data-theme="light"]
+   ============================================================ */
+
+:root {
+    /* Dark theme (default) */
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-hover: #1c2128;
+    --border-color: #30363d;
+    --text-primary: #c9d1d9;
+    --text-secondary: #8b949e;
+    --text-heading: #f0f6fc;
+    --text-muted: #484f58;
+    --accent: #1f6feb;
+    --accent-hover: #388bfd;
+    --accent-bg: rgba(31, 111, 235, 0.15);
+    --success-bg: #1b4123;
+    --success-text: #3fb950;
+    --danger: #da3633;
+    --danger-hover: #f85149;
+    --danger-bg: #41211b;
+    --green-code: #7ee787;
+    --input-bg: #0d1117;
+    --modal-overlay: rgba(0, 0, 0, 0.6);
+    --sidebar-width: 230px;
+}
+
+[data-theme="light"] {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f6f8fa;
+    --bg-tertiary: #eaeef2;
+    --bg-hover: #f3f4f6;
+    --border-color: #d0d7de;
+    --text-primary: #1f2328;
+    --text-secondary: #656d76;
+    --text-heading: #1f2328;
+    --text-muted: #afb8c1;
+    --accent: #0969da;
+    --accent-hover: #0550ae;
+    --accent-bg: rgba(9, 105, 218, 0.1);
+    --success-bg: #acf3bd;
+    --success-text: #055d40;
+    --danger: #cf222e;
+    --danger-hover: #a40e26;
+    --danger-bg: #ffebe9;
+    --green-code: #1a7f37;
+    --input-bg: #ffffff;
+    --modal-overlay: rgba(0, 0, 0, 0.3);
+}
+
+/* ============================================================
+   Reset & Base
+   ============================================================ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    min-height: 100vh;
+}
+
+/* ============================================================
+   App Layout — Sidebar + Main
+   ============================================================ */
+
+.app-layout {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* ---- Sidebar ---- */
+
+.sidebar {
+    width: var(--sidebar-width);
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    padding: 1.25rem 0;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    overflow-y: auto;
+    z-index: 100;
+}
+
+.sidebar-brand {
+    padding: 0 1.25rem;
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--text-heading);
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.brand-icon {
+    font-size: 1.4rem;
+}
+
+.sidebar-nav {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 0 0.75rem;
+}
+
+.tab {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    padding: 0.6rem 1rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    border-radius: 8px;
+    text-align: left;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: inherit;
+}
+
+.tab:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.tab.active {
+    background: var(--accent);
+    color: #fff;
+    font-weight: 500;
+}
+
+.sidebar-footer {
+    padding: 0.75rem;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+/* ---- Theme Toggle ---- */
+
+.theme-toggle {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    transition: all 0.15s;
+    color: var(--text-primary);
+    font-family: inherit;
+}
+
+.theme-toggle:hover {
+    background: var(--border-color);
+}
+
+.theme-icon-dark,
+.theme-icon-light { display: none; }
+[data-theme="dark"] .theme-icon-dark { display: inline; }
+[data-theme="light"] .theme-icon-light { display: inline; }
+
+/* ---- Main Content Area ---- */
+
+.main-wrapper {
+    margin-left: var(--sidebar-width);
+    flex: 1;
+    min-width: 0;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+}
+
+main {
+    width: 100%;
+    max-width: 960px;
+    padding: 2rem 2.5rem 3rem;
+}
+
+/* ============================================================
+   Tab Content Panels
+   ============================================================ */
+
+.tab-content {
+    display: none;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+main > .tab-content > * {
+    width: 100%;
+}
+
+.header-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-heading);
+}
+
+/* ============================================================
+   Buttons
+   ============================================================ */
+
+.btn-primary {
+    background: #238636;
+    color: #fff;
+    border: 1px solid rgba(240, 246, 252, 0.1);
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: background 0.15s;
+    font-family: inherit;
+}
+
+.btn-primary:hover {
+    background: #2ea043;
+}
+
+.btn-danger {
+    background: var(--danger);
+    color: #fff;
+    border: 1px solid rgba(240, 246, 252, 0.1);
+    padding: 0.3rem 0.7rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-family: inherit;
+}
+
+.btn-danger:hover {
+    background: var(--danger-hover);
+}
+
+.btn-small {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    padding: 0.3rem 0.7rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: background 0.15s;
+    font-family: inherit;
+}
+
+.btn-small:hover {
+    background: var(--border-color);
+}
+
+/* ============================================================
+   Tables
+   ============================================================ */
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+th {
+    text-align: left;
+    padding: 0.75rem 1rem;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+
+td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--bg-tertiary);
+    font-size: 0.9rem;
+}
+
+td:last-child {
+    display: flex;
+    gap: 0.35rem;
+    align-items: center;
+    white-space: nowrap;
+}
+
+tr:last-child td {
+    border-bottom: none;
+}
+
+tr:hover {
+    background: var(--bg-hover);
+}
+
+.loading {
+    text-align: center;
+    color: var(--text-secondary);
+    padding: 2rem !important;
+}
+
+/* ============================================================
+   Status Badges
+   ============================================================ */
+
+.status-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.status-enabled {
+    background: var(--success-bg);
+    color: var(--success-text);
+}
+
+.status-disabled {
+    background: var(--danger-bg);
+    color: var(--danger-hover);
+}
+
+/* ============================================================
+   Modal
+   ============================================================ */
+
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: var(--modal-overlay);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal.hidden {
+    display: none;
+}
+
+.modal-content {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 2rem;
+    width: 90%;
+    max-width: 600px;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.modal-content .close {
+    float: right;
+    cursor: pointer;
+    font-size: 1.5rem;
+    color: var(--text-secondary);
+}
+
+.modal-content .close:hover {
+    color: var(--text-heading);
+}
+
+.modal-content h3 {
+    margin-bottom: 1.5rem;
+    color: var(--text-heading);
+}
+
+/* ============================================================
+   Forms
+   ============================================================ */
+
+form label {
+    display: block;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+form input[type="text"],
+form input[type="password"],
+form select,
+form textarea {
+    width: 100%;
+    margin-top: 0.3rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-family: inherit;
+}
+
+form input:focus,
+form select:focus,
+form textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+form textarea {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.8rem;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: auto;
+}
+
+form .btn-primary {
+    margin-top: 1rem;
+    width: 100%;
+}
+
+/* ============================================================
+   Dropdown / Select Styling
+   ============================================================ */
+
+select {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b949e' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    padding-right: 2rem;
+}
+
+[data-theme="light"] select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23656d76' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+}
+
+select option {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.9rem;
+    border-radius: 4px;
+}
+
+select option:checked {
+    background: var(--accent);
+    color: #fff;
+}
+
+/* ============================================================
+   Pipeline Display
+   ============================================================ */
+
+.pipeline-steps {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--green-code);
+    word-break: break-all;
+}
+
+.schema-hint {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    max-width: 300px;
+    margin: 0;
+}
+
+.pipeline-help {
+    margin-top: 0.5rem;
+    padding: 0.75rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.8rem;
+    display: none;
+}
+
+.pipeline-help.visible {
+    display: block;
+}
+
+.pipeline-help h4 {
+    color: var(--text-heading);
+    margin-bottom: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.pipeline-help .plugin-schema-entry {
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--bg-tertiary);
+}
+
+.pipeline-help .plugin-schema-entry:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.pipeline-help code {
+    color: var(--green-code);
+    font-size: 0.8rem;
+}
+
+.pipeline-help pre {
+    margin-top: 0.3rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+}
+
+/* ============================================================
+   Pipeline Editor
+   ============================================================ */
+
+#pipeline-editor {
+    margin-top: 0.3rem;
+}
+
+.pipeline-step-card {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+    position: relative;
+}
+
+.pipeline-step-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+.pipeline-step-header select {
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    padding: 0.35rem 2rem 0.35rem 0.6rem;
+    font-size: 0.85rem;
+}
+
+.pipeline-step-header select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.pipeline-step-remove {
+    background: var(--danger);
+    color: #fff;
+    border: none;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-family: inherit;
+}
+
+.pipeline-step-remove:hover {
+    background: var(--danger-hover);
+}
+
+.pipeline-step-config {
+    padding-left: 0.5rem;
+}
+
+.pipeline-step-config .config-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    align-items: center;
+}
+
+.pipeline-step-config .config-row input {
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    padding: 0.35rem 0.6rem;
+    font-size: 0.85rem;
+}
+
+.pipeline-step-config .config-row input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.pipeline-step-config .config-row label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    min-width: 60px;
+    margin-bottom: 0;
+}
+
+.header-pairs-container {
+    margin-top: 0.5rem;
+}
+
+.header-pair-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.4rem;
+}
+
+.header-pair-row input {
+    flex: 1;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    padding: 0.35rem 0.6rem;
+    font-size: 0.85rem;
+}
+
+.header-pair-row input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.header-pair-remove {
+    background: var(--bg-tertiary);
+    color: var(--danger-hover);
+    border: 1px solid var(--border-color);
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-family: inherit;
+}
+
+.btn-add-header {
+    background: var(--bg-tertiary);
+    color: var(--green-code);
+    border: 1px solid var(--border-color);
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    margin-top: 0.3rem;
+    font-family: inherit;
+}
+
+.btn-add-header:hover {
+    background: var(--border-color);
+}
+
+.pipeline-step-description {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.5rem;
+}
+
+.pipeline-empty {
+    text-align: center;
+    color: var(--text-secondary);
+    padding: 1rem;
+    font-style: italic;
+    font-size: 0.85rem;
+}
+
+#btn-add-step {
+    width: 100%;
+    background: #238636;
+    color: #fff;
+    border: 1px solid rgba(240, 246, 252, 0.1);
+    padding: 0.4rem 0.8rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-family: inherit;
+}
+
+#btn-add-step:hover {
+    background: #2ea043;
+}
+
+/* ============================================================
+   Alias Tab Styles (Clash Verge-inspired)
+   ============================================================ */
+
+#alias-groups-container {
+    width: 100%;
+}
+
+.alias-group-card {
+    margin-bottom: 1.5rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.alias-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.alias-group-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-heading);
+}
+
+.alias-group-title .group-icon {
+    font-size: 1.2rem;
+}
+
+.alias-group-actions {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+.alias-options-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.5rem;
+    padding: 0.75rem;
+}
+
+.alias-option-btn {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s;
+    color: var(--text-primary);
+    position: relative;
+}
+
+.alias-option-btn:hover {
+    background: var(--border-color);
+    border-color: var(--accent);
+}
+
+.alias-option-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    box-shadow: 0 0 8px rgba(31, 111, 235, 0.3);
+}
+
+[data-theme="light"] .alias-option-btn.active {
+    box-shadow: 0 0 8px rgba(9, 105, 218, 0.3);
+}
+
+.alias-option-btn .option-downstream {
+    font-weight: 600;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.alias-option-btn .option-model {
+    font-size: 0.8rem;
+    opacity: 0.75;
+    margin-top: 0.25rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+.alias-option-btn.active .option-model {
+    opacity: 0.9;
+}
+
+.option-remove {
+    position: absolute;
+    top: 0.25rem;
+    right: 0.35rem;
+    background: transparent;
+    color: var(--text-secondary);
+    border: none;
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0.15rem 0.35rem;
+    border-radius: 3px;
+    line-height: 1;
+}
+
+.option-remove:hover {
+    color: var(--danger-hover);
+    background: rgba(218, 54, 51, 0.15);
+}
+
+.alias-add-option {
+    background: var(--bg-tertiary);
+    border: 1px dashed var(--border-color);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    text-align: center;
+    transition: all 0.15s;
+}
+
+.alias-add-option:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.alias-empty-state {
+    text-align: center;
+    padding: 3rem 2rem;
+    color: var(--text-secondary);
+}
+
+.alias-empty-state .empty-icon {
+    font-size: 2.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.alias-empty-state p {
+    font-size: 0.95rem;
+    margin-bottom: 0.25rem;
+}
+
+.alias-empty-state .empty-hint {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+/* Protocol type badges */
+.protocol-badge {
+    display: inline-block;
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+/* Lightning icon for latency */
+.lightning-icon {
+    font-size: 0.85rem;
+    margin-left: auto;
+    opacity: 0.6;
+}
+
+/* ============================================================
+   Downstream Model Editor Styles
+   ============================================================ */
+
+.model-badge {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    padding: 0.1rem 0.45rem;
+    border-radius: 8px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    margin-right: 0.4rem;
+}
+
+.model-list {
+    list-style: none;
+    margin: 0.3rem 0 0 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+}
+
+.model-list li {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    color: var(--text-secondary);
+}
+
+.model-ids-container {
+    margin-top: 0.3rem;
+    padding: 0.5rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.model-id-row {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    margin-bottom: 0.3rem;
+}
+
+.model-id-input {
+    flex: 1;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-primary);
+    padding: 0.3rem 0.5rem;
+    font-size: 0.8rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+.model-id-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.model-id-remove {
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    padding: 0.15rem 0.35rem;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.75rem;
+}
+
+.model-id-remove:hover {
+    color: var(--danger-hover);
+    background: rgba(218, 54, 51, 0.15);
+}
+
+.text-muted {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 0.75rem;
+}
+
+/* ============================================================
+   Alias Output Model Multi-Select
+   ============================================================ */
+
+.model-multi-select {
+    margin-top: 0.3rem;
+    padding: 0.5rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.model-tag-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.model-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0.6rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+    font-size: 0.78rem;
+}
+
+.model-tag:hover {
+    background: var(--border-color);
+}
+
+.model-tag.selected {
+    background: var(--accent-bg);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.model-tag-icon {
+    font-size: 0.7rem;
+    line-height: 1;
+    opacity: 0.6;
+}
+
+.model-tag.selected .model-tag-icon {
+    opacity: 1;
+}
+
+.model-tag-name {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.75rem;
+}
+
+.model-multi-empty {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 0.8rem;
+    padding: 0.25rem 0;
+}
+
+.custom-model-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    box-sizing: border-box;
+}
+
+.custom-model-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* ============================================================
+   Settings Tab Styles
+   ============================================================ */
+
+#settings-panel {
+    max-width: 700px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.settings-group {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 1.5rem;
+}
+
+.settings-group h3 {
+    color: var(--text-heading);
+    font-size: 1rem;
+    margin-bottom: 0.75rem;
+}
+
+.settings-description {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin-bottom: 1.25rem;
+    line-height: 1.5;
+}
+
+.settings-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.settings-row label {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-weight: 500;
+    min-width: 120px;
+}
+
+.settings-row select {
+    flex: 1;
+    max-width: 350px;
+    padding: 0.5rem 2rem 0.5rem 0.75rem;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+
+.settings-row select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.settings-input {
+    flex: 1;
+    max-width: 350px;
+    padding: 0.5rem 0.75rem;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+.settings-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.settings-help {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.settings-status {
+    display: inline-block;
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+}
+
+.settings-status.success {
+    color: var(--success-text);
+}
+
+.settings-status.error {
+    color: var(--danger-hover);
+}
+
+/* ---- Proxy API Keys Editor ---- */
+
+.api-key-list {
+    margin: 0.5rem 0;
+}
+
+.api-key-empty {
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-style: italic;
+    padding: 0.3rem 0;
+}
+
+.api-key-row {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    margin-bottom: 0.35rem;
+}
+
+.api-key-input {
+    flex: 1;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-primary);
+    padding: 0.35rem 0.55rem;
+    font-size: 0.82rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+.api-key-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.api-key-remove {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0.2rem 0.45rem;
+    flex-shrink: 0;
+}
+
+.api-key-remove:hover {
+    background: var(--danger);
+    color: #fff;
+}
+
+/* ============================================================
+   Login Screen
+   ============================================================ */
+
+.login-view {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: var(--bg-primary);
+}
+
+.login-view.hidden {
+    display: none;
+}
+
+.login-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 2.5rem 2rem;
+    width: 90%;
+    max-width: 380px;
+    text-align: center;
+}
+
+.login-brand {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--text-heading);
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+}
+
+.login-subtitle {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    margin-bottom: 1.5rem;
+}
+
+#login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+#login-form input[type="password"] {
+    width: 100%;
+    padding: 0.6rem 0.85rem;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    font-family: inherit;
+    box-sizing: border-box;
+}
+
+#login-form input[type="password"]:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.btn-login {
+    width: 100%;
+    padding: 0.6rem;
+    font-size: 0.95rem;
+}
+
+.login-error {
+    color: var(--danger-hover);
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+}
+
+.login-error.hidden {
+    display: none;
+}
+
+/* Dashboard view container */
+#dashboard-view.hidden {
+    display: none;
+}

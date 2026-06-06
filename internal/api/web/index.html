@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tresor — LLM Gateway</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Login Screen (shown when auth is enabled and not logged in) -->
+    <div id="login-view" class="login-view hidden">
+        <div class="login-card">
+            <div class="login-brand">
+                <span class="brand-icon">🔀</span>
+                <span class="brand-name">Tresor</span>
+            </div>
+            <p class="login-subtitle">Enter admin password to continue</p>
+            <form id="login-form">
+                <input type="password" id="login-password" placeholder="Password" required autocomplete="current-password" autofocus>
+                <button type="submit" class="btn-primary btn-login">Sign In</button>
+                <div id="login-error" class="login-error hidden"></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Dashboard (hidden until authenticated) -->
+    <div id="dashboard-view" class="app-layout hidden">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <span class="brand-icon">🔀</span>
+                <span class="brand-name">Tresor</span>
+            </div>
+
+            <nav class="sidebar-nav">
+                <button class="tab" data-tab="downstreams">⚡ Downstreams</button>
+                <button class="tab" data-tab="aliases">🔀 Aliases</button>
+                <button class="tab" data-tab="rules">📋 Rules</button>
+                <button class="tab" data-tab="plugins">🧩 Plugins</button>
+                <button class="tab" data-tab="settings">⚙️ Settings</button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <button class="theme-toggle" id="btn-logout" title="Sign out" aria-label="Sign out">🚪 Sign Out</button>
+                <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode" aria-label="Toggle theme">
+                    <span class="theme-icon-dark">🌙 Dark</span>
+                    <span class="theme-icon-light">☀️ Light</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main content -->
+        <div class="main-wrapper">
+            <main>
+                <!-- Downstreams Tab -->
+                <section id="tab-downstreams" class="tab-content">
+                    <div class="header-actions">
+                        <h2>Downstream Providers</h2>
+                        <button id="btn-new-downstream" class="btn-primary">+ New Downstream</button>
+                    </div>
+                    <table id="downstreams-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Base URL</th>
+                                <th>API Key</th>
+                                <th>Models</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="downstreams-body">
+                            <tr><td colspan="5" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+
+                    <!-- Downstream Editor Modal -->
+                    <div id="downstream-modal" class="modal hidden">
+                        <div class="modal-content">
+                            <span class="close">&times;</span>
+                            <h3 id="downstream-modal-title">New Downstream</h3>
+                            <form id="downstream-form">
+                                <input type="hidden" id="downstream-id">
+                                <label>Name: <input type="text" id="downstream-name" required></label>
+                                <label>Base URL: <input type="text" id="downstream-url" placeholder="https://api.openai.com/v1"></label>
+                                <label>API Key: <input type="password" id="downstream-key"></label>
+                                <label>Output Model IDs:
+                                    <div id="model-ids-container"></div>
+                                    <button type="button" class="btn-small" id="btn-add-model-id" style="margin-top:0.3rem">+ Add Model</button>
+                                    <button type="button" class="btn-small" id="btn-fetch-models" style="margin-top:0.3rem">⟳ Fetch from Provider</button>
+                                </label>
+                                <button type="submit" class="btn-primary">Save</button>
+                            </form>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Aliases Tab -->
+                <section id="tab-aliases" class="tab-content">
+                    <div class="header-actions">
+                        <h2>Model Aliases</h2>
+                        <button id="btn-new-alias-group" class="btn-primary">+ New Alias Group</button>
+                    </div>
+                    <div id="alias-groups-container"></div>
+
+                    <!-- Add Alias Option Modal -->
+                    <div id="alias-modal" class="modal hidden">
+                        <div class="modal-content">
+                            <span class="close">&times;</span>
+                            <h3>Add Alias Option</h3>
+                            <form id="alias-form">
+                                <input type="hidden" id="alias-input-model">
+                                <label>Input Model ID: <strong id="alias-group-label"></strong></label>
+                                <label>Downstream:
+                                    <select id="alias-downstream"></select>
+                                </label>
+                                <label>Output Model IDs:
+                                    <div id="alias-output-models" class="model-multi-select"></div>
+                                    <input type="text" id="alias-output-model-custom" class="custom-model-input" placeholder="or type a model ID..." style="display:none; margin-top:0.3rem;">
+                                </label>
+                                <button type="submit" class="btn-primary">Add Option</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- New Alias Group Modal -->
+                    <div id="new-group-modal" class="modal hidden">
+                        <div class="modal-content">
+                            <span class="close">&times;</span>
+                            <h3>Create New Alias Group</h3>
+                            <form id="new-group-form">
+                                <label>Input Model ID:
+                                    <input type="text" id="new-group-input-model" placeholder="e.g. gpt-4o" required>
+                                </label>
+                                <label>Downstream:
+                                    <select id="new-group-downstream"></select>
+                                </label>
+                                <label>Output Model IDs:
+                                    <div id="new-group-output-models" class="model-multi-select"></div>
+                                    <input type="text" id="new-group-output-model-custom" class="custom-model-input" placeholder="or type a model ID..." style="display:none; margin-top:0.3rem;">
+                                </label>
+                                <button type="submit" class="btn-primary">Create</button>
+                            </form>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Rules Tab (default active) -->
+                <section id="tab-rules" class="tab-content">
+                    <div class="header-actions">
+                        <h2>Routing Rules</h2>
+                        <button id="btn-new-rule" class="btn-primary">+ New Rule</button>
+                    </div>
+                    <table id="rules-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Pattern Path</th>
+                                <th>Pattern Model</th>
+                                <th>Downstream</th>
+                                <th>Pipeline</th>
+                                <th>Enabled</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rules-body">
+                            <tr><td colspan="7" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+
+                    <!-- Rule Editor Modal -->
+                    <div id="rule-modal" class="modal hidden">
+                        <div class="modal-content">
+                            <span class="close">&times;</span>
+                            <h3 id="rule-modal-title">New Rule</h3>
+                            <form id="rule-form">
+                                <input type="hidden" id="rule-id">
+                                <label>Name: <input type="text" id="rule-name" required></label>
+                                <label>Pattern Path: <input type="text" id="rule-path" placeholder="/v1/chat/completions or *"></label>
+                                <label>Pattern Model: <input type="text" id="rule-model" placeholder="gpt-4o (optional)"></label>
+                                <label>Downstream:
+                                    <select id="rule-downstream"></select>
+                                </label>
+                                <label>Pipeline Transformers:
+                                    <div id="pipeline-editor">
+                                        <div id="pipeline-steps"></div>
+                                        <button type="button" class="btn-small" id="btn-add-step" style="margin-top:0.3rem">+ Add Step</button>
+                                    </div>
+                                </label>
+                                <textarea id="rule-pipeline" rows="1" style="position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden"></textarea>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="rule-enabled" checked> Enabled
+                                </label>
+                                <button type="submit" class="btn-primary">Save</button>
+                            </form>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Plugins Tab -->
+                <section id="tab-plugins" class="tab-content">
+                    <h2>Available Plugins</h2>
+                    <table id="plugins-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Description</th>
+                                <th>Config Schema</th>
+                            </tr>
+                        </thead>
+                        <tbody id="plugins-body">
+                            <tr><td colspan="3" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </section>
+
+                <!-- Settings Tab -->
+                <section id="tab-settings" class="tab-content">
+                    <h2>Settings</h2>
+                    <div id="settings-panel">
+                        <div class="settings-group">
+                            <h3>Outbound Proxy</h3>
+                            <p class="settings-description">
+                                Controls how outbound requests to downstream LLM providers are routed through HTTP proxies.
+                            </p>
+                            <div class="settings-row">
+                                <label for="proxy-mode">Proxy Mode</label>
+                                <select id="proxy-mode">
+                                    <option value="auto">Auto (default)</option>
+                                    <option value="env">Environment Variables Only</option>
+                                    <option value="windows">Windows System Proxy + Env Fallback</option>
+                                    <option value="none">None (Direct Connection)</option>
+                                </select>
+                                <span class="settings-help" id="proxy-mode-help"></span>
+                            </div>
+                        </div>
+
+                        <div class="settings-group">
+                            <h3>Proxy Authentication</h3>
+                            <p class="settings-description">
+                                Require clients to present a valid API key (<code>Authorization: Bearer &lt;key&gt;</code>) before requests are proxied.
+                                Leave empty to allow all traffic.
+                            </p>
+                            <div id="proxy-api-keys-container" class="api-key-list"></div>
+                            <button type="button" class="btn-small" id="btn-add-proxy-key">+ Add API Key</button>
+                        </div>
+
+                        <div class="settings-group">
+                            <h3>Admin Password</h3>
+                            <p class="settings-description">
+                                Password required to access the admin web UI.
+                                Enter a new password below to change it. Leave empty to keep the current password.
+                            </p>
+                            <div class="settings-row">
+                                <label for="admin-password">New Password</label>
+                                <input type="password" id="admin-password" placeholder="Enter new password…" class="settings-input">
+                            </div>
+                            <div class="settings-row">
+                                <label for="admin-password-confirm">Confirm</label>
+                                <input type="password" id="admin-password-confirm" placeholder="Confirm new password…" class="settings-input">
+                            </div>
+                            <div id="clear-password-row" class="settings-row" style="display:none;">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="clear-password"> Clear password (disable auth)
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="settings-group">
+                            <h3>Dashboard</h3>
+                            <p class="settings-description">
+                                Choose which tab the dashboard opens to on page load or refresh.
+                            </p>
+                            <div class="settings-row">
+                                <label for="default-tab">Default Tab</label>
+                                <select id="default-tab">
+                                    <option value="downstreams">Downstreams</option>
+                                    <option value="aliases">Aliases</option>
+                                    <option value="rules">Rules</option>
+                                    <option value="plugins">Plugins</option>
+                                    <option value="settings">Settings</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <button id="btn-save-settings" class="btn-primary">Save Settings</button>
+                        <span id="settings-status" class="settings-status"></span>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div> <!-- /dashboard-view -->
+
+    <script src="app.js"></script>
+</body>
+</html>
