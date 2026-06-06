@@ -132,17 +132,12 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Create tag
-        run: |
-          git tag ${{ github.event.inputs.version }}
-          git push origin ${{ github.event.inputs.version }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Find previous tag
         id: prev
         run: |
-          PREV=$(git tag --sort=-creatordate | head -1)
+          # Find the previous tag *before* creating the new one.
+          # Exclude the current version tag in case it already exists locally.
+          PREV=$(git tag --sort=-creatordate | grep -v "^${{ github.event.inputs.version }}$" | head -1)
           if [ -z "$PREV" ]; then
             echo "No previous tag found — listing all commits from repo start."
             echo "prev=ALL" >> $GITHUB_OUTPUT
@@ -160,6 +155,13 @@ jobs:
               -v "${{ steps.prev.outputs.prev }}...${{ github.event.inputs.version }}"
           fi
           cat release.md
+
+      - name: Create tag
+        run: |
+          git tag ${{ github.event.inputs.version }}
+          git push origin ${{ github.event.inputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
