@@ -22,6 +22,7 @@ test*.py
 test*.ipynb
 !tests/**
 *.sh
+!.github/gen_release_note.sh
 *.npy
 *.csv
 *.pkl

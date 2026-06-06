@@ -141,6 +141,25 @@ jobs:
     needs: [build, test]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Find previous tag
+        id: prev
+        run: |
+          CURRENT="${{ github.event.inputs.version }}"
+          PREV=$(git describe --tags --abbrev=0 HEAD^{/^${CURRENT}$/} 2>/dev/null || git tag --sort=-creatordate | head -1)
+          echo "prev=$PREV" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        run: |
+          bash .github/gen_release_note.sh \
+            -v "${{ steps.prev.outputs.prev }}...${{ github.event.inputs.version }}"
+          cat release.md
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -163,4 +182,4 @@ jobs:
           tag_name: ${{ github.event.inputs.version }}
           files: |
             dist/*
-          generate_release_notes: true
+          body_path: release.md
