@@ -22,8 +22,19 @@ if [ -z "$version_range" ]; then
   exit 1
 fi
 
-# Parse prev and curr from the range string (split on ...)
-IFS='...' read -r prev curr <<< "$version_range"
+# Parse prev and curr from the range string (split on literal "...")
+# IFS treats each char as a separate delimiter, so we can't use IFS='...'
+# instead we do explicit substring splitting.
+if [[ "$version_range" == *"..."* ]]; then
+  prev="${version_range%...*}"
+  curr="${version_range#*...}"
+elif [[ "$version_range" == "..."* ]]; then
+  prev=""
+  curr="${version_range:3}"
+else
+  prev=""
+  curr="$version_range"
+fi
 
 REPO="https://github.com/${GITHUB_REPOSITORY:-tresor/tresor}"
 
