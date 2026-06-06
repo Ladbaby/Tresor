@@ -132,17 +132,33 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Create tag
+        run: |
+          git tag ${{ github.event.inputs.version }}
+          git push origin ${{ github.event.inputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Find previous tag
         id: prev
         run: |
-          CURRENT="${{ github.event.inputs.version }}"
-          PREV=$(git describe --tags --abbrev=0 HEAD^{/^${CURRENT}$/} 2>/dev/null || git tag --sort=-creatordate | head -1)
-          echo "prev=$PREV" >> $GITHUB_OUTPUT
+          PREV=$(git tag --sort=-creatordate | head -1)
+          if [ -z "$PREV" ]; then
+            echo "No previous tag found — listing all commits from repo start."
+            echo "prev=ALL" >> $GITHUB_OUTPUT
+          else
+            echo "Previous tag: $PREV"
+            echo "prev=$PREV" >> $GITHUB_OUTPUT
+          fi
 
       - name: Generate release notes
         run: |
-          bash .github/gen_release_note.sh \
-            -v "${{ steps.prev.outputs.prev }}...${{ github.event.inputs.version }}"
+          if [ "${{ steps.prev.outputs.prev }}" = "ALL" ]; then
+            bash .github/gen_release_note.sh -v "...${{ github.event.inputs.version }}"
+          else
+            bash .github/gen_release_note.sh \
+              -v "${{ steps.prev.outputs.prev }}...${{ github.event.inputs.version }}"
+          fi
           cat release.md
 
       - name: Download artifacts
