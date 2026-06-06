@@ -146,6 +146,10 @@ jobs:
             echo "prev=$PREV" >> $GITHUB_OUTPUT
           fi
 
+      - name: Create tag (local only)
+        run: |
+          git tag ${{ github.event.inputs.version }}
+
       - name: Generate release notes
         run: |
           if [ "${{ steps.prev.outputs.prev }}" = "ALL" ]; then
@@ -156,9 +160,8 @@ jobs:
           fi
           cat release.md
 
-      - name: Create tag
+      - name: Push tag
         run: |
-          git tag ${{ github.event.inputs.version }}
           git push origin ${{ github.event.inputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
