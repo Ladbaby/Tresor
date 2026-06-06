@@ -1,8 +1,7 @@
-# Tresor cross-platform build and release
+# Tresor CI/CD
 #
-# Triggers:
-#   - push to main branch (or tags v*) → builds, uploads as artifacts
-#   - workflow_dispatch with version input → builds, publishes GitHub Release
+# - push to main / PR → run tests only (no cross-compile)
+# - workflow_dispatch with version → build binaries + publish GitHub Release
 #
 # Targets:
 #   Windows amd64 (.exe + .zip)
@@ -24,8 +23,6 @@ on:
       - "*.md"
     branches:
       - main
-    tags:
-      - "v*"
   pull_request:
     branches:
       - main
@@ -37,10 +34,29 @@ concurrency:
 env:
   GO_VERSION: "1.26"
 
+# ── Test (always on push / PR) ──────────────────────────────────────
 jobs:
-  # ── 1. Build all targets ──────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run tests
+        run: |
+          go clean -testcache
+          go test ./...
+
+  # ── Build binaries (release only) ─────────────────────────────────
   build:
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+    needs: [test]
     strategy:
       matrix:
         target:
@@ -58,24 +74,10 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Verify Go
-        run: |
-          go version
-          go env
-
       - name: Compute version info
         id: ver
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            VERSION="${{ github.event.inputs.version }}"
-          elif [[ $GITHUB_REF == refs/tags/* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/}"
-          else
-            SHORT=$(git rev-parse --short HEAD)
-            BRANCH=${GITHUB_REF_NAME,,}
-            VERSION="${BRANCH}-${SHORT}"
-          fi
-          VERSION="${VERSION//\//-}"
+          VERSION="${{ github.event.inputs.version }}"
           BUILDTIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "buildtime=$BUILDTIME" >> $GITHUB_OUTPUT
@@ -116,24 +118,7 @@ jobs:
             tresor-*.gz
           retention-days: 7
 
-  # ── 2. Run tests on Linux amd64 ───────────────────────────────────
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Run tests
-        run: |
-          go clean -testcache
-          go test ./...
-
-  # ── 3. Publish GitHub Release (workflow_dispatch only) ────────────
+  # ── Publish GitHub Release (release only) ─────────────────────────
   release:
     permissions:
       contents: write
