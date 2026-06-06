@@ -44,7 +44,7 @@ func (r *Router) handleAliases(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		r.writeConfig()
+		_ = r.writeConfig()
 		writeJSON(w, http.StatusCreated, alias)
 
 	default:
@@ -96,7 +96,7 @@ func (r *Router) handleAliasByID(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		r.writeConfig()
+		_ = r.writeConfig()
 
 		alias, err := r.store.GetAlias(id)
 		if err != nil {
@@ -110,7 +110,7 @@ func (r *Router) handleAliasByID(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		r.writeConfig()
+		_ = r.writeConfig()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 
 	default:
@@ -142,7 +142,7 @@ func (r *Router) handleAliasGroup(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	r.writeConfig()
+	_ = r.writeConfig()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "deleted", "count": n})
 }
 
@@ -153,7 +153,7 @@ func (r *Router) handleActivateAlias(w http.ResponseWriter, req *http.Request, i
 		return
 	}
 
-	r.writeConfig()
+	_ = r.writeConfig()
 
 	alias, err := r.store.GetAlias(id)
 	if err != nil {
@@ -182,17 +182,12 @@ func enrichAliasGroups(s *store.Store, groups []store.AliasGroup) {
 	}
 }
 
-// writeConfig triggers a best-effort YAML write-back after mutating the DB.
-// Runs async so it doesn't block the API response. Errors are logged only.
-func (r *Router) writeConfig() {
-	go func() {
-		defer func() {
-			if p := recover(); p != nil {
-				log.Printf("warning: panic during config YAML write-back: %v", p)
-			}
-		}()
-		if err := r.store.WriteConfig(r.cfg); err != nil {
-			log.Printf("warning: failed to write config YAML: %v", err)
-		}
-	}()
+// writeConfig triggers a synchronous YAML write-back after mutating the DB.
+// Errors are returned so callers can surface a warning in the API response.
+func (r *Router) writeConfig() error {
+	if err := r.store.WriteConfig(r.cfg); err != nil {
+		log.Printf("warning: failed to write config YAML: %v", err)
+		return err
+	}
+	return nil
 }
