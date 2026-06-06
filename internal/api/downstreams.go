@@ -47,7 +47,7 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		r.writeConfig()
+		_ = r.writeConfig()
 		ds.APIKey = "***"
 		writeJSON(w, http.StatusCreated, ds)
 
@@ -57,23 +57,62 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 }
 
 // handleDownstreamByID handles GET, PUT, DELETE on /api/downstreams/{id}
-// and model operations (/models, /fetch-models).
+// and sub-resource operations on /api/downstreams/{id}/models,
+// /api/downstreams/{id}/models/{model_id}, and /api/downstreams/{id}/fetch-models.
 func (r *Router) handleDownstreamByID(w http.ResponseWriter, req *http.Request) {
 	suffix := strings.TrimPrefix(req.URL.Path, "/api/downstreams/")
 
-	// --- Sub-resource paths: /{id}/models or /{id}/fetch-models ---
-	if strings.Contains(suffix, "/models") {
-		r.handleDownstreamModels(w, req)
-		return
-	}
-	if strings.Contains(suffix, "/fetch-models") {
-		r.handleDownstreamFetchModels(w, req)
+	// Parse suffix into segments: {id}[/models[/{model_id}]] or {id}[/fetch-models]
+	parts := strings.SplitN(suffix, "/", 3)
+
+	// Need at least the ID segment
+	if len(parts) < 1 || parts[0] == "" {
+		http.NotFound(w, req)
 		return
 	}
 
-	// --- Direct downstream operations: /{id} ---
-	id := suffix
+	id := parts[0]
+	subResource := ""
+	modelID := ""
+	if len(parts) >= 2 {
+		subResource = parts[1]
+	}
+	if len(parts) >= 3 {
+		modelID = parts[2]
+	}
 
+	switch {
+	case subResource == "models" && modelID == "":
+		// POST /api/downstreams/{id}/models (add a model)
+		if req.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		r.handleDownstreamModels(w, req, id, "")
+	case subResource == "models" && modelID != "":
+		// DELETE /api/downstreams/{id}/models/{model_id}
+		if req.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		r.handleDownstreamModels(w, req, id, modelID)
+	case subResource == "fetch-models":
+		// POST /api/downstreams/{id}/fetch-models
+		if req.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		r.handleDownstreamFetchModels(w, req, id)
+	case subResource == "":
+		// Direct downstream operations: /{id}
+		r.handleDownstreamByIDDirect(w, req, id)
+	default:
+		http.NotFound(w, req)
+	}
+}
+
+// handleDownstreamByIDDirect handles GET, PUT, DELETE on /api/downstreams/{id}.
+func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Request, id string) {
 	switch req.Method {
 	case http.MethodGet:
 		ds, err := r.store.GetDownstream(id)
@@ -105,7 +144,7 @@ func (r *Router) handleDownstreamByID(w http.ResponseWriter, req *http.Request) 
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		r.writeConfig()
+		_ = r.writeConfig()
 		ds.APIKey = "***"
 		writeJSON(w, http.StatusOK, ds)
 
@@ -114,7 +153,7 @@ func (r *Router) handleDownstreamByID(w http.ResponseWriter, req *http.Request) 
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		r.writeConfig()
+		_ = r.writeConfig()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 
 	default:
@@ -124,10 +163,7 @@ func (r *Router) handleDownstreamByID(w http.ResponseWriter, req *http.Request) 
 
 // handleDownstreamModels handles POST /api/downstreams/{id}/models (add) and
 // DELETE /api/downstreams/{id}/models/{model_id} (remove).
-func (r *Router) handleDownstreamModels(w http.ResponseWriter, req *http.Request) {
-	parts := strings.SplitN(strings.TrimPrefix(req.URL.Path, "/api/downstreams/"), "/", 3)
-	id := parts[0]
-
+func (r *Router) handleDownstreamModels(w http.ResponseWriter, req *http.Request, id, modelID string) {
 	// Validate downstream exists
 	ds, err := r.store.GetDownstream(id)
 	if err != nil {
@@ -135,9 +171,8 @@ func (r *Router) handleDownstreamModels(w http.ResponseWriter, req *http.Request
 		return
 	}
 
-	switch req.Method {
-	case http.MethodPost:
-		// Add a single model ID: POST /api/downstreams/{id}/models {"model_id": "gpt-4o-mini"}
+	if modelID == "" {
+		// POST — Add a single model ID
 		var body struct {
 			ModelID string `json:"model_id"`
 		}
@@ -153,51 +188,28 @@ func (r *Router) handleDownstreamModels(w http.ResponseWriter, req *http.Request
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		ds, err = r.store.GetDownstream(id)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-	case http.MethodDelete:
-		// Remove a single model ID: DELETE /api/downstreams/{id}/models/{model_id}
-		if len(parts) < 3 || parts[2] == "" {
-			writeError(w, http.StatusBadRequest, "model_id is required in path")
-			return
-		}
-		modelID := parts[2]
+	} else {
+		// DELETE — Remove a single model ID
 		if err := r.store.RemoveOutputModelID(id, modelID); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		ds, err = r.store.GetDownstream(id)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
 
+	ds, err = r.store.GetDownstream(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if ds.APIKey != "" {
 		ds.APIKey = "***"
 	}
-	r.writeConfig()
+	_ = r.writeConfig()
 	writeJSON(w, http.StatusOK, ds)
 }
 
 // handleDownstreamFetchModels handles POST /api/downstreams/{id}/fetch-models.
-func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	parts := strings.SplitN(strings.TrimPrefix(req.URL.Path, "/api/downstreams/"), "/", 2)
-	id := parts[0]
-
+func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Request, id string) {
 	ds, err := r.store.GetDownstream(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
@@ -226,7 +238,7 @@ func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Re
 	if ds.APIKey != "" {
 		ds.APIKey = "***"
 	}
-	r.writeConfig()
+	_ = r.writeConfig()
 	writeJSON(w, http.StatusOK, ds)
 }
 
