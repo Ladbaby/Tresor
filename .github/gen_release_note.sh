@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Generate categorized release notes from conventional commit messages.
 # Usage: ./gen_release_note.sh -v v0.1.0...v0.2.0
+#        ./gen_release_note.sh -v "...v0.1.0"   (first release, no previous tag)
 #
-# Writes release.md to stdout. Sections: What's Changed, Bug Fixes, Maintenance.
+# Writes release.md. Sections: What's Changed, Bug Fixes, Maintenance.
 
 set -euo pipefail
 
@@ -21,7 +22,18 @@ if [ -z "$version_range" ]; then
   exit 1
 fi
 
-REPO="https://github.com/${GITHUB_REPOSITORY}"
+# Parse prev and curr from the range string (split on ...)
+IFS='...' read -r prev curr <<< "$version_range"
+
+REPO="https://github.com/${GITHUB_REPOSITORY:-tresor/tresor}"
+
+# For first release (no prev), use the tag directly instead of A...B range.
+# git log <single-tag> lists all commits reachable from that tag.
+if [ -z "$prev" ]; then
+  LOG_RANGE="$curr"
+else
+  LOG_RANGE="${prev}...${curr}"
+fi
 
 {
   echo "# What's New"
@@ -30,22 +42,25 @@ REPO="https://github.com/${GITHUB_REPOSITORY}"
   # ── Features ──────────────────────────────────────────────────────
   echo "## :rocket: What's Changed"
   echo ""
-  git log --pretty="* %h %s by @%an" --grep="^feat" -i "$version_range" | sort -f | uniq
+  git log --pretty="* %h %s by @%an" --grep="^feat" -i "$LOG_RANGE" | sort -f | uniq
   echo ""
 
   # ── Bug fixes ─────────────────────────────────────────────────────
   echo "## :bug: Bug Fixes"
   echo ""
-  git log --pretty="* %h %s by @%an" --grep="^fix" -i "$version_range" | sort -f | uniq
+  git log --pretty="* %h %s by @%an" --grep="^fix" -i "$LOG_RANGE" | sort -f | uniq
   echo ""
 
   # ── Maintenance ───────────────────────────────────────────────────
   echo "## :wrench: Maintenance"
   echo ""
-  git log --pretty="* %h %s by @%an" --grep="^ci\|^chore\|^docs\|^refactor\|^test" -i "$version_range" | sort -f | uniq
+  git log --pretty="* %h %s by @%an" --grep="^ci\|^chore\|^docs\|^refactor\|^test" -i "$LOG_RANGE" | sort -f | uniq
   echo ""
 
   # ── Footer ────────────────────────────────────────────────────────
-  IFS='...' read -r prev curr <<< "$version_range"
-  echo "**Full Changelog**: ${REPO}/compare/${prev}...${curr}"
+  if [ -n "$prev" ]; then
+    echo "**Full Changelog**: ${REPO}/compare/${prev}...${curr}"
+  else
+    echo "**Full Changelog**: ${REPO}/releases/tag/${curr}"
+  fi
 } > release.md
