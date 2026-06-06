@@ -7,6 +7,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Build-time metadata (injected via -ldflags)
+var (
+	Version   = "unknown"
+	BuildTime = "unknown"
+)
+
 var cfgFile string
 
 var rootCmd = &cobra.Command{
@@ -15,6 +21,9 @@ var rootCmd = &cobra.Command{
 	Long: `Tresor is an LLM traffic interception and routing engine.
 It sits between client applications and LLM providers, transforming
 requests and responses via a configurable plugin pipeline.`,
+	Run: func(_ *cobra.Command, _ []string) {
+		fmt.Fprintf(os.Stderr, "Usage: tresor <command> [flags]\n\nRun 'tresor --help' for available commands.\n")
+	},
 }
 
 func Execute() {
