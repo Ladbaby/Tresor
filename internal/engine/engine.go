@@ -421,8 +421,8 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 		if strings.HasPrefix(line, "event: ") {
 			eventLine = strings.TrimPrefix(line, "event: ")
-			w.Write([]byte(line + "\n"))
-			flusher.Flush()
+			// Don't write the event line here — flushEvent will emit it
+			// as part of the complete SSE event after data lines are collected.
 			continue
 		}
 
