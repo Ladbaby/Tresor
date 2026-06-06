@@ -1,0 +1,95 @@
+# Tresor Configuration
+# Copy this to config.yaml and customize for your setup.
+
+# Server settings
+bind_addr: "127.0.0.1:11510"
+socket_path: "/tmp/tresor.sock"   # Optional Unix Domain Socket (admin API only)
+db_path: "./tresor.db"             # SQLite database path (~ expands to home dir)
+admin_password: "admin"               # Optional Bearer token for admin API auth
+proxy_api_keys:                        # Optional: require clients to authenticate
+  - sk-proxy-123                       # Clients send "Authorization: Bearer sk-proxy-123"
+
+# Outbound proxy mode for downstream requests.
+# "auto" (default): Windows system proxy > env vars (HTTP_PROXY/HTTPS_PROXY) > direct
+# "env": Environment variables only
+# "windows": Windows registry proxy + env fallback
+# "none": Direct connection, no proxy
+proxy_mode: "auto"
+
+# Default dashboard tab on page load or refresh.
+# Values: downstreams, aliases, rules, plugins, settings
+default_tab: "downstreams"
+
+# Downstream LLM providers
+downstreams:
+  - id: openai
+    name: OpenAI
+    base_url: https://api.openai.com/v1
+    api_key: ""                          # Set your API key here, e.g. sk-...
+    output_model_ids:                    # Known output models for this provider
+      - gpt-4o
+      - gpt-4o-mini
+      - gpt-3.5-turbo
+
+  - id: anthropic
+    name: Anthropic
+    base_url: https://api.anthropic.com
+    api_key: ""                          # Set your API key here
+    output_model_ids:                    # Known output models for this provider
+      - claude-sonnet-4-20250514
+      - claude-haiku-4.5
+
+# Routing rules (OPTIONAL) — customize forwarding with transforms and overrides.
+# Rules are NOT required for normal forwarding: model resolution uses aliases and
+# downstream output_model_ids automatically. Rules only add plugin pipelines and can
+# optionally override the resolved downstream when no alias exists.
+#
+# Uncomment to enable optional rules:
+# rules:
+#   - id: default
+#     name: Default Route
+#     pattern_path: "*"                    # Catch-all for unmatched paths
+#     active_downstream: openai
+#     pipeline_config: []                  # No transformation
+#     is_enabled: true
+
+# Example: Route OpenAI chat completions through a custom header transformer
+#  - id: chat-custom-header
+#    name: Chat with Custom Header
+#    pattern_path: /v1/chat/completions
+#    active_downstream: openai
+#    pipeline_config:
+#      - plugin_id: custom_header
+#        config:
+#          headers:
+#            X-Custom-Header: my-value
+#    is_enabled: true
+
+# Example: Translate OpenAI format to Anthropic for a specific model
+#  - id: chat-anthropic
+#    name: Chat Completions -> Anthropic
+#    pattern_path: /v1/chat/completions
+#    pattern_model: claude-sonnet        # Only matches this model
+#    active_downstream: anthropic
+#    pipeline_config:
+#      - plugin_id: openai2anthropic     # Transforms OpenAI -> Anthropic format
+#    is_enabled: true
+
+# Model aliases — group by input model, list output options
+# The FIRST option in each group is the active one (is_active managed by DB only)
+aliases:
+  - input_model_id: gpt-4o
+    options:
+      - id: alias-gpt4o-openai
+        downstream_id: openai
+        output_model_id: gpt-4o          # Active (first in list)
+
+      - id: alias-gpt4o-anthropic
+        downstream_id: anthropic
+        output_model_id: claude-sonnet-4-20250514
+
+  - input_model_id: claude-sonnet
+    options:
+      - id: alias-sonnet-anthropic
+        downstream_id: anthropic
+        output_model_id: claude-sonnet-4-20250514
