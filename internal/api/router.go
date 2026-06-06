@@ -33,9 +33,13 @@ func NewRouter(s *store.Store, eng *engine.Engine, cfg *config.AppConfig) *Route
 func (r *Router) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Auth endpoints — status is public, login verifies password
+	// Public endpoints — no auth required
 	mux.HandleFunc("/api/auth/status", r.handleAuthStatus)
 	mux.HandleFunc("/api/auth/login", r.handleAuthLogin)
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
 
 	// Protected admin routes
 	protected := r.authMW.Protect(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -59,9 +63,6 @@ func (r *Router) Handler() http.Handler {
 			r.handleAliasByID(w, req)
 		case path == "plugins":
 			r.handlePlugins(w, req)
-		case path == "health":
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		case path == "config":
 			r.handleConfig(w, req)
 		default:
@@ -77,7 +78,6 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/aliases", protected)
 	mux.Handle("/api/aliases/", protected)
 	mux.Handle("/api/plugins", protected)
-	mux.Handle("/api/health", protected)
 	mux.Handle("/api/config", protected)
 
 	return mux
