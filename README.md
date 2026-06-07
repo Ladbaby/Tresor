@@ -73,18 +73,44 @@ Tresor is a single binary with two modes:
 
 > Warning: the program is heavily vibe-coded, but the author has tried the best to follow software engineering practices to ensure its quality. Use with caution.
 
+### Install
+
+**Linux / macOS** — download the latest release with one command:
+
 ```bash
-# Build (requires Go 1.26+)
-go build -o tresor.exe .
-
-# Copy the example config. Change bind_addr to 0.0.0.0:11510 if you want public access. You can configure the rest settings via the web UI later.
-cp config.example.yaml config.yaml
-
-# Start the server. Default password for web UI is admin, and default inbound API key is sk-proxy-123
-/path/to/tresor run --config /path/to/config.yaml
+curl -fsSL https://raw.githubusercontent.com/Ladbaby/Tresor/main/setup.sh | bash
 ```
 
-That's it. Point your LLM apps to the value of `bind_addr` in `config.yaml`, and Tresor handles the rest.
+This installs the binary to `~/.local/bin/tresor` and creates a config skeleton at `~/.config/tresor/config.yaml`.
+
+**Windows** — download a release binary manually from [GitHub Releases](https://github.com/Ladbaby/Tresor/releases).
+
+### Configure
+
+- Option 1: Configure later via web UI.
+- Option 2: Edit `~/.config/tresor/config.yaml`.
+
+> Change bind_addr to 0.0.0.0:11510 if you want the server to be publicly available.
+
+### Start
+
+```bash
+# Start the daemon
+tresor run --config ~/.config/tresor/config.yaml
+
+# Point your LLM apps to: http://127.0.0.1:11510
+# Open the web UI: http://127.0.0.1:11510 in your browser
+```
+
+### Build from Source
+
+For developers or unsupported platforms (requires Go 1.26+):
+
+```bash
+go build -o tresor .
+```
+
+See the [Installation](https://ladbaby.github.io/tresor-docs/docs/user/getting-started/installation) docs for full instructions.
 
 ## 📚 Documentation
 
@@ -92,7 +118,7 @@ Full documentation is available at **[ladbaby.github.io/tresor-docs/](https://la
 
 ### 👤 For Users
 - [🏠 Introduction](https://ladbaby.github.io/tresor-docs/docs/user/intro) — overview and architecture
-- [📦 Installation & Quick Start](https://ladbaby.github.io/tresor-docs/docs/user/getting-started/installation) — build, configure, run
+- [📦 Installation & Quick Start](https://ladbaby.github.io/tresor-docs/docs/user/getting-started/installation) — install from release or source, configure, run
 - [⚙️ Configuration Basics](https://ladbaby.github.io/tresor-docs/docs/user/configuration/basics) — YAML config file reference
 - [🔗 Downstreams](https://ladbaby.github.io/tresor-docs/docs/user/configuration/downstreams) — configure LLM provider endpoints
 - [📏 Rules](https://ladbaby.github.io/tresor-docs/docs/user/configuration/rules) — define routing rules with transform pipelines
