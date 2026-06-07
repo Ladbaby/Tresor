@@ -17,26 +17,17 @@ The LLM landscape moves fast. Today you're on OpenAI, tomorrow you want to try A
 
 Tresor solves this by sitting between your apps and LLM providers as a transparent proxy. **Your application never knows the backend changed.**
 
-### How Tresor Compares
+### The Problem: Switching Providers at Scale
 
-| | **Tresor** | [**cc-switch**](https://github.com/farion1231/cc-switch) | [**LiteLLM**](https://github.com/BerriAI/litellm) |
-|---|---|---|---|
-| **What it is** | HTTP proxy + format translator for LLM API traffic | Desktop app that manages config files for AI coding tools (Claude Code, Codex, Gemini CLI, etc.) | Full-featured AI gateway platform (proxy + SDK + dashboard) |
-| **Who it's for** | Anyone running apps that call LLM APIs — developers, power users, small teams | Developers who use multiple AI coding assistants and want a unified config UI | ML Platform teams managing LLM access at enterprise scale |
-| **Size** | ~1,000 lines of Go | ~40,000 lines (Rust + TypeScript) | ~200,000+ lines (Python + TypeScript) |
-| **Runtime** | Single compiled binary, zero dependencies | Tauri desktop app (requires install) | Python runtime + optional Docker deploy + database |
-| **Setup time** | 5 minutes: build, write YAML config, start | Install app, import presets, restart CLI tools | `pip install`, configure, optionally deploy as a service |
-| **Format translation** | OpenAI ↔ Anthropic (built-in) | Proxy mode with format conversion for coding tools | 100+ providers, auto-detects and translates formats |
-| **Hot-switching** | Yes — switch backends instantly via web UI or CLI without restarting anything | Partial — requires terminal restart for most tools (except Claude Code) | Via virtual key reconfiguration or dashboard |
-| **Cost tracking** | No (not the focus) | No | Yes — spend limits, usage dashboards, billing alerts |
-| **Guardrails / safety** | No | No | Yes — input/output filtering, PII detection |
-| **Self-hosted** | Yes — runs on any machine, no cloud needed | Local desktop app only | Self-hosted or SaaS (enterprise features behind paid tier) |
+Imagine you have agents on three machines, all calling OpenAI. You want to switch them to Anthropic.
 
-**Tresor picks a different spot:** smaller than LiteLLM, more flexible than cc-switch. It's a focused tool for one job — routing and transforming LLM traffic — done right with minimal overhead.
+| Tool | What Happens |
+|------|-------------|
+| **cc-switch** | Install it on every machine, then switch each one individually. Restart most tools for changes to take effect. |
+| **LiteLLM** | Deploy the proxy, define model aliases, and reconfigure downstream mappings — a heavy setup for a simple switch. |
+| **Tresor** | Run it once on any reachable machine. Point all agents to it. Switch providers with one click in the web UI — every agent sees the change instantly. |
 
-- **Don't need** enterprise features (billing, guardrails, 100 providers)? Tresor is lighter and simpler than LiteLLM.
-- **Don't want** to restart your tools after switching providers? Tresor hot-switches without any restart.
-- **Want something that runs anywhere?** Single binary, no runtime, no install — just `./tresor run`.
+**One proxy. One config. One click.** That's Tresor.
 
 ---
 
