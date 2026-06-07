@@ -5,6 +5,7 @@ notes.md
 *.db-shm
 *.exe
 *.exe~
+cmd/version_gen.go
 .vscode/
 .idea/
 *.pyc

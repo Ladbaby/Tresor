@@ -7,10 +7,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Build-time metadata (injected via -ldflags)
+// Build-time metadata (injected via -ldflags or go generate)
+//
+// These defaults are overridden at build time. For CI builds, use -ldflags.
+// For local dev builds, run `go generate ./cmd` first (see generate.sh).
 var (
-	Version   = "unknown"
-	BuildTime = "unknown"
+	Version   = "dev"
+	BuildTime = "dev"
 )
 
 var cfgFile string
