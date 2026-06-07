@@ -24,7 +24,7 @@
 - **One config**: All LLM apps do not need to reconfigure their LLM providers.
 - **One click**: LLM provider switch via alias buttons in web UI.
 
-||Tresor|[cc-switch](https://github.com/farion1231/cc-switch)|[LiteLLM](https://github.com/BerriAI/litellm)
+||Tresor (Ours)|[cc-switch](https://github.com/farion1231/cc-switch)|[LiteLLM](https://github.com/BerriAI/litellm)
 |---|---|---|---|
 |One gateway|✅|❌(install on every PC)|✅|
 |One config|✅|✅|✅|
