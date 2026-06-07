@@ -46,7 +46,7 @@ ARCH=$(uname -m)
 case "$OS" in
     linux)  OS_PKG="linux" ;;
     darwin) OS_PKG="darwin" ;;
-    *)      fail "Unsupported platform: $OS ($(uname -a)). This script only supports Linux and macOS.\nFor other platforms, please build from source: https://ladbaby.github.io/tresor-docs/docs/user/getting-started/installation" ;;
+    *)      fail "Unsupported platform: $OS ($(uname -a)). This script only supports Linux and macOS.\nFor other platforms, please build from source: https://ladbaby.github.io/Tresor-docs/docs/user/getting-started/installation" ;;
 esac
 
 case "$ARCH" in
