@@ -102,6 +102,46 @@ tresor run --config ~/.config/tresor/config.yaml
 # Open the web UI: http://127.0.0.1:11510 in your browser
 ```
 
+### Run as Systemd Service (Linux)
+
+Run Tresor as a user-level systemd service — no `sudo` needed, auto-starts on login:
+
+```bash
+# 1. Create the user service unit
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/tresor.service << EOF
+[Unit]
+Description=Tresor LLM Gateway
+
+[Service]
+Type=simple
+ExecStart=$HOME/.local/bin/tresor run --config $HOME/.config/tresor/config.yaml
+WorkingDirectory=$HOME/.config/tresor
+Restart=on-failure
+RestartSec=5
+
+# Environment (uncomment as needed)
+# Environment=HTTP_PROXY=http://proxy.example.com:8080
+# Environment=HTTPS_PROXY=http://proxy.example.com:8080
+
+[Install]
+WantedBy=default.target
+EOF
+
+# 2. Enable and start the service
+#    (--user creates a service under your user session)
+systemctl --user daemon-reload
+systemctl --user enable --now tresor.service
+
+# 3. Check status
+systemctl --user status tresor
+
+# View logs
+journalctl --user -u tresor -f
+```
+
+> **Note:** If you installed Tresor to a different path, update `ExecStart` and `WorkingDirectory` accordingly.
+
 ### Build from Source
 
 For developers or unsupported platforms (requires Go 1.26+):
