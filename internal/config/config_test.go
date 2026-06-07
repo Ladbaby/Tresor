@@ -18,8 +18,8 @@ func TestLoad_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.BindAddr != "127.0.0.1:8080" {
-		t.Fatalf("expected default bind 127.0.0.1:8080, got %q", cfg.BindAddr)
+	if cfg.BindAddr != "127.0.0.1:11510" {
+		t.Fatalf("expected default bind 127.0.0.1:11510, got %q", cfg.BindAddr)
 	}
 	if cfg.SocketPath != "" {
 		t.Fatalf("expected empty socket path, got %q", cfg.SocketPath)
@@ -195,7 +195,7 @@ func TestLoad_AutoDetect(t *testing.T) {
 func TestLoad_EmptySlicesNotNil(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	cfgContent := `bind_addr: 127.0.0.1:8080`
+	cfgContent := `bind_addr: 127.0.0.1:11510`
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

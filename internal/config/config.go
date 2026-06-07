@@ -106,7 +106,7 @@ func Load(configPath string) (*AppConfig, error) {
 
 	// Apply defaults for required fields
 	if cfg.BindAddr == "" {
-		cfg.BindAddr = "127.0.0.1:8080"
+		cfg.BindAddr = "127.0.0.1:11510"
 	}
 	if cfg.ProxyMode == "" {
 		cfg.ProxyMode = "auto"

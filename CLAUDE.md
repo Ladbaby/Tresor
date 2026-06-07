@@ -23,7 +23,7 @@ To get started: `cp config.example.yaml config.yaml`, then edit as needed.
 ### YAML Structure
 
 ```yaml
-bind_addr: "127.0.0.1:8080"          # TCP address for gateway
+bind_addr: "127.0.0.1:11510"         # TCP address for gateway
 socket_path: "/tmp/tresor.sock"  # Optional Unix socket (admin only)
 db_path: "./tresor.db"          # SQLite database path
 admin_password: "secret"              # Optional Bearer token auth

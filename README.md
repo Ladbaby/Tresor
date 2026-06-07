@@ -2,7 +2,7 @@
 
 # Tresor
 
-> **A single-binary LLM gateway empowering switch providers at scale with one click.**
+> **A single-binary LLM gateway for switching providers at scale with one click.**
 
 **One gateway, One config, One click**
 
@@ -83,10 +83,10 @@ cp config.example.yaml config.yaml
 # Start the daemon
 ./tresor.exe run --config config.yaml
 
-# Open http://127.0.0.1:8080 in your browser for the web UI
+# Open http://127.0.0.1:11510 in your browser for the web UI
 ```
 
-That's it. Point your application to `http://127.0.0.1:8080` and Tresor handles the rest.
+That's it. Point your application to `http://127.0.0.1:11510` and Tresor handles the rest.
 
 
 ## 📚 Documentation
