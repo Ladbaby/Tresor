@@ -76,6 +76,8 @@ func (s *Store) migrate() error {
 			model_id      TEXT NOT NULL,
 			PRIMARY KEY (downstream_id, model_id)
 		)`,
+		// Migration: add api_format column to downstreams table
+		`ALTER TABLE downstreams ADD COLUMN api_format TEXT DEFAULT ''`,
 	}
 
 	for _, q := range queries {
@@ -99,13 +101,13 @@ func (s *Store) SeedDefaults() error {
 	}
 
 	type defaultDS struct {
-		ID, Name, BaseURL, APIKey string
-		Models                     []string
+		ID, Name, BaseURL, APIKey, ApiFormat string
+		Models                                []string
 	}
 	defaults := []defaultDS{
-		{"openai-gpt4o", "OpenAI GPT-4o", "https://api.openai.com/v1", "", []string{"gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"}},
-		{"anthropic-sonnet", "Anthropic Claude Sonnet", "https://api.anthropic.com", "", []string{"claude-sonnet-4-20250514"}},
-		{"anthropic-haiku", "Anthropic Claude Haiku", "https://api.anthropic.com", "", []string{"claude-haiku-4.5"}},
+		{"openai-gpt4o", "OpenAI GPT-4o", "https://api.openai.com/v1", "", "openai", []string{"gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"}},
+		{"anthropic-sonnet", "Anthropic Claude Sonnet", "https://api.anthropic.com", "", "anthropic", []string{"claude-sonnet-4-20250514"}},
+		{"anthropic-haiku", "Anthropic Claude Haiku", "https://api.anthropic.com", "", "anthropic", []string{"claude-haiku-4.5"}},
 	}
 
 	tx, err := s.db.Begin()
@@ -114,7 +116,7 @@ func (s *Store) SeedDefaults() error {
 	}
 	defer tx.Rollback()
 
-	stmtDS, err := tx.Prepare("INSERT INTO downstreams (id, name, base_url, api_key) VALUES (?, ?, ?, ?)")
+	stmtDS, err := tx.Prepare("INSERT INTO downstreams (id, name, base_url, api_key, api_format) VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
@@ -127,7 +129,7 @@ func (s *Store) SeedDefaults() error {
 	defer stmtModel.Close()
 
 	for _, d := range defaults {
-		if _, err := stmtDS.Exec(d.ID, d.Name, d.BaseURL, d.APIKey); err != nil {
+		if _, err := stmtDS.Exec(d.ID, d.Name, d.BaseURL, d.APIKey, d.ApiFormat); err != nil {
 			return fmt.Errorf("seed downstream %s: %w", d.ID, err)
 		}
 		for _, m := range d.Models {

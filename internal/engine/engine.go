@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 
 	"tresor/internal/proxy"
@@ -259,10 +260,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// Build pipeline context
 	ctx := &PipelineContext{
 		TargetDownstream: &Downstream{
-			ID:      ds.ID,
-			Name:    ds.Name,
-			BaseURL: ds.BaseURL,
-			APIKey:  ds.APIKey,
+			ID:        ds.ID,
+			Name:      ds.Name,
+			BaseURL:   ds.BaseURL,
+			APIKey:    ds.APIKey,
+			ApiFormat: ds.ApiFormat,
 		},
 		Variables: make(map[string]interface{}),
 	}
@@ -278,6 +280,33 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error building pipeline: %v", err)
 		http.Error(w, "pipeline error", http.StatusInternalServerError)
 		return
+	}
+
+	// Auto-translation: detect input format from request path, compare with downstream format
+	inputFormat := detectInputFormat(r.URL.Path)
+	if inputFormat != "" && ds.ApiFormat != "" && inputFormat != ds.ApiFormat {
+		pluginID := "openai2anthropic"
+		typeName := "OpenAI2Anthropic"
+		if inputFormat == "anthropic" {
+			pluginID = "anthropic2openai"
+			typeName = "Anthropic2OpenAI"
+		}
+		transformer, err := e.registry.CreatePlugin(pluginID, nil)
+		if err != nil {
+			log.Printf("Error creating auto-translation plugin %s: %v", pluginID, err)
+		} else {
+			// Prepend request transformer (convert first), append response/stream transformers (convert last)
+			if reqT, ok := transformer.(RequestTransformer); ok && !pluginInList(pipeline.RequestSteps, typeName) {
+				pipeline.RequestSteps = append([]RequestTransformer{reqT}, pipeline.RequestSteps...)
+			}
+			if respT, ok := transformer.(ResponseTransformer); ok && !pluginInListResp(pipeline.ResponseSteps, typeName) {
+				pipeline.ResponseSteps = append(pipeline.ResponseSteps, respT)
+			}
+			if streamT, ok := transformer.(StreamResponseTransformer); ok && !pluginInListStream(pipeline.StreamResponseSteps, typeName) {
+				pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, streamT)
+			}
+			log.Printf("Auto-translating %s → %s via %s (downstream: %s)", inputFormat, ds.ApiFormat, pluginID, ds.ID)
+		}
 	}
 
 	// Execute request transformers (use currentBody which may have been rewritten by alias)
@@ -532,6 +561,49 @@ func rewriteModelInBody(body []byte, outputModel string) []byte {
 		return body // marshal failed, return original
 	}
 	return newBody
+}
+
+// detectInputFormat determines the API format of an incoming request based on its URL path.
+// Returns "openai" for /v1/chat/completions, "anthropic" for /v1/messages, or "" for unknown paths.
+func detectInputFormat(path string) string {
+	switch path {
+	case "/v1/chat/completions":
+		return "openai"
+	case "/v1/messages":
+		return "anthropic"
+	default:
+		return ""
+	}
+}
+
+// pluginInList checks if a transformer with the given type name is already in the request pipeline.
+func pluginInList(transformers []RequestTransformer, typeName string) bool {
+	for _, t := range transformers {
+		if reflect.TypeOf(t).Name() == typeName {
+			return true
+		}
+	}
+	return false
+}
+
+// pluginInListResp checks if a transformer with the given type name is already in the response pipeline.
+func pluginInListResp(transformers []ResponseTransformer, typeName string) bool {
+	for _, t := range transformers {
+		if reflect.TypeOf(t).Name() == typeName {
+			return true
+		}
+	}
+	return false
+}
+
+// pluginInListStream checks if a transformer with the given type name is already in the stream pipeline.
+func pluginInListStream(transformers []StreamResponseTransformer, typeName string) bool {
+	for _, t := range transformers {
+		if reflect.TypeOf(t).Name() == typeName {
+			return true
+		}
+	}
+	return false
 }
 
 // handleModels responds to GET /v1/models with an aggregated model list from

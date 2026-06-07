@@ -24,6 +24,7 @@ default_tab: "downstreams"
 downstreams:
   - id: openai
     name: OpenAI
+    api_format: openai
     base_url: https://api.openai.com/v1
     api_key: ""                          # Set your API key here, e.g. sk-...
     output_model_ids:                    # Known output models for this provider
@@ -33,6 +34,7 @@ downstreams:
 
   - id: anthropic
     name: Anthropic
+    api_format: anthropic
     base_url: https://api.anthropic.com
     api_key: ""                          # Set your API key here
     output_model_ids:                    # Known output models for this provider

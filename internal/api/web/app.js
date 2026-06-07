@@ -598,12 +598,16 @@ async function loadDownstreams() {
     try {
         const ds = await api('/downstreams');
         tbody.innerHTML = ds.length === 0
-            ? '<tr><td colspan="5" class="loading">No downstreams configured</td></tr>'
+            ? '<tr><td colspan="6" class="loading">No downstreams configured</td></tr>'
             : ds.map(d => {
                 const models = (d.output_model_ids || []).map(m => esc(m));
+                const formatClass = d.api_format === 'openai' ? 'format-openai' :
+                                     d.api_format === 'anthropic' ? 'format-anthropic' : 'format-unknown';
+                const formatLabel = d.api_format ? d.api_format.charAt(0).toUpperCase() + d.api_format.slice(1) : '—';
                 return `
                 <tr>
                     <td><strong>${esc(d.name)}</strong></td>
+                    <td><span class="format-badge ${formatClass}">${esc(formatLabel)}</span></td>
                     <td><code>${esc(d.base_url)}</code></td>
                     <td><code>${esc(maskKey(d.api_key))}</code></td>
                     <td>
@@ -617,7 +621,7 @@ async function loadDownstreams() {
                 </tr>`;
             }).join('');
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="5" class="loading">Error: ${esc(err.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="loading">Error: ${esc(err.message)}</td></tr>`;
     }
 }
 
@@ -632,6 +636,7 @@ function openDownstreamModal(ds) {
     document.getElementById('downstream-id').value = ds ? ds.id : '';
     document.getElementById('downstream-name').value = ds ? ds.name : '';
     document.getElementById('downstream-url').value = ds ? ds.base_url : '';
+    document.getElementById('downstream-format').value = ds ? (ds.api_format || '') : '';
     var keyInput = document.getElementById('downstream-key');
     keyInput.value = '';
 
@@ -736,6 +741,7 @@ document.getElementById('downstream-form').addEventListener('submit', async (e) 
         name: document.getElementById('downstream-name').value,
         base_url: document.getElementById('downstream-url').value,
         api_key: document.getElementById('downstream-key').value,
+        api_format: document.getElementById('downstream-format').value,
     };
 
     // Collect model IDs from the editor

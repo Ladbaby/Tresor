@@ -12,18 +12,19 @@ import (
 
 // Downstream represents a target endpoint or model provider.
 type Downstream struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	BaseURL        string   `json:"base_url"`
-	APIKey         string   `json:"api_key,omitempty"`
-	OutputModelIDs []string `json:"output_model_ids,omitempty"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	BaseURL        string    `json:"base_url"`
+	APIKey         string    `json:"api_key,omitempty"`
+	ApiFormat      string    `json:"api_format"`
+	OutputModelIDs []string  `json:"output_model_ids,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
 // ListDownstreams returns all downstreams with their output model IDs.
 func (s *Store) ListDownstreams() ([]Downstream, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_key, created_at FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_key, api_format, created_at FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list downstreams: %w", err)
 	}
@@ -32,7 +33,7 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 	var ds []Downstream
 	for rows.Next() {
 		var d Downstream
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &d.ApiFormat, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		d.OutputModelIDs = s.listOutputModelIDs(d.ID)
@@ -45,8 +46,8 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 func (s *Store) GetDownstream(id string) (*Downstream, error) {
 	var d Downstream
 	err := s.db.QueryRow(
-		`SELECT id, name, base_url, api_key, created_at FROM downstreams WHERE id = ?`, id).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &d.CreatedAt)
+		`SELECT id, name, base_url, api_key, api_format, created_at FROM downstreams WHERE id = ?`, id).
+		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &d.ApiFormat, &d.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get downstream %s: %w", id, err)
 	}
@@ -67,8 +68,8 @@ func (s *Store) CreateDownstream(d *Downstream) error {
 	defer tx.Rollback()
 
 	_, err = tx.Exec(
-		`INSERT INTO downstreams (id, name, base_url, api_key) VALUES (?, ?, ?, ?)`,
-		d.ID, d.Name, d.BaseURL, d.APIKey)
+		`INSERT INTO downstreams (id, name, base_url, api_key, api_format) VALUES (?, ?, ?, ?, ?)`,
+		d.ID, d.Name, d.BaseURL, d.APIKey, d.ApiFormat)
 	if err != nil {
 		return fmt.Errorf("create downstream: %w", err)
 	}
@@ -98,8 +99,8 @@ func (s *Store) UpdateDownstream(d *Downstream) error {
 	defer tx.Rollback()
 
 	res, err := tx.Exec(
-		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ? WHERE id = ?`,
-		d.Name, d.BaseURL, d.APIKey, d.ID)
+		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_format = ? WHERE id = ?`,
+		d.Name, d.BaseURL, d.APIKey, d.ApiFormat, d.ID)
 	if err != nil {
 		return fmt.Errorf("update downstream: %w", err)
 	}
@@ -228,13 +229,13 @@ func (s *Store) ListAllModels() ([]string, error) {
 func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 	var d Downstream
 	err := s.db.QueryRow(
-		`SELECT d.id, d.name, d.base_url, d.api_key, d.created_at
+		`SELECT d.id, d.name, d.base_url, d.api_key, d.api_format, d.created_at
 		 FROM downstreams d
 		 JOIN output_model_ids o ON o.downstream_id = d.id
 		 WHERE o.model_id = ?
 		 ORDER BY d.created_at ASC
 		 LIMIT 1`, model).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &d.CreatedAt)
+		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &d.ApiFormat, &d.CreatedAt)
 	if err != nil {
 		if err.Error() == "sql: no rows in result set" {
 			return nil, nil
@@ -288,8 +289,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 
 		if exists {
 			if _, err := tx.Exec(
-				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ? WHERE id = ?",
-				d.Name, d.BaseURL, d.APIKey, d.ID); err != nil {
+				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_format = ? WHERE id = ?",
+				d.Name, d.BaseURL, d.APIKey, d.ApiFormat, d.ID); err != nil {
 				return fmt.Errorf("update downstream %s: %w", d.ID, err)
 			}
 			// Replace output_model_ids from YAML
@@ -311,8 +312,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 			}
 		} else {
 			if _, err := tx.Exec(
-				"INSERT INTO downstreams (id, name, base_url, api_key) VALUES (?, ?, ?, ?)",
-				d.ID, d.Name, d.BaseURL, d.APIKey); err != nil {
+				"INSERT INTO downstreams (id, name, base_url, api_key, api_format) VALUES (?, ?, ?, ?, ?)",
+				d.ID, d.Name, d.BaseURL, d.APIKey, d.ApiFormat); err != nil {
 				return fmt.Errorf("insert downstream %s: %w", d.ID, err)
 			}
 			if len(d.OutputModelIDs) > 0 {

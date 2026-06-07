@@ -24,13 +24,13 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	// --- Downstreams with output_model_ids ---
 	var downstreams []config.DownstreamCfg
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_key FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_key, api_format FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return fmt.Errorf("query downstreams: %w", err)
 	}
 	for rows.Next() {
 		var d config.DownstreamCfg
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &d.ApiFormat); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan downstream: %w", err)
 		}

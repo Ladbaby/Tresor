@@ -909,6 +909,23 @@ select option:checked {
     margin-right: 0.4rem;
 }
 
+/* Format badges */
+.format-badge {
+    display: inline-block;
+    padding: 0.15rem 0.55rem;
+    border-radius: 6px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    text-transform: uppercase;
+}
+.format-openai { background: #1c3d7a; color: #58a6ff; }
+.format-anthropic { background: #4a2d00; color: #d29922; }
+.format-unknown { background: var(--bg-tertiary); color: var(--text-secondary); }
+
+[data-theme="light"] .format-openai { background: #ddf0ff; color: #0969da; }
+[data-theme="light"] .format-anthropic { background: #fff8c2; color: #9e6a0c; }
+
 .model-list {
     list-style: none;
     margin: 0.3rem 0 0 0;

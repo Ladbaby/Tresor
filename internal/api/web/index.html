@@ -63,6 +63,7 @@
                         <thead>
                             <tr>
                                 <th>Name</th>
+                                <th>Format</th>
                                 <th>Base URL</th>
                                 <th>API Key</th>
                                 <th>Models</th>
@@ -70,7 +71,7 @@
                             </tr>
                         </thead>
                         <tbody id="downstreams-body">
-                            <tr><td colspan="5" class="loading">Loading...</td></tr>
+                            <tr><td colspan="6" class="loading">Loading...</td></tr>
                         </tbody>
                     </table>
 
@@ -84,6 +85,13 @@
                                 <label>Name: <input type="text" id="downstream-name" required></label>
                                 <label>Base URL: <input type="text" id="downstream-url" placeholder="https://api.openai.com/v1"></label>
                                 <label>API Key: <input type="password" id="downstream-key"></label>
+                                <label>API Format:
+                                    <select id="downstream-format">
+                                        <option value="">— Auto —</option>
+                                        <option value="openai">OpenAI</option>
+                                        <option value="anthropic">Anthropic</option>
+                                    </select>
+                                </label>
                                 <label>Output Model IDs:
                                     <div id="model-ids-container"></div>
                                     <button type="button" class="btn-small" id="btn-add-model-id" style="margin-top:0.3rem">+ Add Model</button>

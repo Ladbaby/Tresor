@@ -48,6 +48,7 @@ type DownstreamCfg struct {
 	Name           string   `yaml:"name"`
 	BaseURL        string   `yaml:"base_url"`
 	APIKey         string   `yaml:"api_key,omitempty"`
+	ApiFormat      string   `yaml:"api_format,omitempty"`
 	OutputModelIDs []string `yaml:"output_model_ids,omitempty"`
 }
 
