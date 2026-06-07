@@ -4,7 +4,7 @@
 
 > **A single-binary LLM gateway empowering switch providers at scale with one click.**
 
-<img src="images/logo_transparent.png" height=200>
+<img src="internal/api/web/logo.png" height=200>
 
 [![Go Version](https://img.shields.io/badge/Go-1.26-violet)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
@@ -24,9 +24,9 @@ Imagine you have agents on three machines, all calling OpenAI. You want to switc
 
 | Tool | What Happens |
 |------|-------------|
-| **cc-switch** | 😓 Install it on **every client machine**, then switch each one individually. |
-| **LiteLLM** | 😓 **Retype the name** of downstream models and providers for alias. |
-| **Tresor** | 😎 **Install once** on a public server, switch providers with **one click** in the web UI — every agent sees the change instantly. |
+| [cc-switch](https://github.com/farion1231/cc-switch) | 😓 Install it on **every client machine**, then switch each one individually. |
+| [LiteLLM](https://github.com/BerriAI/litellm) | 😓 **Retype the name** of downstream models and providers for alias. |
+| **Tresor** (Ours) | 😎 **Install once** on a public server, switch providers with **one click** in the web UI — every agent sees the change instantly. |
 
 **One gateway. One config. One click.** That's Tresor. 🎯
 
