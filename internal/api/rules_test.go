@@ -30,7 +30,7 @@ func newTestRouter(t *testing.T) *Router {
 
 	cfg := &config.AppConfig{DBPath: f.Name()}
 	eng := engine.New(s)
-	return NewRouter(s, eng, cfg)
+	return NewRouter(s, eng, cfg, "test", "unknown")
 }
 
 // --- New extended tests below ---

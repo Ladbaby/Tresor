@@ -17,15 +17,19 @@ type Router struct {
 	engine    *engine.Engine
 	cfg       *config.AppConfig
 	authMW    *middleware.AuthMiddleware
+	version   string
+	buildTime string
 }
 
 // NewRouter creates an admin API router with all API endpoints.
-func NewRouter(s *store.Store, eng *engine.Engine, cfg *config.AppConfig) *Router {
+func NewRouter(s *store.Store, eng *engine.Engine, cfg *config.AppConfig, version, buildTime string) *Router {
 	return &Router{
-		store:  s,
-		engine: eng,
-		cfg:    cfg,
-		authMW: middleware.NewAuthMiddleware(cfg.AdminPassword),
+		store:     s,
+		engine:    eng,
+		cfg:       cfg,
+		authMW:    middleware.NewAuthMiddleware(cfg.AdminPassword),
+		version:   version,
+		buildTime: buildTime,
 	}
 }
 
@@ -39,6 +43,13 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/api/version", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"version":   r.version,
+			"build_time": r.buildTime,
+		})
 	})
 
 	// Protected admin routes

@@ -38,6 +38,7 @@
                 <button class="tab" data-tab="rules">📋 Rules</button>
                 <button class="tab" data-tab="plugins">🧩 Plugins</button>
                 <button class="tab" data-tab="settings">⚙️ Settings</button>
+                <button class="tab" data-tab="about">ℹ️ About</button>
             </nav>
 
             <div class="sidebar-footer">
@@ -278,12 +279,45 @@
                                     <option value="rules">Rules</option>
                                     <option value="plugins">Plugins</option>
                                     <option value="settings">Settings</option>
+                                    <option value="about">About</option>
                                 </select>
                             </div>
                         </div>
 
                         <button id="btn-save-settings" class="btn-primary">Save Settings</button>
                         <span id="settings-status" class="settings-status"></span>
+                    </div>
+                </section>
+
+                <!-- About Tab -->
+                <section id="tab-about" class="tab-content">
+                    <div class="about-container">
+                        <div class="about-header">
+                            <img src="logo.png" alt="Tresor logo" class="about-logo"/>
+                            <h2>Tresor</h2>
+                            <p class="about-tagline">LLM Traffic Interception &amp; Routing Engine</p>
+                        </div>
+                        <div class="about-info">
+                            <div class="about-row">
+                                <span class="about-label">Version</span>
+                                <span id="about-version" class="about-value">loading...</span>
+                            </div>
+                            <div class="about-row">
+                                <span class="about-label">Build Time</span>
+                                <span id="about-build-time" class="about-value">—</span>
+                            </div>
+                        </div>
+                        <div class="about-links">
+                            <a href="https://github.com/Ladbaby/Tresor" target="_blank" rel="noopener noreferrer" class="about-link">
+                                📦 GitHub Repository
+                            </a>
+                            <a href="https://github.com/Ladbaby/Tresor/blob/main/README.md" target="_blank" rel="noopener noreferrer" class="about-link">
+                                📖 Documentation
+                            </a>
+                        </div>
+                        <div class="about-description">
+                            <p>Tresor sits between client applications and LLM providers (OpenAI, Anthropic, etc.), transforming requests and responses via a configurable plugin pipeline.</p>
+                        </div>
                     </div>
                 </section>
             </main>

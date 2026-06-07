@@ -1302,3 +1302,103 @@ select option:checked {
 #dashboard-view.hidden {
     display: none;
 }
+
+/* ============================================================
+   About Tab Styles
+   ============================================================ */
+
+.about-container {
+    max-width: 700px;
+}
+
+.about-header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+.about-logo {
+    height: 80px;
+    width: auto;
+    margin-bottom: 0.75rem;
+}
+
+.about-header h2 {
+    font-size: 1.6rem;
+    margin-bottom: 0.3rem;
+}
+
+.about-tagline {
+    color: var(--text-secondary);
+    font-size: 1rem;
+}
+
+.about-info {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.about-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+}
+
+.about-row + .about-row {
+    border-top: 1px solid var(--border-color);
+}
+
+.about-label {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.about-value {
+    color: var(--text-primary);
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.85rem;
+    text-align: right;
+}
+
+.about-links {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+}
+
+.about-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: all 0.15s;
+}
+
+.about-link:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--accent);
+}
+
+.about-description {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+}
+
+.about-description p {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    line-height: 1.6;
+}

@@ -24,13 +24,13 @@ const API_BASE = '/api';
 
 // ---- Tab switching ----
 /**
- * Activate a tab by its data-tab ID (e.g. "rules", "settings").
- * Falls back to "rules" if the tab is not found.
+ * Activate a tab by its data-tab ID (e.g. "rules", "settings", "about").
+ * Falls back to "downstreams" if the tab is not found.
  */
 function activateTab(tabId) {
     tabId = tabId || 'downstreams';
     var tabBtn = document.querySelector('.tab[data-tab="' + tabId + '"]');
-    if (!tabBtn) tabId = 'rules';
+    if (!tabBtn) tabId = 'downstreams';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
     tabBtn = document.querySelector('.tab[data-tab="' + tabId + '"]');
@@ -98,6 +98,7 @@ function showDashboard() {
     loadPlugins();
     loadAliasGroups();
     loadSettings();
+    loadAbout();
 }
 
 /**
@@ -110,7 +111,7 @@ async function showDashboardWithDefaultTab() {
         var cfg = await api('/config');
         activateTab(cfg.default_tab || 'downstreams');
     } catch {
-        activateTab('rules');
+        activateTab('downstreams');
     }
 }
 
@@ -1370,6 +1371,19 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
         statusEl.className = 'settings-status error';
     }
 });
+
+// ---- About ----
+
+async function loadAbout() {
+    try {
+        var data = await fetch(API_BASE + '/version').then(r => r.json());
+        document.getElementById('about-version').textContent = data.version || 'unknown';
+        document.getElementById('about-build-time').textContent = data.build_time || '—';
+    } catch {
+        document.getElementById('about-version').textContent = 'unknown';
+        document.getElementById('about-build-time').textContent = '—';
+    }
+}
 
 // ---- Init ----
 checkAuth();

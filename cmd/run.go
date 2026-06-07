@@ -76,7 +76,7 @@ func runDaemon(cfg *config.AppConfig) error {
 	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab)
 
 	// Build admin API router
-	adminRouter := api.NewRouter(s, eng, cfg)
+	adminRouter := api.NewRouter(s, eng, cfg, Version, BuildTime)
 	webHandler := api.WebHandler()
 
 	// Start listening
