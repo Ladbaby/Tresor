@@ -110,6 +110,11 @@ body {
     font-size: 1.4rem;
 }
 
+.brand-logo {
+    height: 50px;
+    width: auto;
+}
+
 .sidebar-nav {
     flex: 1;
     display: flex;

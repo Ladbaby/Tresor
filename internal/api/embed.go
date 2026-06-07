@@ -10,7 +10,7 @@ import (
 //go:embed web/*
 var webFS embed.FS
 
-// forceRecompile_20260605 ensures the embed is refreshed when web files change.
+// forceRecompile_20260607_logo ensures the embed is refreshed when web files change.
 const forceRecompile = true
 
 // WebHandler returns an http.Handler that serves the embedded web UI.
