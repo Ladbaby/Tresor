@@ -2,7 +2,7 @@
 
 # Tresor
 
-> **A lightweight LLM gateway for developers who want control, not complexity.**
+> **A single-binary LLM gateway empowering switch providers at scale with one click.**
 
 <img src="images/logo_transparent.png" height=200>
 
@@ -16,7 +16,7 @@
 
 The LLM landscape moves fast. Today you're on OpenAI, tomorrow you want to try Anthropic or a local model — but your application is locked into one provider's API format. Switching means rewriting code, updating SDKs, and potentially breaking things in production.
 
-Tresor solves this by sitting between your apps and LLM providers as a transparent gateway. **Your application never knows the backend changed.**
+Tresor solves this by sitting between your apps and LLM providers as a transparent gateway. Once pointing the API endpoint to Tresor, **all LLM apps do not need to reconfigure their LLM providers.**
 
 ### 🔄 The Problem: Switching Providers at Scale
 
@@ -24,9 +24,9 @@ Imagine you have agents on three machines, all calling OpenAI. You want to switc
 
 | Tool | What Happens |
 |------|-------------|
-| **cc-switch** | 😓 Install it on every machine, then switch each one individually. Restart most tools for changes to take effect. |
-| **LiteLLM** | 😓 Deploy the gateway, define model aliases, and reconfigure downstream mappings — a heavy setup for a simple switch. |
-| **Tresor** | 😎 Run it once on any reachable machine. Point all agents to it. Switch providers with one click in the web UI — every agent sees the change instantly. |
+| **cc-switch** | 😓 Install it on **every client machine**, then switch each one individually. |
+| **LiteLLM** | 😓 **Retype the name** of downstream models and providers for alias. |
+| **Tresor** | 😎 **Install once** on a public server, switch providers with **one click** in the web UI — every agent sees the change instantly. |
 
 **One gateway. One config. One click.** That's Tresor. 🎯
 
@@ -54,15 +54,17 @@ Tresor is a single binary with two modes:
 
 ### Key Capabilities
 
-- 🔄 **Protocol Translation** — Convert between OpenAI and Anthropic API formats transparently. Your app sends an OpenAI request; Tresor forwards it to Anthropic and converts the response back. No code changes needed.
 - ⚡ **Hot-Switch Models** — Map one model name to any backend model and switch on the fly. Your app requests `gpt-4o`; Tresor can route it to Claude Sonnet, Opus, or keep it on GPT-4o — all without restarting.
+- 🔄 **Protocol Translation** — Convert between OpenAI and Anthropic API formats transparently. Your app sends an OpenAI request; Tresor forwards it to Anthropic and converts the response back. No code changes needed.
+- 🔌 **Plugin Pipeline** — Chain transformation plugins per rule (header injection, compatibility fix, format conversion, and more).
 - 🛤️ **Per-Path Routing** — Route different API paths (and models) to different providers based on configurable rules.
-- 🔌 **Plugin Pipeline** — Chain transformation plugins per rule (header injection, format conversion, and more).
 - 🌐 **Embedded Web UI** — Manage everything from a browser dashboard. No separate frontend deployment.
 - 📝 **Single Config File** — All settings in one portable YAML file. Changes via the web UI write back automatically.
 
 
 ## 🚀 Getting Started
+
+> Warning: the program is heavily vibe-coded, but the author has tried his best to follow software engineering practices to ensure its quality. Use with caution.
 
 ```bash
 # Build (requires Go 1.26+)
@@ -107,6 +109,8 @@ Full documentation is available at **[ladbaby.github.io/tresor-docs/](https://la
 - [🤝 Contributing](https://ladbaby.github.io/tresor-docs/docs/dev/contributing) — how to contribute to Tresor
 
 
-## 📜 License
+## 📜 Acknowledgement
 
-MIT
+- [llama.cpp](https://github.com/ggml-org/llama.cpp): Memory saving LLM inference.
+- [Qwen & Unsloth](https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF): Offering high quality local LLM.
+- [Google Gemini](https://gemini.google.com/): Icon creation.
