@@ -123,7 +123,7 @@ func (e *Engine) Store() *store.Store {
 	return e.store
 }
 
-// ServeProxy starts an HTTP server that serves both the admin API and the LLM proxy.
+// ServeProxy starts an HTTP server that serves both the admin API and the LLM gateway.
 // It uses a mux that routes /api/* to the admin handler and everything else to the proxy.
 // webHandler serves the embedded web UI at the root.
 // isWebPath is a function that checks if a path belongs to the web UI.

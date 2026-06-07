@@ -2,7 +2,7 @@
 
 # Tresor
 
-> **A lightweight LLM proxy for developers who want control, not complexity.**
+> **A lightweight LLM gateway for developers who want control, not complexity.**
 
 <img src="images/logo_transparent.png" height=200>
 
@@ -16,7 +16,7 @@
 
 The LLM landscape moves fast. Today you're on OpenAI, tomorrow you want to try Anthropic or a local model — but your application is locked into one provider's API format. Switching means rewriting code, updating SDKs, and potentially breaking things in production.
 
-Tresor solves this by sitting between your apps and LLM providers as a transparent proxy. **Your application never knows the backend changed.**
+Tresor solves this by sitting between your apps and LLM providers as a transparent gateway. **Your application never knows the backend changed.**
 
 ### 🔄 The Problem: Switching Providers at Scale
 
@@ -25,10 +25,10 @@ Imagine you have agents on three machines, all calling OpenAI. You want to switc
 | Tool | What Happens |
 |------|-------------|
 | **cc-switch** | 😓 Install it on every machine, then switch each one individually. Restart most tools for changes to take effect. |
-| **LiteLLM** | 😓 Deploy the proxy, define model aliases, and reconfigure downstream mappings — a heavy setup for a simple switch. |
+| **LiteLLM** | 😓 Deploy the gateway, define model aliases, and reconfigure downstream mappings — a heavy setup for a simple switch. |
 | **Tresor** | 😎 Run it once on any reachable machine. Point all agents to it. Switch providers with one click in the web UI — every agent sees the change instantly. |
 
-**One proxy. One config. One click.** That's Tresor. 🎯
+**One gateway. One config. One click.** That's Tresor. 🎯
 
 
 ## ⚡ What Tresor Does
@@ -37,13 +37,13 @@ Tresor is a single binary with two modes:
 
 | Mode | What It Does |
 |------|-------------|
-| **Daemon** | 🖥️ Long-running HTTP proxy + admin REST API + embedded web UI |
+| **Daemon** | 🖥️ Long-running HTTP gateway + admin REST API + embedded web UI |
 | **CLI** | 💻 Command-line client for managing the daemon |
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │   Your App   │────▶│    Tresor    │────▶│  LLM Provider│
-│              │     │    (proxy)   │     │  (OpenAI,    │
+│              │     │    (gateway) │     │  (OpenAI,    │
 │              │◀────│              │◀────│  Anthropic..) │
 └──────────────┘     └──────────────┘     └──────────────┘
                          │

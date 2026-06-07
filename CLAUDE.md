@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 
 ## Project Overview
 
-Tresor is an LLM traffic interception and routing engine written in Go. It sits between client applications and LLM providers (OpenAI, Anthropic, etc.), transforming requests and responses via a configurable plugin pipeline. The binary serves dual roles: a **daemon** (long-running HTTP proxy + admin API) and a **CLI client** for controlling the daemon.
+Tresor is an LLM traffic interception and routing engine written in Go. It sits between client applications and LLM providers (OpenAI, Anthropic, etc.), transforming requests and responses via a configurable plugin pipeline. The binary serves dual roles: a **daemon** (long-running HTTP gateway + admin API) and a **CLI client** for controlling the daemon.
 
 See [PLAN.md](PLAN.md) for the full architectural design.
 
@@ -23,7 +23,7 @@ To get started: `cp config.example.yaml config.yaml`, then edit as needed.
 ### YAML Structure
 
 ```yaml
-bind_addr: "127.0.0.1:8080"          # TCP address for proxy
+bind_addr: "127.0.0.1:8080"          # TCP address for gateway
 socket_path: "/tmp/tresor.sock"  # Optional Unix socket (admin only)
 db_path: "./tresor.db"          # SQLite database path
 admin_password: "secret"              # Optional Bearer token auth
@@ -104,15 +104,15 @@ The codebase follows a clean layered structure with three core concerns:
 | `cmd/` | Cobra CLI commands (`root.go`, `run.go`, `rule.go`) |
 | `internal/config/` | YAML configuration loader with auto-detect path resolution |
 | `internal/store/` | SQLite data layer: `store.go` (schema/migrations/upsert), `rule.go` (CRUD + matching), `downstream.go` (CRUD), `alias.go` (alias CRUD + grouping) |
-| `internal/engine/` | Core proxy handler: `engine.go` (proxy forwarding + alias override), `pipeline.go` (transformer orchestration), `types.go` (interfaces) |
+| `internal/engine/` | Core gateway handler: `engine.go` (gateway forwarding + alias override), `pipeline.go` (transformer orchestration), `types.go` (interfaces) |
 | `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go` |
 | `internal/api/` | Admin REST API: `router.go` (routing), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list), `aliases.go` (alias endpoints), `embed.go` (embedded web UI) |
 | `internal/middleware/` | Bearer-token auth middleware for admin API |
 | `internal/api/web/` | Embedded SPA: `index.html`, `style.css`, `app.js` |
 
-### Data Flow (Proxy Request)
+### Data Flow (Gateway Request)
 
-1. Client sends request to Tresor proxy → `HandleProxy` reads body, extracts model name
+1. Client sends request to Tresor gateway → `HandleProxy` reads body, extracts model name
 2. **Model Resolution** (the forwarding gate):
    - Try active alias via `FindActiveAlias(model)` — if found, use alias's downstream and rewrite the model name in the body
    - If no alias, try direct resolution via `FindDownstreamByOutputModel(model)` — matches against downstream `output_model_ids`
@@ -165,7 +165,7 @@ Admin API is protected by optional Bearer-token auth (configured via `admin_pass
 
 ### Listening Modes
 
-The daemon can listen on TCP (proxy + admin API + web UI) and/or Unix Domain Socket (admin API only). CLI commands connect to whichever interface is configured in the YAML.
+The daemon can listen on TCP (gateway + admin API + web UI) and/or Unix Domain Socket (admin API only). CLI commands connect to whichever interface is configured in the YAML.
 
 ## Key Design Decisions
 
@@ -196,4 +196,4 @@ Core workflow:
 3. **E2E smoke test**: Start the daemon with a YAML config (`./tresor.exe run --config <path>`) in a background process, then run `go test -tags=integration ./e2e/...` against it
 4. **Browser verification**: Use `agent-browser` to verify web UI changes visually — navigate to each affected tab, perform core interactions (create, edit, delete, hot-switch), and confirm the UI reflects the expected state
 
-Skipping step 3 or 4 is not acceptable for any change that affects API behavior, proxy logic, or the web UI. Unit tests alone cannot catch rendering bugs, JavaScript errors, or integration issues between layers.
+Skipping step 3 or 4 is not acceptable for any change that affects API behavior, gateway logic, or the web UI. Unit tests alone cannot catch rendering bugs, JavaScript errors, or integration issues between layers.

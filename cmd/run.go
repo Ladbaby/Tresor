@@ -20,7 +20,7 @@ import (
 
 var runCmd = &cobra.Command{
 	Use:   "run",
-	Short: "Start the Tresor daemon (HTTP proxy + admin API)",
+	Short: "Start the Tresor daemon (HTTP gateway + admin API)",
 	Long: `Starts the gateway server using the YAML config file.
 The config file is auto-detected (./config.yaml or $HOME/.tresor.yaml)
 or can be specified with --config.
@@ -91,8 +91,8 @@ func runDaemon(cfg *config.AppConfig) error {
 		defer tcpListener.Close()
 
 		go func() {
-			log.Printf("Tresor proxy listening on TCP %s", cfg.BindAddr)
-			// The admin router serves both the admin API and the proxy handler
+			log.Printf("Tresor gateway listening on TCP %s", cfg.BindAddr)
+			// The admin router serves both the admin API and the gateway handler
 			// For now, we serve the combined router
 			if err := engine.ServeProxy(eng, adminRouter.Handler(), webHandler, api.IsWebUIPath, tcpListener); err != nil {
 				errCh <- fmt.Errorf("TCP serve error: %w", err)
