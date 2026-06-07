@@ -36,7 +36,7 @@ Imagine you have agents on three machines, all calling OpenAI. You want to switc
 
 ![](images/comparison.png)
 
-⚠ Tresor is intended for personal use rather than LLM transfer stations, so it only have one administrative account. We are not planning to support commercial-purpose multi-user login.
+⚠ DISCLAIMER: Tresor is intended for personal use rather than LLM transfer stations, so it only have one administrative account. We are not planning to support commercial-purpose multi-user login.
 
 ## ⚡ What Tresor Does
 
@@ -49,9 +49,9 @@ Tresor is a single binary with two modes:
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Your App   │────▶│    Tresor    │────▶│  LLM Provider│
+│   Your App   │────>│    Tresor    │────>│  LLM Provider│
 │              │     │    (gateway) │     │  (OpenAI,    │
-│              │◀────│              │◀────│  Anthropic..) │
+│              │<────│              │<────│  Anthropic..) │
 └──────────────┘     └──────────────┘     └──────────────┘
                          │
                          ├── Admin REST API
@@ -77,17 +77,14 @@ Tresor is a single binary with two modes:
 # Build (requires Go 1.26+)
 go build -o tresor.exe .
 
-# Copy the example config and add your API keys
+# Copy the example config. Change bind_addr to 0.0.0.0:11510 if you want public access. You can configure the rest settings via the web UI later.
 cp config.example.yaml config.yaml
 
-# Start the daemon
-./tresor.exe run --config config.yaml
-
-# Open http://127.0.0.1:11510 in your browser for the web UI
+# Start the server. Default password for web UI is admin, and default inbound API key is sk-proxy-123
+/path/to/tresor run --config /path/to/config.yaml
 ```
 
-That's it. Point your application to `http://127.0.0.1:11510` and Tresor handles the rest.
-
+That's it. Point your LLM apps to the value of `bind_addr` in `config.yaml`, and Tresor handles the rest.
 
 ## 📚 Documentation
 
