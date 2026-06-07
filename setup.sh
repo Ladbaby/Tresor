@@ -58,24 +58,31 @@ esac
 ASSET="tresor-${OS_PKG}-${ARCH_PKG}"
 
 # ── Fetch latest release ───────────────────────────────────────────────
-info "Detecting latest release..."
-
-if command -v curl >/dev/null 2>&1; then
-    LATEST=$(curl -fsSL "$GITHUB_API")
+# Allow version pinning via TRESOR_VERSION env var (e.g. TRESOR_VERSION=v0.1.0)
+if [ -n "${TRESOR_VERSION:-}" ]; then
+    ok "Using pinned version: $TRESOR_VERSION"
+    VERSION="$TRESOR_VERSION"
 else
-    LATEST=$(wget -q -O - "$GITHUB_API")
+    info "Detecting latest release..."
+
+    if command -v curl >/dev/null 2>&1; then
+        LATEST=$(curl -fsSL "$GITHUB_API") || fail "Cannot fetch release info from $GITHUB_API. Check your network connection, DNS, and TLS certificates (install ca-certificates if needed)."
+    else
+        LATEST=$(wget -q -O - "$GITHUB_API") || fail "Cannot fetch release info from $GITHUB_API. Check your network connection."
+    fi
+
+    # Extract tag_name (e.g. "v0.1.0")
+    VERSION=$(printf '%s' "$LATEST" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
+    [ -z "$VERSION" ] && fail "Could not determine latest release version."
+
+    ok "Latest release: $VERSION"
 fi
-
-# Extract tag_name (e.g. "v0.1.0")
-VERSION=$(printf '%s' "$LATEST" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
-[ -z "$VERSION" ] && fail "Could not determine latest release version."
-
-ok "Latest release: $VERSION"
 
 # ── Download ───────────────────────────────────────────────────────────
 URL="${GITHUB_DLS}/${VERSION}/${ASSET}-${VERSION}.gz"
 TMPFILE=$(mktemp /tmp/tresor-setup-XXXXXX.gz)
-trap 'rm -f "$TMPFILE" "${TMPFILE%.gz}"' EXIT
+CHECKSUM_FILE=$(mktemp /tmp/tresor-checksum-XXXXXX)
+trap 'rm -f "$TMPFILE" "${TMPFILE%.gz}" "$CHECKSUM_FILE"' EXIT
 
 info "Downloading ${ASSET} from ${URL}..."
 
@@ -87,6 +94,35 @@ fi
 
 [ -s "$TMPFILE" ] || fail "Downloaded file is empty."
 
+# ── Verify checksum ────────────────────────────────────────────────────
+CHECKSUM_URL="${GITHUB_DLS}/${VERSION}/checksums.txt"
+info "Downloading checksums..."
+
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "$CHECKSUM_FILE" "$CHECKSUM_URL" || warn "Could not download checksums. Skipping verification."
+else
+    wget -q -O "$CHECKSUM_FILE" "$CHECKSUM_URL" || warn "Could not download checksums. Skipping verification."
+fi
+
+if [ -s "$CHECKSUM_FILE" ]; then
+    ASSET_BASENAME="${ASSET}-${VERSION}.gz"
+    EXPECTED=$(grep "$ASSET_BASENAME" "$CHECKSUM_FILE" || true)
+    if [ -n "$EXPECTED" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL=$(sha256sum "$TMPFILE" | awk '{print $1}')
+            EXPECTED_HASH=$(echo "$EXPECTED" | awk '{print $1}')
+            if [ "$ACTUAL" != "$EXPECTED_HASH" ]; then
+                fail "Checksum mismatch for $ASSET_BASENAME!\n  Expected: $EXPECTED_HASH\n  Actual:   $ACTUAL\n  The download may be corrupted or tampered with."
+            fi
+            ok "Checksum verified."
+        else
+            warn "sha256sum not available, skipping checksum verification."
+        fi
+    else
+        warn "Asset $ASSET_BASENAME not found in checksums.txt, skipping verification."
+    fi
+fi
+
 # ── Extract ────────────────────────────────────────────────────────────
 info "Extracting binary..."
 gzip -d "$TMPFILE"
@@ -95,6 +131,17 @@ BINARY="${TMPFILE%.gz}"
 
 # ── Install to ~/.local/bin ────────────────────────────────────────────
 mkdir -p "$BIN_DIR"
+
+if [ -f "$BIN_DIR/tresor" ]; then
+    EXISTING_VER=$("$BIN_DIR/tresor" version 2>/dev/null || echo "unknown")
+    warn "Tresor already installed: $EXISTING_VER"
+    if [ "$VERSION" = "$(echo "$EXISTING_VER" | grep -o 'v[^ ]*' || true)" ]; then
+        info "Already at version $VERSION. Overwriting..."
+    fi
+    cp "$BIN_DIR/tresor" "$BIN_DIR/tresor.bak"
+    info "Backup saved: $BIN_DIR/tresor.bak"
+fi
+
 cp "$BINARY" "$BIN_DIR/tresor"
 chmod +x "$BIN_DIR/tresor"
 
@@ -113,8 +160,8 @@ if [ -f "$CONFIG_FILE" ]; then
     ok "Config exists: $CONFIG_FILE (skipped)"
 else
     mkdir -p "$CONFIG_DIR"
-    CONFIG_URL="https://raw.githubusercontent.com/$REPO/main/config.example.yaml"
-    info "Downloading example config..."
+    CONFIG_URL="https://raw.githubusercontent.com/$REPO/${VERSION}/config.example.yaml"
+    info "Downloading example config (from $VERSION)..."
 
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$CONFIG_URL" -o "$CONFIG_FILE" || warn "Could not download example config. Create $CONFIG_FILE manually."
