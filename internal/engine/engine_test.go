@@ -114,14 +114,14 @@ func newTestStore(t *testing.T) *store.Store {
 }
 
 // addDownstream creates a test downstream record.
-func addDownstream(t *testing.T, s *store.Store, id, name, baseURL, apiKey string, apiFormat ...string) {
+func addDownstream(t *testing.T, s *store.Store, id, name, baseURL, apiKey string, apiFormats ...string) {
 	t.Helper()
-	format := ""
-	if len(apiFormat) > 0 {
-		format = apiFormat[0]
+	formats := []string{}
+	if len(apiFormats) > 0 {
+		formats = apiFormats
 	}
 	if err := s.CreateDownstream(&store.Downstream{
-		ID: id, Name: name, BaseURL: baseURL, APIKey: apiKey, ApiFormat: format,
+		ID: id, Name: name, BaseURL: baseURL, APIKey: apiKey, ApiFormats: formats,
 	}); err != nil {
 		t.Fatalf("create downstream %s: %v", id, err)
 	}
@@ -692,7 +692,7 @@ func TestEngine_HandleProxy_AutoTranslate_OpenAI2Anthropic(t *testing.T) {
 	}))
 	defer dsServer.Close()
 
-	// Anthropic downstream (api_format: "anthropic")
+	// Anthropic downstream (api_formats: ["anthropic"])
 	addDownstream(t, s, "anth-ds", "AnthDS", dsServer.URL, "key-1", "anthropic")
 	addOutputModelIDs(t, s, "anth-ds", "claude-sonnet")
 
@@ -715,7 +715,7 @@ func TestEngine_HandleProxy_AutoTranslate_OpenAI2Anthropic(t *testing.T) {
 }
 
 // TestEngine_HandleProxy_AutoTranslate_SameFormat verifies that when the input
-// format matches the downstream's api_format, no translation is applied.
+// format is contained in the downstream's api_formats, no translation is applied.
 func TestEngine_HandleProxy_AutoTranslate_SameFormat(t *testing.T) {
 	s := newTestStore(t)
 
@@ -727,7 +727,7 @@ func TestEngine_HandleProxy_AutoTranslate_SameFormat(t *testing.T) {
 	}))
 	defer dsServer.Close()
 
-	// OpenAI downstream (api_format: "openai")
+	// OpenAI downstream (api_formats: ["openai"])
 	addDownstream(t, s, "oa-ds", "OADS", dsServer.URL, "key-1", "openai")
 	addOutputModelIDs(t, s, "oa-ds", "gpt-4o")
 
@@ -750,7 +750,7 @@ func TestEngine_HandleProxy_AutoTranslate_SameFormat(t *testing.T) {
 }
 
 // TestEngine_HandleProxy_AutoTranslate_NoTag verifies that a downstream without
-// an api_format tag does not trigger auto-translation.
+// api_formats does not trigger auto-translation.
 func TestEngine_HandleProxy_AutoTranslate_NoTag(t *testing.T) {
 	s := newTestStore(t)
 
@@ -762,7 +762,7 @@ func TestEngine_HandleProxy_AutoTranslate_NoTag(t *testing.T) {
 	}))
 	defer dsServer.Close()
 
-	// Downstream with no api_format tag (empty string)
+	// Downstream with no api_formats tag (empty array)
 	addDownstream(t, s, "plain-ds", "PlainDS", dsServer.URL, "key-1")
 	addOutputModelIDs(t, s, "plain-ds", "gpt-4o")
 
@@ -798,7 +798,7 @@ func TestEngine_HandleProxy_AutoTranslate_Anthropic2OpenAI(t *testing.T) {
 	}))
 	defer dsServer.Close()
 
-	// OpenAI downstream (api_format: "openai")
+	// OpenAI downstream (api_formats: ["openai"])
 	addDownstream(t, s, "oa-ds", "OADS", dsServer.URL, "key-1", "openai")
 	addOutputModelIDs(t, s, "oa-ds", "claude-sonnet")
 

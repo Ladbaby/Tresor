@@ -6,11 +6,11 @@ import (
 
 // Downstream is a resolved target endpoint.
 type Downstream struct {
-ID        string
-Name      string
-BaseURL   string
-APIKey    string
-ApiFormat string
+ID         string
+Name       string
+BaseURL    string
+APIKey     string
+ApiFormats []string
 }
 
 // PipelineContext carries state through the transformation pipeline.

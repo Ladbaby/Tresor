@@ -601,13 +601,16 @@ async function loadDownstreams() {
             ? '<tr><td colspan="6" class="loading">No downstreams configured</td></tr>'
             : ds.map(d => {
                 const models = (d.output_model_ids || []).map(m => esc(m));
-                const formatClass = d.api_format === 'openai' ? 'format-openai' :
-                                     d.api_format === 'anthropic' ? 'format-anthropic' : 'format-unknown';
-                const formatLabel = d.api_format ? d.api_format.charAt(0).toUpperCase() + d.api_format.slice(1) : '—';
+                const formats = d.api_formats || [];
+                const formatBadges = formats.map(f => {
+                    const fClass = f === 'openai' ? 'format-openai' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
+                    return `<span class="format-badge ${fClass}">${esc(f.charAt(0).toUpperCase() + f.slice(1))}</span>`;
+                }).join(' ');
+                const formatCell = formatBadges || '<span class="format-badge format-unknown">—</span>';
                 return `
                 <tr>
                     <td><strong>${esc(d.name)}</strong></td>
-                    <td><span class="format-badge ${formatClass}">${esc(formatLabel)}</span></td>
+                    <td>${formatCell}</td>
                     <td><code>${esc(d.base_url)}</code></td>
                     <td><code>${esc(maskKey(d.api_key))}</code></td>
                     <td>
@@ -636,7 +639,6 @@ function openDownstreamModal(ds) {
     document.getElementById('downstream-id').value = ds ? ds.id : '';
     document.getElementById('downstream-name').value = ds ? ds.name : '';
     document.getElementById('downstream-url').value = ds ? ds.base_url : '';
-    document.getElementById('downstream-format').value = ds ? (ds.api_format || '') : '';
     var keyInput = document.getElementById('downstream-key');
     keyInput.value = '';
 
@@ -645,6 +647,12 @@ function openDownstreamModal(ds) {
     } else {
         keyInput.placeholder = 'sk-...';
     }
+
+    // Set format checkboxes based on ds.api_formats array
+    const formats = ds ? (ds.api_formats || []) : [];
+    document.querySelectorAll('#format-checkboxes input[type="checkbox"]').forEach(cb => {
+        cb.checked = formats.includes(cb.value);
+    });
 
     // Populate model IDs list
     const modelContainer = document.getElementById('model-ids-container');
@@ -741,8 +749,14 @@ document.getElementById('downstream-form').addEventListener('submit', async (e) 
         name: document.getElementById('downstream-name').value,
         base_url: document.getElementById('downstream-url').value,
         api_key: document.getElementById('downstream-key').value,
-        api_format: document.getElementById('downstream-format').value,
     };
+
+    // Collect checked formats
+    const formats = [];
+    document.querySelectorAll('#format-checkboxes input[type="checkbox"]:checked').forEach(cb => {
+        formats.push(cb.value);
+    });
+    body.api_formats = formats;
 
     // Collect model IDs from the editor
     const modelInputs = document.querySelectorAll('#model-ids-container .model-id-input');

@@ -926,6 +926,27 @@ select option:checked {
 [data-theme="light"] .format-openai { background: #ddf0ff; color: #0969da; }
 [data-theme="light"] .format-anthropic { background: #fff8c2; color: #9e6a0c; }
 
+/* Format checkbox group */
+.format-checkboxes {
+    display: flex;
+    gap: 1rem;
+    margin-top: 0.3rem;
+}
+
+.format-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.format-checkbox input[type="checkbox"] {
+    width: auto;
+    cursor: pointer;
+}
+
 .model-list {
     list-style: none;
     margin: 0.3rem 0 0 0;

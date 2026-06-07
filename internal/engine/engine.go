@@ -15,6 +15,8 @@ import (
 
 	"tresor/internal/proxy"
 	"tresor/internal/store"
+
+	"slices"
 )
 
 // proxyAuth holds the set of allowed API keys for incoming proxy requests.
@@ -260,11 +262,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// Build pipeline context
 	ctx := &PipelineContext{
 		TargetDownstream: &Downstream{
-			ID:        ds.ID,
-			Name:      ds.Name,
-			BaseURL:   ds.BaseURL,
-			APIKey:    ds.APIKey,
-			ApiFormat: ds.ApiFormat,
+			ID:         ds.ID,
+			Name:       ds.Name,
+			BaseURL:    ds.BaseURL,
+			APIKey:     ds.APIKey,
+			ApiFormats: ds.ApiFormats,
 		},
 		Variables: make(map[string]interface{}),
 	}
@@ -282,9 +284,9 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-translation: detect input format from request path, compare with downstream format
+	// Auto-translation: detect input format from request path, compare with downstream formats
 	inputFormat := detectInputFormat(r.URL.Path)
-	if inputFormat != "" && ds.ApiFormat != "" && inputFormat != ds.ApiFormat {
+	if inputFormat != "" && len(ds.ApiFormats) > 0 && !slices.Contains(ds.ApiFormats, inputFormat) {
 		pluginID := "openai2anthropic"
 		typeName := "OpenAI2Anthropic"
 		if inputFormat == "anthropic" {
@@ -305,7 +307,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if streamT, ok := transformer.(StreamResponseTransformer); ok && !pluginInListStream(pipeline.StreamResponseSteps, typeName) {
 				pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, streamT)
 			}
-			log.Printf("Auto-translating %s → %s via %s (downstream: %s)", inputFormat, ds.ApiFormat, pluginID, ds.ID)
+			log.Printf("Auto-translating %s → downstream %s (formats: %v)", inputFormat, ds.ID, ds.ApiFormats)
 		}
 	}
 

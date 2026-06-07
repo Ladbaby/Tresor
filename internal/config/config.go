@@ -48,8 +48,12 @@ type DownstreamCfg struct {
 	Name           string   `yaml:"name"`
 	BaseURL        string   `yaml:"base_url"`
 	APIKey         string   `yaml:"api_key,omitempty"`
-	ApiFormat      string   `yaml:"api_format,omitempty"`
+	ApiFormats     []string `yaml:"api_formats,omitempty"`
 	OutputModelIDs []string `yaml:"output_model_ids,omitempty"`
+
+	// ApiFormat is a legacy field accepted for backward-compatible YAML loading.
+	// It gets converted to ApiFormats during the sanitize step.
+	ApiFormat string `yaml:"api_format,omitempty"`
 }
 
 // RuleCfg defines a routing rule with optional model filter and transformation pipeline.
@@ -139,6 +143,14 @@ func Load(configPath string) (*AppConfig, error) {
 	}
 	if cfg.ProxyAPIKeys == nil {
 		cfg.ProxyAPIKeys = []string{}
+	}
+
+	// Sanitize legacy ApiFormat -> ApiFormats for backward compatibility
+	for i := range cfg.Downstreams {
+		if cfg.Downstreams[i].ApiFormat != "" && len(cfg.Downstreams[i].ApiFormats) == 0 {
+			cfg.Downstreams[i].ApiFormats = []string{cfg.Downstreams[i].ApiFormat}
+			cfg.Downstreams[i].ApiFormat = ""
+		}
 	}
 
 	// Store the resolved config path for write-back
