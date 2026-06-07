@@ -1,15 +1,16 @@
+<div align="center">
+
 # Tresor
 
 > **A lightweight LLM proxy for developers who want control, not complexity.**
 
-<div align="center">
+<img src="images/logo_transparent.png" height=200>
 
 [![Go Version](https://img.shields.io/badge/Go-1.26-violet)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
 </div>
 
----
 
 ## 🤔 Why Tresor?
 
@@ -29,7 +30,6 @@ Imagine you have agents on three machines, all calling OpenAI. You want to switc
 
 **One proxy. One config. One click.** That's Tresor. 🎯
 
----
 
 ## ⚡ What Tresor Does
 
@@ -61,7 +61,6 @@ Tresor is a single binary with two modes:
 - 🌐 **Embedded Web UI** — Manage everything from a browser dashboard. No separate frontend deployment.
 - 📝 **Single Config File** — All settings in one portable YAML file. Changes via the web UI write back automatically.
 
----
 
 ## 🚀 Getting Started
 
@@ -80,7 +79,6 @@ cp config.example.yaml config.yaml
 
 That's it. Point your application to `http://127.0.0.1:8080` and Tresor handles the rest.
 
----
 
 ## 📚 Documentation
 
@@ -108,7 +106,6 @@ Full documentation is available at **[ladbaby.github.io/tresor-docs/](https://la
 - [🧪 Testing](https://ladbaby.github.io/tresor-docs/docs/dev/testing) — test strategy and coverage
 - [🤝 Contributing](https://ladbaby.github.io/tresor-docs/docs/dev/contributing) — how to contribute to Tresor
 
----
 
 ## 📜 License
 
