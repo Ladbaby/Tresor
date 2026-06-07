@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 
 ## Project Overview
 
-Tresor is an LLM traffic interception and routing engine written in Go. It sits between client applications and LLM providers (OpenAI, Anthropic, etc.), transforming requests and responses via a configurable plugin pipeline. The binary serves dual roles: a **daemon** (long-running HTTP gateway + admin API) and a **CLI client** for controlling the daemon.
+Tresor is a single-binary LLM gateway for switching providers at scale with one click. It sits between client applications and LLM providers (OpenAI, Anthropic, etc.), transforming requests and responses via a configurable plugin pipeline. The binary serves dual roles: a **daemon** (long-running HTTP gateway + admin API) and a **CLI client** for controlling the daemon.
 
 See [PLAN.md](PLAN.md) for the full architectural design.
 

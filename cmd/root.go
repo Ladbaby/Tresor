@@ -17,8 +17,9 @@ var cfgFile string
 
 var rootCmd = &cobra.Command{
 	Use:   "tresor",
-	Short: "LLM Gateway — extensible traffic routing and transformation engine",
-	Long: `Tresor is an LLM traffic interception and routing engine.
+	Short: "A single-binary LLM gateway for switching providers at scale with one click",
+	Long: `Tresor is a single-binary LLM gateway for switching providers at scale with one click.
+
 It sits between client applications and LLM providers, transforming
 requests and responses via a configurable plugin pipeline.`,
 	Run: func(_ *cobra.Command, _ []string) {
