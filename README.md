@@ -4,32 +4,39 @@
 
 > **A single-binary LLM gateway empowering switch providers at scale with one click.**
 
+**One gateway, One config, One click**
+
 <img src="internal/api/web/logo.png" height=200>
 
 [![Go Version](https://img.shields.io/badge/Go-1.26-violet)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
+![](images/screenshot.png)
+
 </div>
+
+
 
 
 ## 🤔 Why Tresor?
 
-The LLM landscape moves fast. Today you're on OpenAI, tomorrow you want to try Anthropic or a local model — but your application is locked into one provider's API format. Switching means rewriting code, updating SDKs, and potentially breaking things in production.
+- **One gateway**: No need to install on every PC/server where LLM apps live in.
+- **One config**: All LLM apps do not need to reconfigure their LLM providers.
+- **One click**: LLM provider switch via alias buttons in web UI.
 
-Tresor solves this by sitting between your apps and LLM providers as a transparent gateway. Once pointing the API endpoint to Tresor, **all LLM apps do not need to reconfigure their LLM providers.**
+||Tresor|[cc-switch](https://github.com/farion1231/cc-switch)|[LiteLLM](https://github.com/BerriAI/litellm)
+|---|---|---|---|
+|One gateway|✅|❌(install on every PC)|✅|
+|One config|✅|✅|✅|
+|One click|✅|✅|❌(retype model name)|
 
 ### 🔄 The Problem: Switching Providers at Scale
 
 Imagine you have agents on three machines, all calling OpenAI. You want to switch them to Anthropic.
 
-| Tool | What Happens |
-|------|-------------|
-| [cc-switch](https://github.com/farion1231/cc-switch) | 😓 Install it on **every client machine**, then switch each one individually. |
-| [LiteLLM](https://github.com/BerriAI/litellm) | 😓 **Retype the name** of downstream models and providers for alias. |
-| **Tresor** (Ours) | 😎 **Install once** on a public server, switch providers with **one click** in the web UI — every agent sees the change instantly. |
+![](images/comparison.png)
 
-**One gateway. One config. One click.** That's Tresor. 🎯
-
+⚠ Tresor is intended for personal use rather than LLM transfer stations, so it only have one administrative account. We are not planning to support commercial-purpose multi-user login.
 
 ## ⚡ What Tresor Does
 
@@ -64,7 +71,7 @@ Tresor is a single binary with two modes:
 
 ## 🚀 Getting Started
 
-> Warning: the program is heavily vibe-coded, but the author has tried his best to follow software engineering practices to ensure its quality. Use with caution.
+> Warning: the program is heavily vibe-coded, but the author has tried the best to follow software engineering practices to ensure its quality. Use with caution.
 
 ```bash
 # Build (requires Go 1.26+)
@@ -112,5 +119,6 @@ Full documentation is available at **[ladbaby.github.io/tresor-docs/](https://la
 ## 📜 Acknowledgement
 
 - [llama.cpp](https://github.com/ggml-org/llama.cpp): Memory saving LLM inference.
-- [Qwen & Unsloth](https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF): Offering high quality local LLM.
+- [Qwen & Unsloth](https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF): High quality local LLM.
 - [Google Gemini](https://gemini.google.com/): Icon creation.
+- [OpenAI ChatGPT](https://chatgpt.com/): Comparison figures.
