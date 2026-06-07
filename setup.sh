@@ -67,7 +67,7 @@ else
 fi
 
 # Extract tag_name (e.g. "v0.1.0")
-VERSION=$(printf '%s' "$LATEST" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+VERSION=$(printf '%s' "$LATEST" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
 [ -z "$VERSION" ] && fail "Could not determine latest release version."
 
 ok "Latest release: $VERSION"
