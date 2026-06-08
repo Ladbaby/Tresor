@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"tresor/internal/engine"
+	"tresor/internal/proxy"
 	"tresor/internal/store"
 )
 
@@ -41,6 +42,10 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 		}
 		if ds.Name == "" || ds.BaseURL == "" {
 			writeError(w, http.StatusBadRequest, "name and base_url are required")
+			return
+		}
+		if err := proxy.ValidateOutboundURL(ds.BaseURL); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid base_url: "+err.Error())
 			return
 		}
 		if err := r.store.CreateDownstream(&ds); err != nil {
@@ -132,6 +137,14 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			return
 		}
 		ds.ID = id
+
+		// Validate base_url if being updated
+		if ds.BaseURL != "" {
+			if err := proxy.ValidateOutboundURL(ds.BaseURL); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid base_url: "+err.Error())
+				return
+			}
+		}
 
 		// Preserve the existing API key if the client sent nothing or the masked placeholder.
 		if ds.APIKey == "" || ds.APIKey == "***" {
@@ -245,12 +258,12 @@ func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Re
 // fetchModels calls the downstream provider's /models endpoint to discover available models.
 // It tries multiple URL patterns (/v1/models, /models) and returns specific error messages.
 func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
-	return fetchModelsByCreds(ds.BaseURL, ds.APIKey, ds.Name)
+	return fetchModelsByCreds(ds.BaseURL, ds.APIKey)
 }
 
 // fetchModelsByCreds fetches models given raw credentials (used for both existing
 // downstreams and the create-new-downstream form).
-func fetchModelsByCreds(baseURL, apiKey, name string) ([]string, error) {
+func fetchModelsByCreds(baseURL, apiKey string) ([]string, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("no API key configured — add an API key before fetching models")
 	}
@@ -277,17 +290,17 @@ func fetchModelsByCreds(baseURL, apiKey, name string) ([]string, error) {
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			lastError = fmt.Sprintf("could not reach %s — check the base_url and network connectivity", url)
+			lastError = "unable to connect to provider"
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return nil, fmt.Errorf("authentication failed (%d)%s — check the API key", resp.StatusCode, nameLabel(name, url))
+			return nil, fmt.Errorf("authentication failed — check the API key")
 		}
 		if resp.StatusCode >= 400 {
-			lastError = fmt.Sprintf("request to %s returned HTTP %d", url, resp.StatusCode)
+			lastError = "provider returned unexpected response"
 			continue
 		}
 
@@ -314,17 +327,10 @@ func fetchModelsByCreds(baseURL, apiKey, name string) ([]string, error) {
 			return strArr, nil
 		}
 
-		lastError = fmt.Sprintf("unrecognized response format from %s", url)
+		lastError = "unrecognized response format"
 	}
 
-	return nil, fmt.Errorf("%s. No working models endpoint found among: %v", lastError, endpoints)
-}
-
-func nameLabel(name, url string) string {
-	if name != "" {
-		return fmt.Sprintf(" for downstream \"%s\" at %s", name, url)
-	}
-	return " at " + url
+	return nil, fmt.Errorf("%s. No working models endpoint found", lastError)
 }
 
 // handleFetchModels handles POST /api/fetch-models.
@@ -348,8 +354,12 @@ func (r *Router) handleFetchModels(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, "base_url is required")
 		return
 	}
+	if err := proxy.ValidateOutboundURL(body.BaseURL); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid base_url: "+err.Error())
+		return
+	}
 
-	models, err := fetchModelsByCreds(body.BaseURL, body.APIKey, "")
+	models, err := fetchModelsByCreds(body.BaseURL, body.APIKey)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "fetch failed: "+err.Error())
 		return

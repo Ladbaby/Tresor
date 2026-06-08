@@ -2,26 +2,15 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"tresor/internal/engine"
 )
 
 // GetRecentLogs returns the most recent gateway request log entries.
+// Auth is handled by the middleware (router.go), so no inline validation needed.
 func GetRecentLogs(logger *engine.RequestLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Authenticate via token query param or Authorization header
-		if err := validateSSEAuth(r); err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
 		entries := logger.RecentEntries(100)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(entries)
@@ -29,47 +18,11 @@ func GetRecentLogs(logger *engine.RequestLogger) http.HandlerFunc {
 }
 
 // StreamLogs serves an SSE stream of gateway request logs.
+// Auth is handled by the middleware (router.go) via token query param.
 func StreamLogs(logger *engine.RequestLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Authenticate via token query param (EventSource can't send headers)
-		// or via Authorization header. Falls back to auth middleware config.
-		if err := validateSSEAuth(r); err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
 		logger.StreamLogs(w, r)
 	}
-}
-
-// validateSSEAuth checks if the request has valid auth for SSE connections.
-// Accepts token query param (for EventSource) or Authorization header.
-func validateSSEAuth(r *http.Request) error {
-	cfg := getRuntimeConfig()
-	if cfg == nil || cfg.AdminPassword == "" {
-		return nil // no auth required
-	}
-
-	// Check token query param (EventSource workaround)
-	token := r.URL.Query().Get("token")
-	if token != "" && token == cfg.AdminPassword {
-		return nil
-	}
-
-	// Check Authorization header
-	auth := r.Header.Get("Authorization")
-	if auth != "" && len(auth) > 7 && auth[:7] == "Bearer " {
-		if auth[7:] == cfg.AdminPassword {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("unauthorized")
 }
 
 // GetLogLevel returns the current log level.

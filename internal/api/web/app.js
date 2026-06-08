@@ -47,6 +47,7 @@ document.querySelectorAll('.tab').forEach(tab => {
 // ---- Auth state ----
 var authEnabled = false;
 var authToken = sessionStorage.getItem('tresor_token') || null;
+var tokenRefreshTimer = null;
 
 /**
  * Check whether the server requires authentication, then decide
@@ -71,7 +72,7 @@ async function checkAuth() {
     if (authToken) {
         // Verify the token still works by hitting a protected endpoint
         try {
-            await api('/health');
+            await api('/rules');
             showDashboardWithDefaultTab();
             return;
         } catch {
@@ -92,6 +93,8 @@ function showLogin() {
 function showDashboard() {
     document.getElementById('login-view').classList.add('hidden');
     document.getElementById('dashboard-view').classList.remove('hidden');
+    // Start periodic token refresh
+    startTokenRefresh();
     // Load all tabs' data
     loadRules();
     loadDownstreams();
@@ -117,6 +120,7 @@ async function showDashboardWithDefaultTab() {
 }
 
 function logout() {
+    stopTokenRefresh();
     authToken = null;
     sessionStorage.removeItem('tresor_token');
     showLogin();
@@ -143,8 +147,9 @@ document.getElementById('login-form').addEventListener('submit', async function 
             var errData = await resp.json().catch(() => ({}));
             throw new Error(errData.error || 'Login failed');
         }
-        // Store the password as the bearer token for this session
-        authToken = password;
+        var data = await resp.json();
+        // Store the JWT token from the server response (not the raw password)
+        authToken = data.token || password;
         sessionStorage.setItem('tresor_token', authToken);
         showDashboardWithDefaultTab();
     } catch (err) {
@@ -168,6 +173,48 @@ function buildAuthHeaders() {
     return headers;
 }
 
+/**
+ * Refresh the JWT token. Returns true on success, false on failure.
+ */
+async function refreshAuthToken() {
+    if (!authToken) return false;
+    try {
+        var resp = await fetch(API_BASE + '/auth/refresh', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + authToken },
+        });
+        if (!resp.ok) return false;
+        var data = await resp.json();
+        if (!data.token) return false;
+        authToken = data.token;
+        sessionStorage.setItem('tresor_token', authToken);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Start a periodic token refresh (every 3 minutes, JWT expires at 5 minutes).
+ */
+function startTokenRefresh() {
+    stopTokenRefresh();
+    if (authToken && authEnabled) {
+        tokenRefreshTimer = setInterval(async function () {
+            await refreshAuthToken();
+        }, 3 * 60 * 1000);
+    }
+}
+
+/**
+ * Stop the periodic token refresh.
+ */
+function stopTokenRefresh() {
+    if (tokenRefreshTimer) {
+        clearInterval(tokenRefreshTimer);
+        tokenRefreshTimer = null;
+    }
+}
 async function api(path, options = {}) {
     const url = API_BASE + path;
     const headers = buildAuthHeaders();
@@ -175,8 +222,22 @@ async function api(path, options = {}) {
         headers: { ...headers, ...options.headers },
         ...options,
     });
-    // If we get 401 and auth is enabled, clear token and show login
-    if (resp.status === 401 && authEnabled) {
+    // If we get 401 and auth is enabled, try refreshing the token once
+    if (resp.status === 401 && authEnabled && authToken) {
+        const refreshed = await refreshAuthToken();
+        if (refreshed) {
+            const newHeaders = buildAuthHeaders();
+            const resp2 = await fetch(url, {
+                headers: { ...newHeaders, ...options.headers },
+                ...options,
+            });
+            if (!resp2.ok) {
+                const err = await resp2.json().catch(() => ({ error: resp2.statusText }));
+                throw new Error(err.error || resp2.statusText);
+            }
+            return resp2.json();
+        }
+        // Refresh failed — logout
         logout();
     }
     if (!resp.ok) {
@@ -258,9 +319,9 @@ async function loadRules() {
                     <td><span class="pipeline-steps">${esc(shortPipeline(r.pipeline_config))}</span></td>
                     <td><span class="status-badge ${r.is_enabled ? 'status-enabled' : 'status-disabled'}">${r.is_enabled ? 'ON' : 'OFF'}</span></td>
                     <td>
-                        <button class="btn-small" onclick="editRule('${r.id}')">Edit</button>
-                        <button class="btn-small" onclick="toggleRule('${r.id}', ${!r.is_enabled})">${r.is_enabled ? 'Disable' : 'Enable'}</button>
-                        <button class="btn-danger" onclick="deleteRule('${r.id}')">Delete</button>
+                        <button class="btn-small rule-edit-btn" data-action="edit-rule" data-id="${esc(r.id)}">Edit</button>
+                        <button class="btn-small rule-toggle-btn" data-action="toggle-rule" data-id="${esc(r.id)}" data-enabled="${r.is_enabled ? '0' : '1'}">${r.is_enabled ? 'Disable' : 'Enable'}</button>
+                        <button class="btn-danger rule-delete-btn" data-action="delete-rule" data-id="${esc(r.id)}">Delete</button>
                     </td>
                 </tr>`;
             }).join('');
@@ -760,8 +821,8 @@ async function loadDownstreams() {
                         ${models.length > 0 ? '<ul class="model-list">' + models.map(m => '<li>' + m + '</li>').join('') + '</ul>' : '<em class="text-muted">none</em>'}
                     </td>
                     <td>
-                        <button class="btn-small" onclick="editDownstream('${d.id}')">Edit</button>
-                        <button class="btn-danger" onclick="deleteDownstream('${d.id}')">Delete</button>
+                        <button class="btn-small downstream-edit-btn" data-action="edit-downstream" data-id="${esc(d.id)}">Edit</button>
+                        <button class="btn-danger downstream-delete-btn" data-action="delete-downstream" data-id="${esc(d.id)}">Delete</button>
                     </td>
                 </tr>`;
             }).join('');
@@ -1039,6 +1100,27 @@ function esc(s) {
     div.textContent = String(s);
     return div.innerHTML;
 }
+
+// Event delegation for rule table buttons (replaces inline onclick)
+document.getElementById('rules-body').addEventListener('click', function (e) {
+    var btn = e.target.closest('.rule-edit-btn, .rule-toggle-btn, .rule-delete-btn');
+    if (!btn) return;
+    var action = btn.dataset.action;
+    var id = btn.dataset.id;
+    if (action === 'edit-rule') editRule(id);
+    else if (action === 'toggle-rule') toggleRule(id, btn.dataset.enabled === '1');
+    else if (action === 'delete-rule') deleteRule(id);
+});
+
+// Event delegation for downstream table buttons (replaces inline onclick)
+document.getElementById('downstreams-body').addEventListener('click', function (e) {
+    var btn = e.target.closest('.downstream-edit-btn, .downstream-delete-btn');
+    if (!btn) return;
+    var action = btn.dataset.action;
+    var id = btn.dataset.id;
+    if (action === 'edit-downstream') editDownstream(id);
+    else if (action === 'delete-downstream') deleteDownstream(id);
+});
 
 function shortPipeline(config) {
     try {

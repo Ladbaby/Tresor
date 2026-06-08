@@ -5,22 +5,25 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+
+	"tresor/internal/middleware"
 )
 
 //go:embed web/*
 var webFS embed.FS
 
 // forceRecompile ensures the embed is refreshed when web files change.
-const forceRecompile_20260608_pause_btn = true
+const forceRecompile_20260608_security = true
 
-// WebHandler returns an http.Handler that serves the embedded web UI.
+// WebHandler returns an http.Handler that serves the embedded web UI with
+// security headers.
 func WebHandler() http.Handler {
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
 		// Fallback: return a handler that always returns 404
 		return http.NotFoundHandler()
 	}
-	return http.FileServer(http.FS(sub))
+	return middleware.SecurityHeaders(http.FileServer(http.FS(sub)))
 }
 
 // IsWebUIPath checks whether the given path exists in the embedded web filesystem.

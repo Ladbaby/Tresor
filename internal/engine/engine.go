@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"tresor/internal/middleware"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
 
@@ -146,8 +147,8 @@ func (e *Engine) Store() *store.Store {
 func ServeProxy(eng *Engine, adminHandler http.Handler, webHandler http.Handler, isWebPath func(string) bool, listener net.Listener) error {
 	mux := http.NewServeMux()
 
-	// Admin API routes
-	mux.Handle("/api/", adminHandler)
+	// Admin API routes (wrapped with security headers)
+	mux.Handle("/api/", middleware.SecurityHeaders(adminHandler))
 
 	// Everything else: web UI for known paths, proxy for API-like paths
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,12 +165,12 @@ func ServeProxy(eng *Engine, adminHandler http.Handler, webHandler http.Handler,
 		eng.HandleProxy(w, r)
 	}))
 
-	return http.Serve(listener, mux)
+	return http.Serve(listener, middleware.SecurityHeaders(mux))
 }
 
 // ServeAdminOnly starts an HTTP server that serves both the admin API and web UI (for UDS).
 func ServeAdminOnly(adminHandler http.Handler, listener net.Listener) error {
-	return http.Serve(listener, adminHandler)
+	return http.Serve(listener, middleware.SecurityHeaders(adminHandler))
 }
 
 // statusCaptureWriter wraps http.ResponseWriter to capture the status code.
@@ -240,7 +241,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Handle model list requests — aggregate models from all downstreams
 	if r.URL.Path == "/v1/models" || r.URL.Path == "/models" {
-		e.handleModels(cw, r)
+		e.handleModels(cw)
 		entry.Status = cw.status
 		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
@@ -605,6 +606,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 }
 
 // forwardRequest sends the (possibly transformed) request to the target downstream.
+// SSRF validation is not applied here — downstreams are admin-configured via auth-protected API.
 func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *PipelineContext) (*http.Response, error) {
 	baseURL := strings.TrimRight(ctx.TargetDownstream.BaseURL, "/")
 
@@ -739,7 +741,8 @@ func pluginInListStream(transformers []StreamResponseTransformer, typeName strin
 
 // handleModels responds to GET /v1/models with an aggregated model list from
 // all downstreams and aliases, formatted as an OpenAI-style model list response.
-func (e *Engine) handleModels(w http.ResponseWriter, r *http.Request) {
+// Proxy auth is validated by HandleProxy before reaching this function.
+func (e *Engine) handleModels(w http.ResponseWriter) {
 	models, err := e.store.ListAllModels()
 	if err != nil {
 		log.Printf("Error listing models: %v", err)

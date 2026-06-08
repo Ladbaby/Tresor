@@ -142,21 +142,17 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			r.authMW.SetPassword(incoming.AdminPassword)
 		}
 
-		// Persist server settings back to the YAML config file so they
-		// survive a daemon restart. Update the shared AppConfig pointer and
-		// trigger an async write-back (best-effort, same pattern as aliases).
-		r.cfg.ProxyMode = incoming.ProxyMode
-		r.cfg.ProxyAPIKeys = incoming.ProxyAPIKeys
+		// Persist admin_password to YAML config (so it survives restart).
+		// Proxy settings (proxy_mode, proxy_api_keys, log_level, default_tab)
+		// are runtime-only and not written back to YAML.
 		if passwordProvided {
 			r.cfg.AdminPassword = incoming.AdminPassword
+			go func() {
+				if err := r.store.WriteConfig(r.cfg); err != nil {
+					log.Printf("warning: failed to write config YAML: %v", err)
+				}
+			}()
 		}
-		r.cfg.DefaultTab = incoming.DefaultTab
-		r.cfg.LogLevel = incoming.LogLevel
-		go func() {
-			if err := r.store.WriteConfig(r.cfg); err != nil {
-				log.Printf("warning: failed to write config YAML: %v", err)
-			}
-		}()
 
 		writeJSON(w, http.StatusOK, RuntimeConfigResponse{
 			ProxyMode:        incoming.ProxyMode,
