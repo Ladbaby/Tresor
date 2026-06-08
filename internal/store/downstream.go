@@ -222,13 +222,16 @@ func (s *Store) ListAllModels() ([]string, error) {
 		}
 	}
 
-	// Collect models from aliases (both input and output)
+	// Collect models from aliases (both input and output).
+	// Skip regex aliases for input_model_id since they represent patterns, not concrete model IDs.
 	aliases, err := s.ListAliases()
 	if err != nil {
 		return nil, fmt.Errorf("list aliases for models: %w", err)
 	}
 	for _, a := range aliases {
-		modelSet[a.InputModelID] = struct{}{}
+		if !a.IsRegex {
+			modelSet[a.InputModelID] = struct{}{}
+		}
 		modelSet[a.OutputModelID] = struct{}{}
 	}
 

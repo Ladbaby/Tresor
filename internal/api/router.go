@@ -83,6 +83,8 @@ func (r *Router) Handler() http.Handler {
 			r.handleAliasGroup(w, req)
 		case path == "aliases":
 			r.handleAliases(w, req)
+		case path == "aliases/reorder":
+			r.handleReorderGroups(w, req)
 		case strings.HasPrefix(path, "aliases/"):
 			r.handleAliasByID(w, req)
 		case path == "plugins":

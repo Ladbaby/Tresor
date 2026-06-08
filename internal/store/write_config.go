@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"tresor/internal/config"
 
@@ -124,13 +123,14 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	var groupOrder []string
 
 	rows, err = s.db.Query(
-		`SELECT id, input_model_id, downstream_id, output_model_id FROM aliases ORDER BY rowid`)
+		`SELECT id, input_model_id, downstream_id, output_model_id, is_regex FROM aliases ORDER BY group_order, rowid`)
 	if err != nil {
 		return fmt.Errorf("query aliases: %w", err)
 	}
 	for rows.Next() {
 		var id, inputModelID, downstreamID, outputModelID string
-		if err := rows.Scan(&id, &inputModelID, &downstreamID, &outputModelID); err != nil {
+		var isRegex int
+		if err := rows.Scan(&id, &inputModelID, &downstreamID, &outputModelID, &isRegex); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan alias: %w", err)
 		}
@@ -145,6 +145,7 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 			ID:            id,
 			DownstreamID:  downstreamID,
 			OutputModelID: outputModelID,
+			IsRegex:       isRegex == 1,
 		})
 	}
 	rows.Close()
@@ -166,10 +167,8 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	cfg.Rules = rules
 	cfg.Aliases = aliasGroups
 
-	// Build the YAML output: sort aliases by input_model_id for readability
-	sort.Slice(cfg.Aliases, func(i, j int) bool {
-		return cfg.Aliases[i].InputModelID < cfg.Aliases[j].InputModelID
-	})
+	// Preserve YAML aliases array order from DB (group_order)
+	// No sorting needed — DB query already returns groups in correct order
 
 	// Marshal to YAML
 	data, err := yaml.Marshal(cfg)

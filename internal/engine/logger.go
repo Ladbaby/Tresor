@@ -160,13 +160,12 @@ func (l *RequestLogger) Record(entry RequestLogEntry) {
 	}
 }
 
-// RecentEntries returns the last n entries that pass the level filter.
+// RecentEntries returns the last n entries that pass the level filter, newest first.
 func (l *RequestLogger) RecentEntries(n int) []RequestLogEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	filtered := make([]RequestLogEntry, 0, n)
-	// Iterate from newest to oldest, then reverse
 	start := len(l.entries) - n
 	if start < 0 {
 		start = 0
@@ -176,7 +175,7 @@ func (l *RequestLogger) RecentEntries(n int) []RequestLogEntry {
 			filtered = append(filtered, l.entries[i])
 		}
 	}
-	// Reverse to chronological order
+	// Return newest first (reverse chronological order)
 	for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
 		filtered[i], filtered[j] = filtered[j], filtered[i]
 	}

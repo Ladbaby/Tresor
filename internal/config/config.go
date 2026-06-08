@@ -92,6 +92,7 @@ type AliasOptionCfg struct {
 	ID            string `yaml:"id"`
 	DownstreamID  string `yaml:"downstream_id"`
 	OutputModelID string `yaml:"output_model_id"`
+	IsRegex       bool   `yaml:"is_regex,omitempty"`
 }
 
 // Load reads the YAML config file. If configPath is empty, it auto-detects:

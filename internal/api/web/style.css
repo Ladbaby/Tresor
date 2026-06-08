@@ -751,6 +751,17 @@ select option:checked {
     border: 1px solid var(--border-color);
     border-radius: 10px;
     overflow: hidden;
+    transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.alias-group-card.dragging {
+    opacity: 0.4;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+.alias-group-card.drag-over {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-bg);
 }
 
 .alias-group-header {
@@ -760,6 +771,11 @@ select option:checked {
     padding: 0.75rem 1rem;
     background: var(--bg-tertiary);
     border-bottom: 1px solid var(--border-color);
+    cursor: grab;
+}
+
+.alias-group-card.dragging .alias-group-header {
+    cursor: grabbing;
 }
 
 .alias-group-title {

@@ -118,6 +118,9 @@
                             <form id="alias-form">
                                 <input type="hidden" id="alias-input-model">
                                 <label>Input Model ID: <strong id="alias-group-label"></strong></label>
+                                <label style="display:inline-flex;align-items:center;gap:0.3rem;margin:0.5rem 0.5rem 0.5rem 0;cursor:pointer;">
+                                    <input type="checkbox" id="alias-is-regex"> <span style="font-size:0.85rem;color:var(--text-muted);">Regex Pattern</span>
+                                </label>
                                 <label>Downstream:
                                     <select id="alias-downstream"></select>
                                 </label>
@@ -138,6 +141,9 @@
                             <form id="new-group-form">
                                 <label>Input Model ID:
                                     <input type="text" id="new-group-input-model" placeholder="e.g. gpt-4o" required>
+                                </label>
+                                <label style="display:inline-flex;align-items:center;gap:0.3rem;margin:0.5rem 0.5rem 0.5rem 0;cursor:pointer;">
+                                    <input type="checkbox" id="new-group-is-regex"> <span style="font-size:0.85rem;color:var(--text-muted);">Regex Pattern</span>
                                 </label>
                                 <label>Downstream:
                                     <select id="new-group-downstream"></select>
@@ -343,6 +349,9 @@
                             <button onclick="window.clearLogEntries()" class="btn-small">Clear</button>
                         </div>
                     </div>
+                    <div style="margin-bottom:1rem;">
+                        <input type="text" id="log-filter-input" placeholder="Filter logs (model, path, downstream, status, error)..." style="width:100%;padding:0.5rem;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:0.85rem;">
+                    </div>
                     <div id="log-level-indicator" class="log-level-bar" style="margin-bottom:1rem;display:none;">Level: Info</div>
                     <div style="overflow-x:auto;border:1px solid var(--border-color);border-radius:8px;">
                         <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
@@ -373,7 +382,7 @@
                         <div class="about-header">
                             <img src="logo.png" alt="Tresor logo" class="about-logo"/>
                             <h2>Tresor</h2>
-                            <p class="about-tagline">LLM Traffic Interception &amp; Routing Engine</p>
+                            <p class="about-tagline">Switch LLM Providers for Any Apps with One Click</p>
                         </div>
                         <div class="about-info">
                             <div class="about-row">

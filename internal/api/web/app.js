@@ -1036,6 +1036,12 @@ async function loadAliasGroups() {
         }
 
         groups.forEach(g => renderAliasGroup(container, g));
+
+        // Attach drag-and-drop handlers to all rendered cards
+        var cards = container.querySelectorAll('.alias-group-card');
+        cards.forEach(function (card) {
+            setupDraggable(card, container);
+        });
     } catch (err) {
         container.innerHTML = `<div class="alias-empty-state"><p>Error: ${esc(err.message)}</p></div>`;
     }
@@ -1049,13 +1055,17 @@ function renderAliasGroup(container, group) {
     card.className = 'alias-group-card';
     card.dataset.inputModel = group.input_model_id;
 
-    // Header row
+    // Header row (drag handle)
     const header = document.createElement('div');
     header.className = 'alias-group-header';
+    header.draggable = true;
 
     const title = document.createElement('div');
     title.className = 'alias-group-title';
-    title.innerHTML = `<span class="group-icon">🎯</span> ${esc(group.input_model_id)}`;
+    // Check if any option in this group is regex
+    var hasRegex = group.options.some(function (o) { return o.is_regex; });
+    title.innerHTML = `<span class="group-icon">🎯</span> ${esc(group.input_model_id)}` +
+        (hasRegex ? '<span class="badge" style="background:#6e256d;color:#e879f9;margin-left:0.4rem;font-size:0.7rem;">regex</span>' : '');
 
     const actions = document.createElement('div');
     actions.className = 'alias-group-actions';
@@ -1182,6 +1192,110 @@ async function deleteAliasGroup(inputModelId) {
 }
 
 /**
+ * Set up HTML5 drag-and-drop on an alias group card.
+ * Drag handle is the header area (avoids conflicts with buttons and option buttons).
+ */
+function setupDraggable(card, container) {
+    var header = card.querySelector('.alias-group-header');
+    if (!header) return;
+
+    header.addEventListener('dragstart', function (e) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', card.dataset.inputModel);
+        card.classList.add('dragging');
+    });
+
+    header.addEventListener('dragend', function () {
+        card.classList.remove('dragging');
+        // Clean up all drag-over states
+        container.querySelectorAll('.alias-group-card.drag-over').forEach(function (c) {
+            c.classList.remove('drag-over');
+        });
+    });
+
+    // Drop handlers go on the card (so the whole card surface accepts drops)
+    card.addEventListener('dragover', function (e) {
+        e.preventDefault(); // Allow drop
+        e.dataTransfer.dropEffect = 'move';
+        if (card !== document.querySelector('.alias-group-card.dragging')) {
+            card.classList.add('drag-over');
+        }
+    });
+
+    card.addEventListener('dragleave', function () {
+        card.classList.remove('drag-over');
+    });
+
+    card.addEventListener('drop', function (e) {
+        e.preventDefault();
+        card.classList.remove('drag-over');
+
+        var draggedId = e.dataTransfer.getData('text/plain');
+        if (draggedId === card.dataset.inputModel) return;
+
+        // Determine new order from DOM
+        var draggedCard = container.querySelector('.alias-group-card[data-input-model="' + escapedAttr(draggedId) + '"]');
+        if (!draggedCard) return;
+
+        // Dragged card takes drop target's position; drop target shifts toward dragged's original position.
+        var cards = Array.from(container.querySelectorAll('.alias-group-card'));
+        var draggedIdx = cards.indexOf(draggedCard);
+        var dropIdx = cards.indexOf(card);
+
+        if (draggedIdx < 0 || dropIdx < 0) return;
+
+        // Remove dragged card
+        container.removeChild(draggedCard);
+
+        // Insert dragged card at drop target's position
+        if (draggedIdx < dropIdx) {
+            // Forward drag: A->C. After removal, card shifted to dropIdx-1.
+            // insert before card's nextSibling (or append if last) to place dragged
+            // at card's original position, pushing card down.
+            // Ex: A,B,C drag A to C -> remove A -> [B,C] -> insertBefore(A, C.nextSibling=null) -> appendChild(A) -> [B,C,A]
+            if (card.nextSibling) {
+                container.insertBefore(draggedCard, card.nextSibling);
+            } else {
+                container.appendChild(draggedCard);
+            }
+        } else {
+            // Backward drag: C->A. After removal, card stays at dropIdx.
+            // insert before card to place dragged at card's position, pushing card down.
+            // Ex: A,B,C drag C to A -> remove C -> [A,B] -> insertBefore(C,A) -> [C,A,B]
+            container.insertBefore(draggedCard, card);
+        }
+
+        // Collect new order from DOM and send to server
+        var newCards = Array.from(container.querySelectorAll('.alias-group-card'));
+        var order = newCards.map(function (c) { return c.dataset.inputModel; });
+        reorderAliasGroups(order);
+    });
+}
+
+/**
+ * Escape a value for use in an attribute selector.
+ */
+function escapedAttr(val) {
+    return val.replace(/"/g, '\\"');
+}
+
+/**
+ * Send the new group ordering to the server.
+ */
+async function reorderAliasGroups(order) {
+    try {
+        await api('/aliases/reorder', {
+            method: 'POST',
+            body: JSON.stringify({ order: order })
+        });
+        loadAliasGroups();
+    } catch (err) {
+        alert('Error reordering groups: ' + err.message);
+        loadAliasGroups(); // Re-render to restore original order
+    }
+}
+
+/**
  * Build a tag-based multi-select UI for output model IDs.
  * Populated from the given downstream's known output_model_ids.
  * If no models are known, shows a hint and reveals the custom text input.
@@ -1277,6 +1391,9 @@ async function openAliasOptionModal(inputModelId) {
         populateOutputModelSelect(outputContainer, downstreamSelect.value);
     };
 
+    // Reset regex checkbox
+    document.getElementById('alias-is-regex').checked = false;
+
     document.getElementById('alias-modal').classList.remove('hidden');
 }
 
@@ -1296,6 +1413,7 @@ document.getElementById('alias-form').addEventListener('submit', async (e) => {
     }
 
     try {
+        const isRegex = document.getElementById('alias-is-regex').checked;
         for (const model of models) {
             await api('/aliases', {
                 method: 'POST',
@@ -1304,6 +1422,7 @@ document.getElementById('alias-form').addEventListener('submit', async (e) => {
                     downstream_id: downstreamId,
                     output_model_id: model,
                     is_active: false,
+                    is_regex: isRegex,
                 }),
             });
         }
@@ -1332,7 +1451,9 @@ document.getElementById('btn-new-alias-group').addEventListener('click', async (
         populateOutputModelSelect(outputContainer, downstreamSelect.value);
     };
 
+    // Reset fields
     document.getElementById('new-group-input-model').value = '';
+    document.getElementById('new-group-is-regex').checked = false;
     document.getElementById('new-group-modal').classList.remove('hidden');
 });
 
@@ -1353,6 +1474,7 @@ document.getElementById('new-group-form').addEventListener('submit', async (e) =
     }
 
     try {
+        const isRegex = document.getElementById('new-group-is-regex').checked;
         for (let i = 0; i < models.length; i++) {
             await api('/aliases', {
                 method: 'POST',
@@ -1361,6 +1483,7 @@ document.getElementById('new-group-form').addEventListener('submit', async (e) =
                     downstream_id: downstreamId,
                     output_model_id: models[i],
                     is_active: i === 0,
+                    is_regex: isRegex,
                 }),
             });
         }
@@ -1607,11 +1730,13 @@ function connectLogStream() {
     logSSE.addEventListener('log', function (e) {
         var entry;
         try { entry = JSON.parse(e.data); } catch { return; }
-        // Append to in-memory array (always, so buffered entries replay on resume)
-        logEntries.push(entry);
-        if (logEntries.length > 500) logEntries.shift();
+        // Skip if already in memory (e.g. from REST fetch)
+        if (logEntries.some(function (e2) { return e2.id === entry.id; })) return;
+        // Prepend to in-memory array (newest first)
+        logEntries.unshift(entry);
+        if (logEntries.length > 500) logEntries.pop();
         if (logPaused) return; // skip rendering while paused
-        appendLogRow(entry, true);
+        prependLogRow(entry, true);
     });
 
     logSSE.addEventListener('config', function (e) {
@@ -1655,26 +1780,26 @@ function disconnectLogStream() {
 }
 
 /**
- * Render the full log table from an array of entries.
+ * Render the full log table from an array of entries (newest first).
+ * Entries are appended in order since the API returns newest-first.
  */
 function renderLogTable(entries) {
     var tbody = document.getElementById('logs-table-body');
     if (!tbody) return;
     tbody.innerHTML = '';
     entries.forEach(function (entry) {
-        appendLogRow(entry, false);
+        var tr = buildLogRow(entry, false);
+        tbody.appendChild(tr);
     });
 }
 
 /**
- * Append a single log entry as a table row.
+ * Create a table row for a log entry. Returns the built <tr> element.
  */
-function appendLogRow(entry, isNew) {
-    var tbody = document.getElementById('logs-table-body');
-    if (!tbody) return;
-
+function buildLogRow(entry, isNew) {
     var tr = document.createElement('tr');
     tr.className = 'log-entry';
+    tr.dataset.id = entry.id;
     if (isNew) tr.classList.add('new');
     if (entry.error || (entry.status >= 500)) tr.classList.add('log-error');
     else if (entry.status >= 400) tr.classList.add('log-warn');
@@ -1735,17 +1860,39 @@ function appendLogRow(entry, isNew) {
     }
     tr.appendChild(td);
 
-    tbody.appendChild(tr);
+    return tr;
+}
 
-    // Remove old rows if exceeding 500
+/**
+ * Prepend a log entry row (newest at top).
+ */
+function prependLogRow(entry, isNew) {
+    var tbody = document.getElementById('logs-table-body');
+    if (!tbody) return;
+
+    var tr = buildLogRow(entry, isNew);
+    if (tbody.firstChild) {
+        tbody.insertBefore(tr, tbody.firstChild);
+    } else {
+        tbody.appendChild(tr);
+    }
+
+    // Remove oldest rows from bottom if exceeding 500
     while (tbody.children.length > 500) {
-        tbody.removeChild(tbody.firstChild);
+        tbody.removeChild(tbody.lastChild);
     }
 
     // Remove flash class after animation completes
     if (isNew) {
         setTimeout(function () { tr.classList.remove('new'); }, 600);
     }
+}
+
+/**
+ * Append a log entry row (kept for backwards compat; now delegates to prepend).
+ */
+function appendLogRow(entry, isNew) {
+    prependLogRow(entry, isNew);
 }
 
 /**
@@ -1756,6 +1903,34 @@ window.clearLogEntries = function () {
     if (tbody) tbody.innerHTML = '';
     logEntries = [];
 };
+
+/**
+ * Filter log rows by search text. Matches against model, path, downstream,
+ * status, error, alias_group, and method. Rows that don't match are hidden.
+ */
+function applyLogFilter(query) {
+    var tbody = document.getElementById('logs-table-body');
+    if (!tbody) return;
+    var q = query.toLowerCase();
+
+    tbody.querySelectorAll('tr.log-entry').forEach(function (tr) {
+        var id = parseInt(tr.dataset.id, 10);
+        var entry = logEntries.find(function (e) { return e.id === id; });
+        if (!entry) { tr.style.display = 'none'; return; }
+
+        var text = [entry.model, entry.resolved_model, entry.path, entry.downstream_name,
+            entry.downstream_id, entry.error, entry.alias_group, entry.method,
+            String(entry.status)].join(' ').toLowerCase();
+        tr.style.display = (q === '' || text.indexOf(q) !== -1) ? '' : 'none';
+    });
+}
+
+/**
+ * Log filter input handler.
+ */
+document.getElementById('log-filter-input').addEventListener('input', function () {
+    applyLogFilter(this.value);
+});
 
 /**
  * Toggle pause/resume of log rendering.

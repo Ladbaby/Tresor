@@ -228,6 +228,53 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Add is_regex column to aliases table (for regex input model matching)
+	if !s.columnExists("aliases", "is_regex") {
+		if _, err := s.db.Exec(`ALTER TABLE aliases ADD COLUMN is_regex INTEGER DEFAULT 0`); err != nil {
+			return fmt.Errorf("migrate add aliases.is_regex: %w", err)
+		}
+	}
+
+	// Add group_order column to aliases table (for drag-and-drop group reordering)
+	if !s.columnExists("aliases", "group_order") {
+		if _, err := s.db.Exec(`ALTER TABLE aliases ADD COLUMN group_order INTEGER DEFAULT 0`); err != nil {
+			return fmt.Errorf("migrate add aliases.group_order: %w", err)
+		}
+		// Backfill: get distinct groups in rowid order, assign sequential orders
+		rows, err := s.db.Query(`SELECT DISTINCT input_model_id FROM aliases ORDER BY (SELECT MIN(rowid) FROM aliases a2 WHERE a2.input_model_id = aliases.input_model_id)`)
+		if err != nil {
+			return fmt.Errorf("query aliases for backfill: %w", err)
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("begin backfill tx: %w", err)
+		}
+		order := 1
+		for rows.Next() {
+			var mid string
+			if err := rows.Scan(&mid); err != nil {
+				tx.Rollback()
+				rows.Close()
+				return fmt.Errorf("scan backfill row: %w", err)
+			}
+			if _, err := tx.Exec("UPDATE aliases SET group_order = ? WHERE input_model_id = ?", order, mid); err != nil {
+				tx.Rollback()
+				rows.Close()
+				return fmt.Errorf("backfill group_order for %s: %w", mid, err)
+			}
+			order++
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("backfill iteration: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit backfill: %w", err)
+		}
+	}
+
 	// Recreate index
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_rules_enabled ON rules(is_enabled)`); err != nil {
 		return fmt.Errorf("migrate recreate idx_rules_enabled: %w", err)
@@ -300,20 +347,21 @@ func (s *Store) SeedDefaults() error {
 	defaultAliases := []struct {
 		ID, InputModel, DownstreamID, OutputModel string
 		Active                                      int
+		GroupOrder                                  int
 	}{
-		{"alias-gpt4o-openai", "gpt-4o", "openai-gpt4o", "gpt-4o", 1},
-		{"alias-gpt4o-anthropic", "gpt-4o", "anthropic-sonnet", "claude-sonnet-4-20250514", 0},
-		{"alias-sonnet-anthropic", "claude-sonnet", "anthropic-sonnet", "claude-sonnet-4-20250514", 1},
+		{"alias-gpt4o-openai", "gpt-4o", "openai-gpt4o", "gpt-4o", 1, 1},
+		{"alias-gpt4o-anthropic", "gpt-4o", "anthropic-sonnet", "claude-sonnet-4-20250514", 0, 1},
+		{"alias-sonnet-anthropic", "claude-sonnet", "anthropic-sonnet", "claude-sonnet-4-20250514", 1, 2},
 	}
 
-	stmtAlias, err := tx.Prepare("INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active) VALUES (?, ?, ?, ?, ?)")
+	stmtAlias, err := tx.Prepare("INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order) VALUES (?, ?, ?, ?, ?, 0, ?)")
 	if err != nil {
 		return fmt.Errorf("seed alias prepare: %w", err)
 	}
 	defer stmtAlias.Close()
 
 	for _, a := range defaultAliases {
-		if _, err := stmtAlias.Exec(a.ID, a.InputModel, a.DownstreamID, a.OutputModel, a.Active); err != nil {
+		if _, err := stmtAlias.Exec(a.ID, a.InputModel, a.DownstreamID, a.OutputModel, a.Active, a.GroupOrder); err != nil {
 			return fmt.Errorf("seed alias %s: %w", a.ID, err)
 		}
 	}

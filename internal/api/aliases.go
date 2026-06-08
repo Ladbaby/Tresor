@@ -163,6 +163,35 @@ func (r *Router) handleActivateAlias(w http.ResponseWriter, req *http.Request, i
 	writeJSON(w, http.StatusOK, alias)
 }
 
+// handleReorderGroups handles POST /api/aliases/reorder.
+// Accepts {"order": ["gpt-4o", "claude-sonnet"]} and updates group ordering.
+func (r *Router) handleReorderGroups(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		Order []string `json:"order"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if len(body.Order) == 0 {
+		writeError(w, http.StatusBadRequest, "order must contain at least one input_model_id")
+		return
+	}
+
+	if err := r.store.ReorderGroups(body.Order); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	_ = r.writeConfig()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reordered"})
+}
+
 // enrichAliasGroups fills in the downstream name for each option in every group.
 func enrichAliasGroups(s *store.Store, groups []store.AliasGroup) {
 	// Build a downstream ID -> name map
