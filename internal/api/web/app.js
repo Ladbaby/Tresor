@@ -804,10 +804,31 @@ function openDownstreamModal(ds) {
         addModelIdRow(modelContainer, m);
     });
 
-    // Show/hide fetch button (only for existing downstreams)
-    document.getElementById('btn-fetch-models').style.display = ds ? '' : 'none';
+    // Show fetch button for existing downstreams; for new downstreams,
+    // show it once base_url and api_key are entered (via input handlers below).
+    var fetchBtn = document.getElementById('btn-fetch-models');
+    if (ds) {
+        fetchBtn.style.display = '';
+    } else {
+        // Will be shown dynamically when url + key are filled
+        fetchBtn.style.display = 'none';
+    }
 
-    document.getElementById('downstream-modal').classList.remove('hidden');
+   document.getElementById('downstream-modal').classList.remove('hidden');
+
+	// For new downstreams, show/hide fetch button based on url + key fields
+	if (!ds) {
+		var urlInput = document.getElementById('downstream-url');
+		var keyInput = document.getElementById('downstream-key');
+		var fetchBtn = document.getElementById('btn-fetch-models');
+		var checkFetchReady = function () {
+			fetchBtn.style.display = (urlInput.value.trim() && keyInput.value.trim()) ? '' : 'none';
+		};
+		urlInput.addEventListener('input', checkFetchReady);
+		keyInput.addEventListener('input', checkFetchReady);
+		// Store handler reference for cleanup on modal close
+		document.getElementById('downstream-modal')._fetchListeners = { url: urlInput, key: keyInput, handler: checkFetchReady };
+	}
 }
 
 function addModelIdRow(container, modelId) {
@@ -842,13 +863,31 @@ async function fetchDownstreamModels(id) {
     btn.textContent = 'Fetching...';
     btn.disabled = true;
     try {
-        const resp = await api('/downstreams/' + id + '/fetch-models', { method: 'POST' });
-        const container = document.getElementById('model-ids-container');
-        // Clear and repopulate with fetched models
-        container.innerHTML = '';
-        (resp.output_model_ids || []).forEach(m => {
-            addModelIdRow(container, m);
-        });
+        let resp;
+        if (id) {
+            // Existing downstream: use the ID-based endpoint
+            resp = await api('/downstreams/' + id + '/fetch-models', { method: 'POST' });
+            const modelIds = resp.output_model_ids || [];
+            const container = document.getElementById('model-ids-container');
+            container.innerHTML = '';
+            modelIds.forEach(m => {
+                addModelIdRow(container, m);
+            });
+        } else {
+            // New downstream: use the standalone fetch endpoint with form values
+            resp = await api('/fetch-models', {
+                method: 'POST',
+                body: JSON.stringify({
+                    base_url: document.getElementById('downstream-url').value,
+                    api_key:  document.getElementById('downstream-key').value,
+                }),
+            });
+            const container = document.getElementById('model-ids-container');
+            container.innerHTML = '';
+            (resp.model_ids || []).forEach(m => {
+                addModelIdRow(container, m);
+            });
+        }
     } catch (err) {
         var msg = err.message || String(err);
         // Strip the "fetch failed: " prefix from the server response for cleaner display
@@ -965,16 +1004,33 @@ function formatSchema(schema) {
 // ---- Modal close handlers ----
 document.querySelectorAll('.modal .close').forEach(btn => {
     btn.addEventListener('click', () => {
-        btn.closest('.modal').classList.add('hidden');
+        var modal = btn.closest('.modal');
+        cleanupModal(modal);
+        modal.classList.add('hidden');
     });
 });
 
 // Close modal on background click
 document.querySelectorAll('.modal').forEach(m => {
     m.addEventListener('click', (e) => {
-        if (e.target === m) m.classList.add('hidden');
+        if (e.target === m) {
+            cleanupModal(m);
+            m.classList.add('hidden');
+        }
     });
 });
+
+/**
+ * Clean up dynamic event listeners attached when opening a modal.
+ */
+function cleanupModal(modal) {
+    if (modal._fetchListeners) {
+        var l = modal._fetchListeners;
+        if (l.url && l.handler) l.url.removeEventListener('input', l.handler);
+        if (l.key && l.handler) l.key.removeEventListener('input', l.handler);
+        delete modal._fetchListeners;
+    }
+}
 
 // ---- Utility ----
 function esc(s) {

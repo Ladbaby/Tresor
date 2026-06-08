@@ -245,11 +245,17 @@ func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Re
 // fetchModels calls the downstream provider's /models endpoint to discover available models.
 // It tries multiple URL patterns (/v1/models, /models) and returns specific error messages.
 func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
-	if ds.APIKey == "" {
-		return nil, fmt.Errorf("no API key configured for downstream \"%s\" — add an API key before fetching models", ds.Name)
+	return fetchModelsByCreds(ds.BaseURL, ds.APIKey, ds.Name)
+}
+
+// fetchModelsByCreds fetches models given raw credentials (used for both existing
+// downstreams and the create-new-downstream form).
+func fetchModelsByCreds(baseURL, apiKey, name string) ([]string, error) {
+	if apiKey == "" {
+		return nil, fmt.Errorf("no API key configured — add an API key before fetching models")
 	}
 
-	baseURL := strings.TrimSuffix(ds.BaseURL, "/")
+	baseURL = strings.TrimSuffix(baseURL, "/")
 
 	// Try common model endpoint patterns
 	endpoints := []string{
@@ -267,7 +273,7 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		req.Header.Set("Authorization", "Bearer "+ds.APIKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -278,7 +284,7 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 		resp.Body.Close()
 
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return nil, fmt.Errorf("authentication failed (%d) for downstream \"%s\" at %s — check the API key", resp.StatusCode, ds.Name, url)
+			return nil, fmt.Errorf("authentication failed (%d)%s — check the API key", resp.StatusCode, nameLabel(name, url))
 		}
 		if resp.StatusCode >= 400 {
 			lastError = fmt.Sprintf("request to %s returned HTTP %d", url, resp.StatusCode)
@@ -312,6 +318,44 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 	}
 
 	return nil, fmt.Errorf("%s. No working models endpoint found among: %v", lastError, endpoints)
+}
+
+func nameLabel(name, url string) string {
+	if name != "" {
+		return fmt.Sprintf(" for downstream \"%s\" at %s", name, url)
+	}
+	return " at " + url
+}
+
+// handleFetchModels handles POST /api/fetch-models.
+// Accepts a JSON body with base_url and api_key (no downstream ID required),
+// allowing the create-provider form to fetch models before saving.
+func (r *Router) handleFetchModels(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.BaseURL == "" {
+		writeError(w, http.StatusBadRequest, "base_url is required")
+		return
+	}
+
+	models, err := fetchModelsByCreds(body.BaseURL, body.APIKey, "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "fetch failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string][]string{"model_ids": models})
 }
 
 // handlePlugins returns the list of registered plugins.

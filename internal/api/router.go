@@ -89,6 +89,8 @@ func (r *Router) Handler() http.Handler {
 			r.handleAliasByID(w, req)
 		case path == "plugins":
 			r.handlePlugins(w, req)
+		case path == "fetch-models":
+			r.handleFetchModels(w, req)
 		case path == "config":
 			r.handleConfig(w, req)
 		case path == "log_level":
@@ -106,6 +108,7 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/aliases", protected)
 	mux.Handle("/api/aliases/", protected)
 	mux.Handle("/api/plugins", protected)
+	mux.Handle("/api/fetch-models", protected)
 	mux.Handle("/api/config", protected)
 
 	return mux

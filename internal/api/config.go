@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -65,9 +66,24 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		})
 
 	case http.MethodPut:
+		// Parse raw JSON first to determine which fields were provided.
+		var raw map[string]interface{}
+		bodyBytes, err := io.ReadAll(req.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		// Check if admin_password was explicitly provided in the request.
+		passwordProvided := raw["admin_password"] != nil
+
 		var incoming RuntimeConfig
-		if err := json.NewDecoder(req.Body).Decode(&incoming); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
+		if err := json.Unmarshal(bodyBytes, &incoming); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
 		}
 
@@ -110,7 +126,9 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		runtimeCfgMu.Lock()
 		runtimeCfg.ProxyMode = incoming.ProxyMode
 		runtimeCfg.ProxyAPIKeys = incoming.ProxyAPIKeys
-		runtimeCfg.AdminPassword = incoming.AdminPassword
+		if passwordProvided {
+			runtimeCfg.AdminPassword = incoming.AdminPassword
+		}
 		runtimeCfg.DefaultTab = incoming.DefaultTab
 		runtimeCfg.LogLevel = incoming.LogLevel
 		runtimeCfgMu.Unlock()
@@ -119,15 +137,19 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		r.engine.SetProxyMode(mode)
 		r.engine.SetProxyAuthKeys(incoming.ProxyAPIKeys)
 
-		// Update auth middleware password live.
-		r.authMW.SetPassword(incoming.AdminPassword)
+		// Update auth middleware password live (only when explicitly provided).
+		if passwordProvided {
+			r.authMW.SetPassword(incoming.AdminPassword)
+		}
 
 		// Persist server settings back to the YAML config file so they
 		// survive a daemon restart. Update the shared AppConfig pointer and
 		// trigger an async write-back (best-effort, same pattern as aliases).
 		r.cfg.ProxyMode = incoming.ProxyMode
 		r.cfg.ProxyAPIKeys = incoming.ProxyAPIKeys
-		r.cfg.AdminPassword = incoming.AdminPassword
+		if passwordProvided {
+			r.cfg.AdminPassword = incoming.AdminPassword
+		}
 		r.cfg.DefaultTab = incoming.DefaultTab
 		r.cfg.LogLevel = incoming.LogLevel
 		go func() {
@@ -139,7 +161,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, http.StatusOK, RuntimeConfigResponse{
 			ProxyMode:        incoming.ProxyMode,
 			ProxyAPIKeys:     incoming.ProxyAPIKeys,
-			AdminPasswordSet: incoming.AdminPassword != "",
+			AdminPasswordSet: passwordProvided && incoming.AdminPassword != "",
 			DefaultTab:       incoming.DefaultTab,
 			LogLevel:         incoming.LogLevel,
 		})
