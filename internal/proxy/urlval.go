@@ -34,8 +34,9 @@ func init() {
 }
 
 // ValidateOutboundURL checks that the URL is safe for outbound requests.
-// It rejects non-http/https schemes, private/reserved IP ranges, and
-// hostnames that resolve to blocked addresses.
+// It rejects non-http/https schemes and literal private/reserved IP addresses.
+// Hostname DNS resolution is best-effort (skipped on failure) so that
+// unresolvable or fictional domains are not blocked at creation time.
 // Returns nil if the URL is safe, or an error describing the rejection.
 func ValidateOutboundURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
@@ -50,16 +51,17 @@ func ValidateOutboundURL(rawURL string) error {
 
 	host := u.Hostname()
 
-	// Check if it's a literal IP
+	// Check if it's a literal IP address
 	ip := net.ParseIP(host)
 	if ip != nil {
 		return checkIP(ip)
 	}
 
-	// Resolve hostname and check all returned addresses
+	// Resolve hostname (best-effort — skip if unresolvable)
 	addrs, err := net.LookupHost(host)
 	if err != nil {
-		return fmt.Errorf("could not resolve hostname %q", host)
+		// Can't resolve — let the user try; the request will fail at runtime.
+		return nil
 	}
 
 	for _, resolved := range addrs {
