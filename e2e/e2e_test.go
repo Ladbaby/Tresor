@@ -58,7 +58,7 @@ rules:
   - id: default
     name: Default Rule
     pattern_path: "*"
-    active_downstream: openai-gpt4o
+    match_downstreams: [openai-gpt4o]
     is_enabled: true
 
 aliases:
@@ -156,7 +156,7 @@ aliases:
 			"name":              "test-chat",
 			"pattern_path":      "/v1/chat/completions",
 			"pattern_model":     "gpt-4o",
-			"active_downstream": "openai-gpt4o",
+			"match_downstreams": []string{"openai-gpt4o"},
 			"pipeline_config":   `[{"plugin_id":"custom_header","config":{"headers":{"X-Test":"e2e"}}}]`,
 			"is_enabled":        true,
 		}
@@ -173,15 +173,17 @@ aliases:
 		}
 	})
 
-	// Test 5: Switch rule downstream
-	t.Run("SwitchRule", func(t *testing.T) {
-		payload := map[string]string{"downstream_id": "anthropic-sonnet"}
+	// Test 5: Update rule match_downstreams
+	t.Run("UpdateRule", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"match_downstreams": []string{"anthropic-sonnet"},
+		}
 		data, _ := json.Marshal(payload)
-		req, _ := http.NewRequest(http.MethodPut, apiBase+"/api/rules/default/switch", bytes.NewReader(data))
+		req, _ := http.NewRequest(http.MethodPut, apiBase+"/api/rules/default", bytes.NewReader(data))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
 		if err != nil {
-			t.Fatalf("switch rule: %v", err)
+			t.Fatalf("update rule: %v", err)
 		}
 		defer resp.Body.Close()
 		respBody, _ := io.ReadAll(resp.Body)
