@@ -60,15 +60,17 @@ type DownstreamCfg struct {
 	ApiFormat string `yaml:"api_format,omitempty"`
 }
 
-// RuleCfg defines a routing rule with optional model filter and transformation pipeline.
+// RuleCfg defines a conditional transform pipeline with matching criteria.
 type RuleCfg struct {
-	ID               string         `yaml:"id"`
-	Name             string         `yaml:"name"`
-	PatternPath      string         `yaml:"pattern_path"`
-	PatternModel     string         `yaml:"pattern_model,omitempty"`
-	ActiveDownstream string         `yaml:"active_downstream"`
-	PipelineConfig   []PipelineStep `yaml:"pipeline_config,omitempty"`
-	IsEnabled        bool           `yaml:"is_enabled"`
+	ID                  string         `yaml:"id"`
+	Name                string         `yaml:"name"`
+	PatternPath         string         `yaml:"pattern_path"`
+	PatternModel        string         `yaml:"pattern_model,omitempty"`
+	MatchFormat         []string       `yaml:"match_format,omitempty"`
+	MatchDownstreamFmt  []string       `yaml:"match_downstream_format,omitempty"`
+	MatchDownstreams    []string       `yaml:"match_downstreams,omitempty"`
+	PipelineConfig      []PipelineStep `yaml:"pipeline_config,omitempty"`
+	IsEnabled           bool           `yaml:"is_enabled"`
 }
 
 // PipelineStep is one transformer in a rule's pipeline.

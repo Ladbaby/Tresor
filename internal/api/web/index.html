@@ -164,7 +164,7 @@
                                 <th>Name</th>
                                 <th>Pattern Path</th>
                                 <th>Pattern Model</th>
-                                <th>Downstream</th>
+                                <th>Match</th>
                                 <th>Pipeline</th>
                                 <th>Enabled</th>
                                 <th>Actions</th>
@@ -185,9 +185,29 @@
                                 <label>Name: <input type="text" id="rule-name" required></label>
                                 <label>Pattern Path: <input type="text" id="rule-path" placeholder="/v1/chat/completions or *"></label>
                                 <label>Pattern Model: <input type="text" id="rule-model" placeholder="gpt-4o (optional)"></label>
-                                <label>Downstream:
-                                    <select id="rule-downstream"></select>
+
+                                <!-- Match Input Format -->
+                                <label>Match Input Format:</label>
+                                <div class="format-checkboxes" id="rule-match-input-formats">
+                                    <label class="format-checkbox"><input type="checkbox" name="match_input_format" value="openai"> OpenAI</label>
+                                    <label class="format-checkbox"><input type="checkbox" name="match_input_format" value="anthropic"> Anthropic</label>
+                                </div>
+                                <p class="text-muted">Leave empty to match any input format.</p>
+
+                                <!-- Match Downstream Format -->
+                                <label>Match Downstream Format:</label>
+                                <div class="format-checkboxes" id="rule-match-downstream-formats">
+                                    <label class="format-checkbox"><input type="checkbox" name="match_downstream_format" value="openai"> OpenAI</label>
+                                    <label class="format-checkbox"><input type="checkbox" name="match_downstream_format" value="anthropic"> Anthropic</label>
+                                </div>
+                                <p class="text-muted">Leave empty to match any downstream format.</p>
+
+                                <!-- Match Downstreams (multi-select) -->
+                                <label>Match Downstreams:
+                                    <div id="rule-match-downstreams" class="model-multi-select"></div>
                                 </label>
+                                <p class="text-muted">Leave empty to match any downstream.</p>
+
                                 <label>Pipeline Transformers:
                                     <div id="pipeline-editor">
                                         <div id="pipeline-steps"></div>

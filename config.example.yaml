@@ -41,17 +41,24 @@ downstreams:
       - claude-sonnet-4-20250514
       - claude-haiku-4.5
 
-# Routing rules (OPTIONAL) — customize forwarding with transforms and overrides.
+# Routing rules (OPTIONAL) — customize forwarding with transform pipelines.
 # Rules are NOT required for normal forwarding: model resolution uses aliases and
-# downstream output_model_ids automatically. Rules only add plugin pipelines and can
-# optionally override the resolved downstream when no alias exists.
+# downstream output_model_ids automatically. Rules only add plugin pipelines;
+# they never override the resolved downstream. Multiple rules can match a single
+# request; their pipelines are concatenated in priority order.
+#
+# Matching criteria (all optional, OR logic):
+#   match_format: input request formats (e.g. [openai, anthropic])
+#   match_downstream_format: downstream API formats
+#   match_downstreams: downstream IDs to match against
+#
+# Priority: exact path+model > exact path > wildcard path (*)
 #
 # Uncomment to enable optional rules:
 # rules:
 #   - id: default
 #     name: Default Route
 #     pattern_path: "*"                    # Catch-all for unmatched paths
-#     active_downstream: openai
 #     pipeline_config: []                  # No transformation
 #     is_enabled: true
 
@@ -59,7 +66,9 @@ downstreams:
 #  - id: chat-custom-header
 #    name: Chat with Custom Header
 #    pattern_path: /v1/chat/completions
-#    active_downstream: openai
+#    match_format: [openai]               # Only match OpenAI-format requests
+#    match_downstream_format: [openai]    # Only match OpenAI-format downstreams
+#    match_downstreams: [openai]          # Only match the "openai" downstream
 #    pipeline_config:
 #      - plugin_id: custom_header
 #        config:
@@ -72,7 +81,9 @@ downstreams:
 #    name: Chat Completions -> Anthropic
 #    pattern_path: /v1/chat/completions
 #    pattern_model: claude-sonnet        # Only matches this model
-#    active_downstream: anthropic
+#    match_format: [openai]               # Only on OpenAI-format requests
+#    match_downstream_format: [anthropic] # Only on Anthropic-format downstreams
+#    match_downstreams: [anthropic]       # Only the "anthropic" downstream
 #    pipeline_config:
 #      - plugin_id: openai2anthropic     # Transforms OpenAI -> Anthropic format
 #    is_enabled: true

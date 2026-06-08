@@ -150,6 +150,89 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// --- Rules: add format/downstream filter columns ---
+	// Add match_format column
+	if !s.columnExists("rules", "match_format") {
+		if _, err := s.db.Exec(`ALTER TABLE rules ADD COLUMN match_format TEXT DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("migrate add match_format: %w", err)
+		}
+	}
+	// Add match_downstream_format column
+	if !s.columnExists("rules", "match_downstream_format") {
+		if _, err := s.db.Exec(`ALTER TABLE rules ADD COLUMN match_downstream_format TEXT DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("migrate add match_downstream_format: %w", err)
+		}
+	}
+	// Add match_downstreams column
+	if !s.columnExists("rules", "match_downstreams") {
+		if _, err := s.db.Exec(`ALTER TABLE rules ADD COLUMN match_downstreams TEXT DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("migrate add match_downstreams: %w", err)
+		}
+	}
+
+	// Migrate legacy active_downstream -> match_downstreams
+	if s.columnExists("rules", "active_downstream") {
+		// Backfill: convert single-value active_downstream to JSON array
+		rows, err := s.db.Query(`SELECT id, active_downstream FROM rules WHERE active_downstream != '' AND (match_downstreams IS NULL OR match_downstreams = '[]' OR match_downstreams = '')`)
+		if err != nil {
+			return fmt.Errorf("query active_downstream for migration: %w", err)
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("begin migration tx: %w", err)
+		}
+		stmt, err := tx.Prepare(`UPDATE rules SET match_downstreams = ? WHERE id = ?`)
+		if err != nil {
+			tx.Rollback()
+			rows.Close()
+			return fmt.Errorf("prepare migration stmt: %w", err)
+		}
+		defer stmt.Close()
+		for rows.Next() {
+			var id, ad string
+			if err := rows.Scan(&id, &ad); err != nil {
+				tx.Rollback()
+				rows.Close()
+				return fmt.Errorf("scan migration row: %w", err)
+			}
+			jsonBytes, err := json.Marshal([]string{ad})
+			if err != nil {
+				tx.Rollback()
+				rows.Close()
+				return fmt.Errorf("marshal match_downstreams for %s: %w", id, err)
+			}
+			if _, err := stmt.Exec(string(jsonBytes), id); err != nil {
+				tx.Rollback()
+				rows.Close()
+				return fmt.Errorf("update match_downstreams for %s: %w", id, err)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration row iteration: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration: %w", err)
+		}
+
+		// Drop the old index
+		if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_rules_enabled`); err != nil {
+			return fmt.Errorf("migrate drop idx_rules_enabled: %w", err)
+		}
+
+		// Drop legacy active_downstream column
+		if _, err := s.db.Exec(`ALTER TABLE rules DROP COLUMN active_downstream`); err != nil {
+			return fmt.Errorf("migrate drop active_downstream: %w", err)
+		}
+	}
+
+	// Recreate index
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_rules_enabled ON rules(is_enabled)`); err != nil {
+		return fmt.Errorf("migrate recreate idx_rules_enabled: %w", err)
+	}
+
 	return nil
 }
 

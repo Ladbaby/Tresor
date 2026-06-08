@@ -137,12 +137,17 @@ func addOutputModelIDs(t *testing.T, s *store.Store, downstreamID string, models
 	}
 }
 
-// addRule creates a test rule record.
+// addRule creates a test rule record. The downstream parameter populates
+// match_downstreams (for filtering only — rules no longer override the target downstream).
 func addRule(t *testing.T, s *store.Store, id, name, patternPath, patternModel, downstream, pipeline string, enabled bool) {
 	t.Helper()
+	md := []string{}
+	if downstream != "" {
+		md = []string{downstream}
+	}
 	if err := s.CreateRule(&store.Rule{
 		ID: id, Name: name, PatternPath: patternPath, PatternModel: patternModel,
-		ActiveDownstream: downstream, PipelineConfig: pipeline, IsEnabled: enabled,
+		MatchDownstreams: md, PipelineConfig: pipeline, IsEnabled: enabled,
 	}); err != nil {
 		t.Fatalf("create rule %s: %v", id, err)
 	}
@@ -266,41 +271,38 @@ func TestEngine_HandleProxy_PathOnlyMatch(t *testing.T) {
 func TestEngine_HandleProxy_ModelPriority(t *testing.T) {
 	s := newTestStore(t)
 
-	var selectedDownstream string
+	var headerReceived string
 	ts := newTestDownstream(t, 200, `{"ok":true}`, func(t *testing.T, r *http.Request) {
-		selectedDownstream = r.Header.Get("X-Selected")
+		headerReceived = r.Header.Get("X-Priority")
 	})
 	defer ts.Close()
 
-	// Two downstreams with different names
-	addDownstream(t, s, "generic", "Generic", ts.URL, "key-gen")
-	addOutputModelIDs(t, s, "generic", "gpt-4o")
-	addDownstream(t, s, "specific", "Specific", ts.URL, "key-spec")
-	addOutputModelIDs(t, s, "specific", "gpt-4o")
+	// Single downstream - model resolves here
+	addDownstream(t, s, "ds1", "DS1", ts.URL, "key-1")
+	addOutputModelIDs(t, s, "ds1", "gpt-4o")
 
-	// Path-only rule (lower priority)
-	addRule(t, s, "r1", "Generic", "/v1/chat/completions", "", "generic", `[{"plugin_id":"custom_header","config":{"headers":{"X-Selected":"generic"}}}]`, true)
-	// Path+model rule (higher priority)
-	addRule(t, s, "r2", "Specific", "/v1/chat/completions", "gpt-4o", "specific", `[{"plugin_id":"custom_header","config":{"headers":{"X-Selected":"specific"}}}]`, true)
+	// Path-only rule (lower priority) - sets X-Priority: path-only
+	addRule(t, s, "r1", "PathOnly", "/v1/chat/completions", "", "ds1", `[{"plugin_id":"custom_header","config":{"headers":{"X-Priority":"path-only"}}}]`, true)
+	// Path+model rule (higher priority) - sets X-Priority: model-specific
+	addRule(t, s, "r2", "ModelSpecific", "/v1/chat/completions", "gpt-4o", "ds1", `[{"plugin_id":"custom_header","config":{"headers":{"X-Priority":"model-specific"}}}]`, true)
 
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryImpl{})
 
-	// Request with a specific model — should match the higher-priority rule
+	// Both rules match (same downstream filter). Pipelines are concatenated in priority order:
+	// model-specific first, then path-only. Since path-only runs second, it overwrites the header.
 	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
 	w := httptest.NewRecorder()
 	eng.HandleProxy(w, req)
 
 	resp := w.Result()
-	respBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(respBody))
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	if selectedDownstream != "specific" {
-		t.Fatalf("expected specific route, got %q", selectedDownstream)
+	// Path-only rule runs second, overwriting model-specific's header
+	if headerReceived != "path-only" {
+		t.Fatalf("expected X-Priority: path-only (both rules matched, path-only runs second), got %q", headerReceived)
 	}
 }
 
@@ -620,9 +622,10 @@ func TestEngine_HandleProxy_EmptyModel_Returns400(t *testing.T) {
 	}
 }
 
-// TestEngine_HandleProxy_RuleOverridesDownstream_NoAlias verifies that when there's
-// no alias but a matching rule, the rule's downstream overrides the model-resolved one.
-func TestEngine_HandleProxy_RuleOverridesDownstream_NoAlias(t *testing.T) {
+// TestEngine_HandleProxy_RuleDoesNotOverrideDownstream verifies that rules
+// no longer override the resolved downstream. The downstream is determined
+// solely by aliases or output_model_ids. Rules only contribute pipelines.
+func TestEngine_HandleProxy_RuleDoesNotOverrideDownstream(t *testing.T) {
 	s := newTestStore(t)
 
 	var ds1Hit, ds2Hit bool
@@ -644,11 +647,12 @@ func TestEngine_HandleProxy_RuleOverridesDownstream_NoAlias(t *testing.T) {
 	addDownstream(t, s, "model-ds", "ModelDS", ds1Server.URL, "key-1")
 	addOutputModelIDs(t, s, "model-ds", "gpt-4o")
 
-	// ds2 is the rule's downstream
+	// ds2 is the rule's match_downstream
 	addDownstream(t, s, "rule-ds", "RuleDS", ds2Server.URL, "key-2")
 
-	// Rule points to ds2 (overrides the model-resolved ds1 since no alias exists)
-	addRule(t, s, "r1", "Override", "/v1/chat/completions", "", "rule-ds", "[]", true)
+	// Rule references rule-ds in match_downstreams, but model resolves to model-ds
+	// Rules no longer override the downstream - they only contribute pipelines
+	addRule(t, s, "r1", "NoOverride", "/v1/chat/completions", "", "rule-ds", "[]", true)
 
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryImpl{})
@@ -666,15 +670,15 @@ func TestEngine_HandleProxy_RuleOverridesDownstream_NoAlias(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// Without alias, rule's downstream should override the model-resolved one
-	if ds1Hit {
-		t.Fatal("model-ds (ds1) should NOT have been hit when rule overrides")
+	// Model-resolved downstream (ds1) should be used, NOT the rule's downstream
+	if !ds1Hit {
+		t.Fatal("model-ds (ds1) should have been hit (output_model_ids resolution)")
 	}
-	if !ds2Hit {
-		t.Fatal("rule-ds (ds2) should have been hit")
+	if ds2Hit {
+		t.Fatal("rule-ds (ds2) should NOT have been hit - rules no longer override downstreams")
 	}
-	if string(respBody) != `{"from":"ds2"}` {
-		t.Fatalf("expected response from ds2, got: %s", string(respBody))
+	if string(respBody) != `{"from":"ds1"}` {
+		t.Fatalf("expected response from ds1, got: %s", string(respBody))
 	}
 }
 

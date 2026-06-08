@@ -199,6 +199,19 @@ async function fetchPlugins() {
     return cachedPlugins;
 }
 
+// ---- Downstream cache (shared across rules and aliases) ----
+let cachedDownstreams = null;
+
+async function fetchDownstreams() {
+    if (cachedDownstreams) return cachedDownstreams;
+    try {
+        cachedDownstreams = await api('/downstreams');
+    } catch {
+        cachedDownstreams = [];
+    }
+    return cachedDownstreams;
+}
+
 // ---- Rules ----
 async function loadRules() {
     const tbody = document.getElementById('rules-body');
@@ -206,12 +219,42 @@ async function loadRules() {
         const rules = await api('/rules');
         tbody.innerHTML = rules.length === 0
             ? '<tr><td colspan="7" class="loading">No rules configured</td></tr>'
-            : rules.map(r => `
+            : rules.map(r => {
+                // Build match badges from the three optional match fields
+                const badges = [];
+                const inputFmts = r.match_format || [];
+                const dsFmts = r.match_downstream_format || [];
+                const dsIds = r.match_downstreams || [];
+
+                // Input format badges (blue for openai, amber for anthropic)
+                inputFmts.forEach(f => {
+                    const cls = f === 'openai' ? 'format-openai' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
+                    badges.push(`<span class="format-badge ${cls}">in:${esc(f)}</span>`);
+                });
+
+                // Downstream format badges (prefixed to distinguish from input)
+                dsFmts.forEach(f => {
+                    const cls = f === 'openai' ? 'format-openai' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
+                    badges.push(`<span class="format-badge ${cls}">out:${esc(f)}</span>`);
+                });
+
+                // Downstream ID badges (grey)
+                dsIds.forEach(id => {
+                    const ds = (cachedDownstreams || []).find(d => d.id === id);
+                    const label = ds ? ds.name : id;
+                    badges.push(`<span class="badge">ds:${esc(label)}</span>`);
+                });
+
+                const matchCell = badges.length > 0
+                    ? badges.join(' ')
+                    : '<span class="format-badge format-unknown">any</span>';
+
+                return `
                 <tr>
                     <td><strong>${esc(r.name)}</strong></td>
                     <td><code>${esc(r.pattern_path)}</code></td>
                     <td><code>${esc(r.pattern_model) || '—'}</code></td>
-                    <td><code>${esc(r.active_downstream) || '—'}</code></td>
+                    <td>${matchCell}</td>
                     <td><span class="pipeline-steps">${esc(shortPipeline(r.pipeline_config))}</span></td>
                     <td><span class="status-badge ${r.is_enabled ? 'status-enabled' : 'status-disabled'}">${r.is_enabled ? 'ON' : 'OFF'}</span></td>
                     <td>
@@ -219,22 +262,10 @@ async function loadRules() {
                         <button class="btn-small" onclick="toggleRule('${r.id}', ${!r.is_enabled})">${r.is_enabled ? 'Disable' : 'Enable'}</button>
                         <button class="btn-danger" onclick="deleteRule('${r.id}')">Delete</button>
                     </td>
-                </tr>
-            `).join('');
+                </tr>`;
+            }).join('');
     } catch (err) {
         tbody.innerHTML = `<tr><td colspan="7" class="loading">Error: ${esc(err.message)}</td></tr>`;
-    }
-}
-
-async function loadDownstreamsForSelect() {
-    try {
-        const ds = await api('/downstreams');
-        const select = document.getElementById('rule-downstream');
-        select.innerHTML = '<option value="">— None —</option>' +
-            ds.map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('');
-        return ds;
-    } catch {
-        return [];
     }
 }
 
@@ -518,6 +549,81 @@ function parsePipeline(configStr) {
 }
 
 // ---- Rule Modal ----
+
+/**
+ * Populate the downstream multi-select in the rule modal.
+ * Uses the existing cachedDownstreams to build clickable tags.
+ */
+function populateRuleMatchDownstreams(containerEl, selectedIds) {
+    containerEl.innerHTML = '';
+    const dsList = cachedDownstreams || [];
+    const sel = selectedIds || [];
+
+    if (dsList.length === 0) {
+        containerEl.innerHTML = '<div class="model-multi-empty">No downstreams available</div>';
+        return;
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'model-tag-wrap';
+
+    dsList.forEach(d => {
+        const tag = document.createElement('span');
+        tag.className = 'model-tag';
+        if (sel.includes(d.id)) tag.classList.add('selected');
+        tag.dataset.id = d.id;
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = d.id;
+        cb.style.display = 'none';
+        cb.checked = sel.includes(d.id);
+        tag.appendChild(cb);
+
+        const icon = document.createElement('span');
+        icon.className = 'model-tag-icon';
+        icon.textContent = cb.checked ? '☑' : '☐';
+        tag.appendChild(icon);
+
+        const name = document.createElement('span');
+        name.className = 'model-tag-name';
+        name.textContent = d.name;
+        tag.appendChild(name);
+
+        tag.addEventListener('click', () => {
+            cb.checked = !cb.checked;
+            tag.classList.toggle('selected', cb.checked);
+            icon.textContent = cb.checked ? '☑' : '☐';
+        });
+
+        wrap.appendChild(tag);
+    });
+
+    containerEl.appendChild(wrap);
+}
+
+/**
+ * Collect checked downstream IDs from the multi-select.
+ */
+function getSelectedMatchDownstreams(containerEl) {
+    const ids = [];
+    containerEl.querySelectorAll('.model-tag.selected').forEach(tag => {
+        ids.push(tag.dataset.id);
+    });
+    return ids;
+}
+
+/**
+ * Collect checked format values from a checkbox group.
+ */
+function getCheckedFormats(containerEl) {
+    const formats = [];
+    containerEl.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => {
+        formats.push(cb.value);
+    });
+    return formats;
+}
+
 async function openRuleModal(rule) {
     document.getElementById('rule-modal-title').textContent = rule ? 'Edit Rule' : 'New Rule';
     document.getElementById('rule-id').value = rule ? rule.id : '';
@@ -526,9 +632,26 @@ async function openRuleModal(rule) {
     document.getElementById('rule-model').value = rule ? (rule.pattern_model || '') : '';
     document.getElementById('rule-enabled').checked = rule ? rule.is_enabled : true;
 
-    await loadDownstreamsForSelect().then(ds => {
-        document.getElementById('rule-downstream').value = rule ? (rule.active_downstream || '') : '';
+    // Ensure downstreams cache is loaded for the multi-select
+    await fetchDownstreams();
+
+    // Populate match input format checkboxes
+    const inputFmtContainer = document.getElementById('rule-match-input-formats');
+    const inputFormats = rule ? (rule.match_format || []) : [];
+    inputFmtContainer.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        cb.checked = inputFormats.includes(cb.value);
     });
+
+    // Populate match downstream format checkboxes
+    const dsFmtContainer = document.getElementById('rule-match-downstream-formats');
+    const dsFormats = rule ? (rule.match_downstream_format || []) : [];
+    dsFmtContainer.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        cb.checked = dsFormats.includes(cb.value);
+    });
+
+    // Populate match downstreams multi-select
+    const dsContainer = document.getElementById('rule-match-downstreams');
+    populateRuleMatchDownstreams(dsContainer, rule ? (rule.match_downstreams || []) : []);
 
     // Initialize visual pipeline editor
     const steps = rule ? parsePipeline(rule.pipeline_config) : [];
@@ -563,8 +686,10 @@ async function deleteRule(id) {
     }
 }
 
-document.getElementById('btn-new-rule').addEventListener('click', () => {
-    fetchPlugins().then(() => openRuleModal(null));
+document.getElementById('btn-new-rule').addEventListener('click', async () => {
+    await fetchPlugins();
+    await fetchDownstreams();
+    openRuleModal(null);
 });
 
 document.getElementById('rule-form').addEventListener('submit', async (e) => {
@@ -574,11 +699,18 @@ document.getElementById('rule-form').addEventListener('submit', async (e) => {
     // Serialize visual pipeline to JSON for the hidden textarea
     document.getElementById('rule-pipeline').value = serializePipeline();
 
+    // Collect match criteria
+    const matchFormat = getCheckedFormats(document.getElementById('rule-match-input-formats'));
+    const matchDownstreamFormat = getCheckedFormats(document.getElementById('rule-match-downstream-formats'));
+    const matchDownstreams = getSelectedMatchDownstreams(document.getElementById('rule-match-downstreams'));
+
     const body = {
         name: document.getElementById('rule-name').value,
         pattern_path: document.getElementById('rule-path').value,
         pattern_model: document.getElementById('rule-model').value,
-        active_downstream: document.getElementById('rule-downstream').value,
+        match_format: matchFormat,
+        match_downstream_format: matchDownstreamFormat,
+        match_downstreams: matchDownstreams,
         pipeline_config: document.getElementById('rule-pipeline').value,
         is_enabled: document.getElementById('rule-enabled').checked,
     };
@@ -606,6 +738,7 @@ async function loadDownstreams() {
     const tbody = document.getElementById('downstreams-body');
     try {
         const ds = await api('/downstreams');
+        cachedDownstreams = ds;
         tbody.innerHTML = ds.length === 0
             ? '<tr><td colspan="6" class="loading">No downstreams configured</td></tr>'
             : ds.map(d => {
@@ -862,8 +995,6 @@ function shortPipeline(config) {
 }
 
 // ---- Aliases ----
-
-let cachedDownstreams = null;
 
 async function loadDownstreamsForAliasSelect() {
     if (cachedDownstreams) return cachedDownstreams;
@@ -1518,7 +1649,7 @@ function disconnectLogStream() {
     }
     logPaused = false;
     var badge = document.getElementById('log-status-badge');
-    if (badge) { badge.textContent = '○ Disconnected'; badge.style.background = '#6c757d'; }
+    if (badge) { badge.textContent = '◝ Disconnected'; badge.style.background = '#6c757d'; }
     var pauseBtn = document.getElementById('btn-pause-logs');
     if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
 }

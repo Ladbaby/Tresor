@@ -32,7 +32,7 @@ func TestWriteConfig_RoundTrip(t *testing.T) {
 		t.Fatalf("create downstream: %v", err)
 	}
 
-	rule := &Rule{ID: "rule-test", Name: "Test Rule", PatternPath: "/v1/chat/completions", ActiveDownstream: "ds-test", PipelineConfig: "[{\"plugin_id\":\"custom_header\"}]", IsEnabled: true}
+	rule := &Rule{ID: "rule-test", Name: "Test Rule", PatternPath: "/v1/chat/completions", MatchDownstreams: []string{"ds-test"}, PipelineConfig: "[{\"plugin_id\":\"custom_header\"}]", IsEnabled: true}
 	if err := s.CreateRule(rule); err != nil {
 		t.Fatalf("create rule: %v", err)
 	}

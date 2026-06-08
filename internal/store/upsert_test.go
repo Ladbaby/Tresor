@@ -77,7 +77,7 @@ func TestUpsertRules_InsertNew(t *testing.T) {
 	s := newTestStore(t)
 
 	rules := []config.RuleCfg{
-		{ID: "rule-new", Name: "New Rule", PatternPath: "/v1/chat/completions", ActiveDownstream: "ds-test", PipelineConfig: []config.PipelineStep{{PluginID: "custom_header"}}, IsEnabled: true},
+		{ID: "rule-new", Name: "New Rule", PatternPath: "/v1/chat/completions", MatchDownstreams: []string{"ds-test"}, PipelineConfig: []config.PipelineStep{{PluginID: "custom_header"}}, IsEnabled: true},
 	}
 	if err := s.upsertRules(rules); err != nil {
 		t.Fatalf("upsert rules: %v", err)
@@ -107,7 +107,7 @@ func TestUpsertRules_UpdateExisting(t *testing.T) {
 
 	// Upsert with updated fields
 	rules := []config.RuleCfg{
-		{ID: "rule-upd", Name: "New Name", PatternPath: "/new/path", ActiveDownstream: "ds-test", PipelineConfig: []config.PipelineStep{{PluginID: "openai2anthropic"}}, IsEnabled: false},
+		{ID: "rule-upd", Name: "New Name", PatternPath: "/new/path", MatchDownstreams: []string{"ds-test"}, PipelineConfig: []config.PipelineStep{{PluginID: "openai2anthropic"}}, IsEnabled: false},
 	}
 	if err := s.upsertRules(rules); err != nil {
 		t.Fatalf("upsert rules: %v", err)
@@ -308,7 +308,7 @@ func TestDeleteDownstream_CascadeNullifiesRules(t *testing.T) {
 		t.Fatalf("create downstream: %v", err)
 	}
 
-	rule := &Rule{ID: "rule-cascade", Name: "Cascade Rule", PatternPath: "/v1/chat/completions", ActiveDownstream: "ds-cascade", PipelineConfig: "[]", IsEnabled: true}
+	rule := &Rule{ID: "rule-cascade", Name: "Cascade Rule", PatternPath: "/v1/chat/completions", MatchDownstreams: []string{"ds-cascade"}, PipelineConfig: "[]", IsEnabled: true}
 	if err := s.CreateRule(rule); err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
@@ -317,13 +317,13 @@ func TestDeleteDownstream_CascadeNullifiesRules(t *testing.T) {
 		t.Fatalf("delete downstream: %v", err)
 	}
 
-	// Rule should still exist but with nullified active_downstream
+	// Rule should still exist but with ds-cascade removed from match_downstreams
 	updated, err := s.GetRule("rule-cascade")
 	if err != nil {
 		t.Fatalf("get rule: %v", err)
 	}
-	if updated.ActiveDownstream != "" {
-		t.Fatalf("expected active_downstream to be empty after cascade delete, got %q", updated.ActiveDownstream)
+	if len(updated.MatchDownstreams) != 0 {
+		t.Fatalf("expected match_downstreams to be empty after cascade delete, got %v", updated.MatchDownstreams)
 	}
 }
 
@@ -411,7 +411,7 @@ func TestAddRemoveOutputModelID(t *testing.T) {
 func TestUpdateRuleEnabled(t *testing.T) {
 	s := newTestStore(t)
 
-	rule := &Rule{ID: "rule-enable", Name: "Enable Rule", PatternPath: "/v1/chat/completions", PipelineConfig: "[]", IsEnabled: true}
+	rule := &Rule{ID: "rule-enable", Name: "Enable Rule", PatternPath: "/v1/chat/completions", MatchDownstreams: []string{}, PipelineConfig: "[]", IsEnabled: true}
 	if err := s.CreateRule(rule); err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
@@ -444,13 +444,13 @@ func TestUpdateRuleEnabled(t *testing.T) {
 func TestUpdateRule(t *testing.T) {
 	s := newTestStore(t)
 
-	rule := &Rule{ID: "rule-full-upd", Name: "Old Name", PatternPath: "/old/path", PipelineConfig: "[]", IsEnabled: true}
+	rule := &Rule{ID: "rule-full-upd", Name: "Old Name", PatternPath: "/old/path", MatchDownstreams: []string{}, PipelineConfig: "[]", IsEnabled: true}
 	if err := s.CreateRule(rule); err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
 
 	// Full update
-	updated := &Rule{ID: "rule-full-upd", Name: "New Name", PatternPath: "/new/path", PatternModel: "gpt-4o", ActiveDownstream: "ds-test", PipelineConfig: "[\"x\"]", IsEnabled: false}
+	updated := &Rule{ID: "rule-full-upd", Name: "New Name", PatternPath: "/new/path", PatternModel: "gpt-4o", MatchDownstreams: []string{"ds-test"}, PipelineConfig: "[\"x\"]", IsEnabled: false}
 	if err := s.UpdateRule(updated); err != nil {
 		t.Fatalf("update rule: %v", err)
 	}

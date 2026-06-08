@@ -53,17 +53,20 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	// --- Rules ---
 	var rules []config.RuleCfg
 	rows, err = s.db.Query(
-		`SELECT id, name, pattern_path, COALESCE(pattern_model,''), COALESCE(active_downstream,''),
-			pipeline_config, is_enabled FROM rules ORDER BY created_at`)
+		`SELECT id, name, pattern_path, COALESCE(pattern_model,''),
+			pipeline_config, is_enabled,
+			COALESCE(match_format,'[]'), COALESCE(match_downstream_format,'[]'),
+			COALESCE(match_downstreams,'[]')
+		 FROM rules ORDER BY created_at`)
 	if err != nil {
 		return fmt.Errorf("query rules: %w", err)
 	}
 	for rows.Next() {
 		var r config.RuleCfg
-		var pipelineJSON string
+		var pipelineJSON, mfJSON, mdfJSON, mdsJSON string
 		var enabled int
 		if err := rows.Scan(&r.ID, &r.Name, &r.PatternPath, &r.PatternModel,
-			&r.ActiveDownstream, &pipelineJSON, &enabled); err != nil {
+			&pipelineJSON, &enabled, &mfJSON, &mdfJSON, &mdsJSON); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan rule: %w", err)
 		}
@@ -79,6 +82,35 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 			r.PipelineConfig = steps
 		} else {
 			r.PipelineConfig = []config.PipelineStep{}
+		}
+
+		// Parse format/downstream array fields
+		for _, col := range []string{mfJSON, mdfJSON, mdsJSON} {
+			if col == "" || col == "[]" {
+				continue
+			}
+			var arr []string
+			if err := json.Unmarshal([]byte(col), &arr); err != nil {
+				rows.Close()
+				return fmt.Errorf("parse array for rule %s: %w", r.ID, err)
+			}
+			// Assign to the correct field based on which column it is
+			if col == mfJSON {
+				r.MatchFormat = arr
+			} else if col == mdfJSON {
+				r.MatchDownstreamFmt = arr
+			} else {
+				r.MatchDownstreams = arr
+			}
+		}
+		if r.MatchFormat == nil {
+			r.MatchFormat = []string{}
+		}
+		if r.MatchDownstreamFmt == nil {
+			r.MatchDownstreamFmt = []string{}
+		}
+		if r.MatchDownstreams == nil {
+			r.MatchDownstreams = []string{}
 		}
 
 		rules = append(rules, r)

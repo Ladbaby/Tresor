@@ -1,11 +1,11 @@
 package store
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
-
-	"encoding/json"
 
 	"github.com/google/uuid"
 )
@@ -149,8 +149,9 @@ func (s *Store) UpdateDownstream(d *Downstream) error {
 	return tx.Commit()
 }
 
-// DeleteDownstream removes a downstream and its output model IDs. Rules
-// referencing it will have their active_downstream set to empty.
+// DeleteDownstream removes a downstream and its output model IDs.
+// Rules referencing this downstream in match_downstreams have it removed.
+// Aliases referencing this downstream are deleted.
 func (s *Store) DeleteDownstream(id string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -158,10 +159,8 @@ func (s *Store) DeleteDownstream(id string) error {
 	}
 	defer tx.Rollback()
 
-	// Nullify rules referencing this downstream
-	if _, err := tx.Exec("UPDATE rules SET active_downstream = '' WHERE active_downstream = ?", id); err != nil {
-		return err
-	}
+	// Remove this downstream ID from rule match_downstreams arrays
+	removeFromMatchDownstreams(tx, id)
 	// Delete all aliases referencing this downstream
 	if _, err := tx.Exec("DELETE FROM aliases WHERE downstream_id = ?", id); err != nil {
 		return err
@@ -291,4 +290,37 @@ func (s *Store) listOutputModelIDs(downstreamID string) []string {
 		return []string{}
 	}
 	return models
+}
+
+// removeFromMatchDownstreams removes a downstream ID from all rules' match_downstreams arrays.
+func removeFromMatchDownstreams(tx *sql.Tx, downstreamID string) error {
+	rows, err := tx.Query("SELECT id, match_downstreams FROM rules WHERE match_downstreams != '[]' AND match_downstreams != ''")
+	if err != nil {
+		return nil // column may not exist yet during migration
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ruleID, mdJSON string
+		if err := rows.Scan(&ruleID, &mdJSON); err != nil {
+			return err
+		}
+		var arr []string
+		if err := json.Unmarshal([]byte(mdJSON), &arr); err != nil {
+			continue
+		}
+		var filtered []string
+		for _, v := range arr {
+			if v != downstreamID {
+				filtered = append(filtered, v)
+			}
+		}
+		if len(filtered) != len(arr) {
+			newJSON, _ := json.Marshal(filtered)
+			if _, err := tx.Exec("UPDATE rules SET match_downstreams = ? WHERE id = ?", string(newJSON), ruleID); err != nil {
+				return err
+			}
+		}
+	}
+	return rows.Err()
 }

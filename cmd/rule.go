@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"tresor/internal/config"
@@ -19,6 +20,12 @@ var ruleCmd = &cobra.Command{
 	Use:   "rule",
 	Short: "Manage routing rules",
 }
+
+var (
+	matchFormat        string
+	matchDownstreamFmt string
+	matchDownstreams   string
+)
 
 func newHTTPClient(cfg *config.AppConfig) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -81,9 +88,9 @@ var ruleListCmd = &cobra.Command{
 	},
 }
 
-var ruleSwitchCmd = &cobra.Command{
-	Use:   "switch [rule-id] [downstream-id]",
-	Short: "Switch a rule to a different downstream",
+var ruleCreateCmd = &cobra.Command{
+	Use:   "create [name] [pattern_path]",
+	Short: "Create a new routing rule",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load(cfgFile)
@@ -91,36 +98,23 @@ var ruleSwitchCmd = &cobra.Command{
 			return err
 		}
 
-		payload := map[string]string{"downstream_id": args[1]}
-		data, _ := json.Marshal(payload)
-
-		body, err := doAPIRequest(cfg, http.MethodPut,
-			fmt.Sprintf("/api/rules/%s/switch", args[0]), data)
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(body))
-		return nil
-	},
-}
-
-var ruleCreateCmd = &cobra.Command{
-	Use:   "create [name] [pattern_path] [downstream_id]",
-	Short: "Create a new routing rule",
-	Args:  cobra.ExactArgs(3),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load(cfgFile)
-		if err != nil {
-			return err
-		}
-
 		payload := map[string]interface{}{
-			"name":              args[0],
-			"pattern_path":      args[1],
-			"active_downstream": args[2],
-			"pipeline_config":   "[]",
-			"is_enabled":        true,
+			"name":                    args[0],
+			"pattern_path":            args[1],
+			"pipeline_config":         "[]",
+			"is_enabled":              true,
 		}
+
+		if matchFormat != "" {
+			payload["match_format"] = splitComma(matchFormat)
+		}
+		if matchDownstreamFmt != "" {
+			payload["match_downstream_format"] = splitComma(matchDownstreamFmt)
+		}
+		if matchDownstreams != "" {
+			payload["match_downstreams"] = splitComma(matchDownstreams)
+		}
+
 		data, _ := json.Marshal(payload)
 
 		body, err := doAPIRequest(cfg, http.MethodPost, "/api/rules", data)
@@ -130,6 +124,16 @@ var ruleCreateCmd = &cobra.Command{
 		fmt.Println(string(body))
 		return nil
 	},
+}
+
+func splitComma(s string) []string {
+	var result []string
+	for _, v := range strings.Split(s, ",") {
+		if v != "" {
+			result = append(result, v)
+		}
+	}
+	return result
 }
 
 // ---- Alias CLI Commands ----
@@ -227,8 +231,10 @@ var aliasDeleteCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(ruleCmd)
 	ruleCmd.AddCommand(ruleListCmd)
-	ruleCmd.AddCommand(ruleSwitchCmd)
 	ruleCmd.AddCommand(ruleCreateCmd)
+	ruleCreateCmd.Flags().StringVar(&matchFormat, "match-format", "", "Match input format (comma-separated, e.g. openai,anthropic)")
+	ruleCreateCmd.Flags().StringVar(&matchDownstreamFmt, "match-downstream-format", "", "Match downstream format (comma-separated)")
+	ruleCreateCmd.Flags().StringVar(&matchDownstreams, "match-downstreams", "", "Match downstreams (comma-separated)")
 	rootCmd.AddCommand(aliasCmd)
 	aliasCmd.AddCommand(aliasListCmd)
 	aliasCmd.AddCommand(aliasActivateCmd)

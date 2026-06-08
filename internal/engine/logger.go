@@ -68,7 +68,7 @@ type RequestLogEntry struct {
 	DownstreamID   string    `json:"downstream_id"`
 	DownstreamName string    `json:"downstream_name"`
 	AliasGroup     string    `json:"alias_group,omitempty"`
-	RuleID         string    `json:"rule_id,omitempty"`
+	RuleIDs        []string  `json:"rule_ids,omitempty"`
 	Status         int       `json:"status"`
 	Duration       DurationMs `json:"duration"`
 	Error          string    `json:"error,omitempty"`

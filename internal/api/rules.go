@@ -32,11 +32,13 @@ func (r *Router) handleRules(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusBadRequest, "name and pattern_path are required")
 			return
 		}
-		// Validate downstream exists if specified
-		if rule.ActiveDownstream != "" {
-			if _, err := r.store.GetDownstream(rule.ActiveDownstream); err != nil {
-				writeError(w, http.StatusBadRequest, "active_downstream not found: "+rule.ActiveDownstream)
-				return
+		// Validate downstreams exist if specified
+		if len(rule.MatchDownstreams) > 0 {
+			for _, dsID := range rule.MatchDownstreams {
+				if _, err := r.store.GetDownstream(dsID); err != nil {
+					writeError(w, http.StatusBadRequest, "match_downstreams not found: "+dsID)
+					return
+				}
 			}
 		}
 		if err := r.store.CreateRule(&rule); err != nil {
@@ -53,19 +55,15 @@ func (r *Router) handleRules(w http.ResponseWriter, req *http.Request) {
 
 // handleRuleByID handles GET, PUT, DELETE on /api/rules/{id}
 func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
-	// Extract rule ID from path: /api/rules/{id} or /api/rules/{id}/switch
+	// Extract rule ID from path: /api/rules/{id}
 	path := strings.TrimPrefix(req.URL.Path, "/api/rules/")
 	id := path
-	action := ""
 
 	if idx := strings.Index(path, "/"); idx >= 0 {
 		id = path[:idx]
-		action = path[idx+1:]
 	}
 
 	switch {
-	case action == "switch" && req.Method == http.MethodPut:
-		r.handleSwitchRule(w, req, id)
 	case req.Method == http.MethodGet:
 		rule, err := r.store.GetRule(id)
 		if err != nil {
@@ -76,12 +74,14 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 
 	case req.Method == http.MethodPut:
 		var update struct {
-			Name             string `json:"name"`
-			PatternPath      string `json:"pattern_path"`
-			PatternModel     string `json:"pattern_model"`
-			ActiveDownstream string `json:"active_downstream"`
-			PipelineConfig   string `json:"pipeline_config"`
-			IsEnabled        *bool  `json:"is_enabled"`
+			Name                  string   `json:"name"`
+			PatternPath           string   `json:"pattern_path"`
+			PatternModel          string   `json:"pattern_model"`
+			MatchFormat           []string `json:"match_format"`
+			MatchDownstreamFmt    []string `json:"match_downstream_format"`
+			MatchDownstreams      []string `json:"match_downstreams"`
+			PipelineConfig        string   `json:"pipeline_config"`
+			IsEnabled             *bool    `json:"is_enabled"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&update); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -90,7 +90,8 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 
 		// Heuristic: if the payload supplies rule-content fields, do a full update;
 		// otherwise treat it as a backward-compatible enabled-only toggle.
-		if update.Name != "" || update.PatternPath != "" || update.PipelineConfig != "" {
+		if update.Name != "" || update.PatternPath != "" || update.PipelineConfig != "" ||
+			update.MatchFormat != nil || update.MatchDownstreamFmt != nil || update.MatchDownstreams != nil {
 			// Full rule update
 			existing, err := r.store.GetRule(id)
 			if err != nil {
@@ -105,12 +106,21 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 				existing.PatternPath = update.PatternPath
 			}
 			existing.PatternModel = update.PatternModel // allow setting to ""
-			if update.ActiveDownstream != "" {
-				if _, err := r.store.GetDownstream(update.ActiveDownstream); err != nil {
-					writeError(w, http.StatusBadRequest, "active_downstream not found: "+update.ActiveDownstream)
-					return
+			if update.MatchFormat != nil {
+				existing.MatchFormat = update.MatchFormat
+			}
+			if update.MatchDownstreamFmt != nil {
+				existing.MatchDownstreamFmt = update.MatchDownstreamFmt
+			}
+			if update.MatchDownstreams != nil {
+				// Validate downstreams exist
+				for _, dsID := range update.MatchDownstreams {
+					if _, err := r.store.GetDownstream(dsID); err != nil {
+						writeError(w, http.StatusBadRequest, "match_downstreams not found: "+dsID)
+						return
+					}
 				}
-				existing.ActiveDownstream = update.ActiveDownstream
+				existing.MatchDownstreams = update.MatchDownstreams
 			}
 			if update.PipelineConfig != "" {
 				if !json.Valid([]byte(update.PipelineConfig)) {
@@ -157,38 +167,4 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-// handleSwitchRule handles PUT /api/rules/{id}/switch
-func (r *Router) handleSwitchRule(w http.ResponseWriter, req *http.Request, id string) {
-	var body struct {
-		DownstreamID string `json:"downstream_id"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
-	}
-	if body.DownstreamID == "" {
-		writeError(w, http.StatusBadRequest, "downstream_id is required")
-		return
-	}
-
-	// Validate downstream exists
-	if _, err := r.store.GetDownstream(body.DownstreamID); err != nil {
-		writeError(w, http.StatusNotFound, "downstream not found: "+body.DownstreamID)
-		return
-	}
-
-	if err := r.store.UpdateRuleDownstream(id, body.DownstreamID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	_ = r.writeConfig()
-	rule, err := r.store.GetRule(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, rule)
 }

@@ -279,7 +279,6 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	var ds *store.Downstream
 	currentBody := body
-	hasAlias := false
 
 	// Step 1: Try active alias first
 	alias, err := e.store.FindActiveAlias(model)
@@ -294,7 +293,6 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if alias != nil {
-		hasAlias = true
 		entry.AliasGroup = alias.InputModelID
 		// Alias resolves the downstream and rewrites the model name
 		ds, err = e.store.GetDownstream(alias.DownstreamID)
@@ -334,10 +332,14 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		entry.ResolvedModel = model
 	}
 
-	// Step 3: Optional rule lookup (for pipeline transforms only)
-	rule, err := e.store.FindMatchingRule(r.URL.Path, model)
+	// Step 3: Format-aware rule matching
+	// Detect input format from request path.
+	inputFormat := detectInputFormat(r.URL.Path)
+	// Find all matching rules (path+model+format filters). Rules only contribute
+	// pipeline transformers; they never override the target downstream.
+	rules, err := e.store.FindMatchingRules(r.URL.Path, model, inputFormat, ds.ID, ds.ApiFormats)
 	if err != nil {
-		log.Printf("Error finding rule: %v", err)
+		log.Printf("Error finding rules: %v", err)
 		http.Error(cw, "internal error", http.StatusInternalServerError)
 		entry.Status = http.StatusInternalServerError
 		entry.Error = "rule lookup error"
@@ -346,22 +348,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If a rule matched and there's no alias, let the rule override the downstream.
-	// Alias takes precedence when present (explicit model-to-downstream contract).
-	if rule != nil && !hasAlias {
-		if rule.ActiveDownstream != "" {
-			ruleDs, err := e.store.GetDownstream(rule.ActiveDownstream)
-			if err != nil {
-				log.Printf("Error getting downstream %s for rule %s: %v", rule.ActiveDownstream, rule.ID, err)
-				http.Error(cw, fmt.Sprintf("rule %q references missing downstream %q", rule.ID, rule.ActiveDownstream), http.StatusBadGateway)
-				entry.Status = http.StatusBadGateway
-				entry.Error = "rule downstream missing"
-				entry.Duration = DurationMs(time.Since(start))
-				e.logger.Record(entry)
-				return
-			}
-			ds = ruleDs
-			entry.RuleID = rule.ID
+	// Collect rule IDs for logging
+	if len(rules) > 0 {
+		entry.RuleIDs = make([]string, len(rules))
+		for i, r := range rules {
+			entry.RuleIDs[i] = r.ID
 		}
 	}
 
@@ -381,25 +372,25 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		Variables: make(map[string]interface{}),
 	}
 
-	// Build and execute pipeline (rule's config or empty)
-	pipelineConfig := "[]"
-	if rule != nil {
-		pipelineConfig = rule.PipelineConfig
+	// Build pipeline by concatenating all matching rules' pipelines (in priority order).
+	var pipeline Pipeline
+	for _, rule := range rules {
+		p, err := ParsePipelineConfig(rule.PipelineConfig, e.registry)
+		if err != nil {
+			log.Printf("Error building pipeline for rule %s: %v", rule.ID, err)
+			http.Error(cw, "pipeline error", http.StatusInternalServerError)
+			entry.Status = http.StatusInternalServerError
+			entry.Error = "pipeline error"
+			entry.Duration = DurationMs(time.Since(start))
+			e.logger.Record(entry)
+			return
+		}
+		pipeline.RequestSteps = append(pipeline.RequestSteps, p.RequestSteps...)
+		pipeline.ResponseSteps = append(pipeline.ResponseSteps, p.ResponseSteps...)
+		pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, p.StreamResponseSteps...)
 	}
 
-	pipeline, err := ParsePipelineConfig(pipelineConfig, e.registry)
-	if err != nil {
-		log.Printf("Error building pipeline: %v", err)
-		http.Error(cw, "pipeline error", http.StatusInternalServerError)
-		entry.Status = http.StatusInternalServerError
-		entry.Error = "pipeline error"
-		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
-		return
-	}
-
-	// Auto-translation: detect input format from request path, compare with downstream formats
-	inputFormat := detectInputFormat(r.URL.Path)
+	// Auto-translation: compare input format with downstream formats
 	if inputFormat != "" && len(ds.ApiFormats) > 0 && !slices.Contains(ds.ApiFormats, inputFormat) {
 		pluginID := "openai2anthropic"
 		typeName := "OpenAI2Anthropic"
@@ -462,7 +453,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		// Streaming path: pipe SSE events to the client in real-time.
 		// If stream transformers exist, each chunk is transformed on the fly.
 		// Otherwise, events are passed through unchanged but still flushed immediately.
-		e.handleStreamingResponse(cw, resp, ctx, pipeline)
+		e.handleStreamingResponse(cw, resp, ctx, &pipeline)
 		return
 	}
 

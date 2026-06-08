@@ -102,7 +102,7 @@ func TestCreateRule_Success(t *testing.T) {
 	body := map[string]interface{}{
 		"name":              "test-rule",
 		"pattern_path":      "/v1/chat/completions",
-		"active_downstream": ds.ID,
+		"match_downstreams": []string{ds.ID},
 		"pipeline_config":   "[]",
 		"is_enabled":        true,
 	}
@@ -132,7 +132,7 @@ func TestGetRule_Success(t *testing.T) {
 	ruleBody := map[string]interface{}{
 		"name":              "get-test-rule",
 		"pattern_path":      "/v1/chat/completions",
-		"active_downstream": ds.ID,
+		"match_downstreams": []string{ds.ID},
 		"pipeline_config":   "[]",
 		"is_enabled":        true,
 	}
@@ -184,7 +184,7 @@ func TestUpdateRule_FullUpdate(t *testing.T) {
 	ruleBody := map[string]interface{}{
 		"name":              "old-name",
 		"pattern_path":      "/old/path",
-		"active_downstream": ds.ID,
+		"match_downstreams": []string{ds.ID},
 		"pipeline_config":   "[]",
 		"is_enabled":        true,
 	}
@@ -232,7 +232,7 @@ func TestUpdateRule_EnabledOnly(t *testing.T) {
 	ruleBody := map[string]interface{}{
 		"name":              "enable-test-rule",
 		"pattern_path":      "/v1/chat/completions",
-		"active_downstream": ds.ID,
+		"match_downstreams": []string{ds.ID},
 		"pipeline_config":   "[]",
 		"is_enabled":        true,
 	}
@@ -276,7 +276,7 @@ func TestUpdateRule_NoFields(t *testing.T) {
 	ruleBody := map[string]interface{}{
 		"name":              "no-fields-rule",
 		"pattern_path":      "/v1/chat/completions",
-		"active_downstream": ds.ID,
+		"match_downstreams": []string{ds.ID},
 		"pipeline_config":   "[]",
 		"is_enabled":        true,
 	}
@@ -312,7 +312,7 @@ func TestDeleteRule(t *testing.T) {
 	ruleBody := map[string]interface{}{
 		"name":              "delete-me-rule",
 		"pattern_path":      "/v1/chat/completions",
-		"active_downstream": ds.ID,
+		"match_downstreams": []string{ds.ID},
 		"pipeline_config":   "[]",
 		"is_enabled":        true,
 	}
@@ -357,7 +357,7 @@ func TestCreateRule_RejectsInvalidDownstream(t *testing.T) {
 	body := map[string]interface{}{
 		"name":              "bad-rule",
 		"pattern_path":      "/v1/chat/completions",
-		"active_downstream": "nonexistent-downstream",
+		"match_downstreams": []string{"nonexistent-downstream"},
 		"pipeline_config":   "[]",
 		"is_enabled":        true,
 	}
@@ -369,58 +369,7 @@ func TestCreateRule_RejectsInvalidDownstream(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for invalid downstream, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 400 for invalid match_downstreams, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestSwitchRule_RejectsInvalidDownstream(t *testing.T) {
-	router := newTestRouter(t)
-	handler := router.Handler()
-
-	// Create a valid downstream first
-	ds := map[string]interface{}{
-		"name":     "test-provider",
-		"base_url": "https://api.test.com/v1",
-	}
-	data, _ := json.Marshal(ds)
-	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("create downstream: %d", w.Code)
-	}
-	var createdDs store.Downstream
-	json.NewDecoder(w.Body).Decode(&createdDs)
-
-	// Create a rule
-	ruleBody := map[string]interface{}{
-		"name":              "test-rule",
-		"pattern_path":      "/v1/chat/completions",
-		"active_downstream": createdDs.ID,
-		"pipeline_config":   "[]",
-		"is_enabled":        true,
-	}
-	data, _ = json.Marshal(ruleBody)
-	req = httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(data))
-	req.Header.Set("Content-Type", "application/json")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("create rule: %d", w.Code)
-	}
-	var createdRule store.Rule
-	json.NewDecoder(w.Body).Decode(&createdRule)
-
-	// Switch to invalid downstream
-	payload := map[string]string{"downstream_id": "does-not-exist"}
-	data, _ = json.Marshal(payload)
-	req = httptest.NewRequest(http.MethodPut, "/api/rules/"+createdRule.ID+"/switch", bytes.NewReader(data))
-	req.Header.Set("Content-Type", "application/json")
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for invalid downstream switch, got %d: %s", w.Code, w.Body.String())
-	}
-}
