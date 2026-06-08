@@ -134,7 +134,7 @@ func (r *Router) handleAuthStatus(w http.ResponseWriter, req *http.Request) {
 // Expects a JSON body: {"password": "..."}. Returns {"ok": true, "token": "<jwt>"} on success, 401 on failure.
 func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if r.cfg.AdminPassword == "" {
@@ -157,7 +157,7 @@ func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 
 	if body.Password != r.cfg.AdminPassword {
 		// Record failed attempt; check if rate limited
-		if r.authMW.CheckRateLimit(req.RemoteAddr) {
+		if r.authMW.CheckRateLimit(middleware.ExtractClientIP(req)) {
 			writeError(w, http.StatusTooManyRequests, "too many login attempts, please wait")
 			return
 		}
@@ -182,7 +182,7 @@ func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 // Only useful for SSE EventSource connections that can't set Authorization headers.
 func (r *Router) handleAuthRefresh(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if r.cfg.AdminPassword == "" {

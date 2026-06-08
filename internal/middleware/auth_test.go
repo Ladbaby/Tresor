@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -90,5 +91,69 @@ func TestAuthMiddleware_Protect_BadFormat_Rejects(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 with bad format, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestExtractClientIP_RemoteAddrNormalization(t *testing.T) {
+	// Non-localhost: strip port, ignore forwarded headers
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	req.Header.Set("X-Forwarded-For", "203.0.113.50")
+	if got := ExtractClientIP(req); got != "10.0.0.1" {
+		t.Errorf("non-localhost: got %q, want %q", got, "10.0.0.1")
+	}
+
+	// Localhost with X-Forwarded-For: use first IP
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.50, 70.1.2.3")
+	if got := ExtractClientIP(req); got != "203.0.113.50" {
+		t.Errorf("localhost XFF: got %q, want %q", got, "203.0.113.50")
+	}
+
+	// Localhost with X-Real-IP
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Real-IP", "203.0.113.50")
+	if got := ExtractClientIP(req); got != "203.0.113.50" {
+		t.Errorf("localhost XRI: got %q, want %q", got, "203.0.113.50")
+	}
+
+	// IPv6 localhost
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "[::1]:54321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.50")
+	if got := ExtractClientIP(req); got != "203.0.113.50" {
+		t.Errorf("ipv6 localhost XFF: got %q, want %q", got, "203.0.113.50")
+	}
+
+	// No forwarded headers, non-localhost
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.168.1.100:54321"
+	if got := ExtractClientIP(req); got != "192.168.1.100" {
+		t.Errorf("no proxy: got %q, want %q", got, "192.168.1.100")
+	}
+}
+
+func TestRateLimit_SameHostDifferentPorts(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	// Rate limiter: 5 attempts per 60s. 6th should be blocked.
+	// Use same host with different ports to simulate new TCP connections.
+	for i := 1; i <= 6; i++ {
+		key := fmt.Sprintf("192.168.1.100:%d", 50000+i)
+		// Simulate what the router does: normalize the key before passing to limiter
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+		req.RemoteAddr = key
+		ip := ExtractClientIP(req)
+		blocked := mw.CheckRateLimit(ip)
+		if i <= 5 {
+			if blocked {
+				t.Errorf("attempt %d: should not be blocked yet", i)
+			}
+		} else {
+			if !blocked {
+				t.Errorf("attempt %d: should be blocked (same host, different ports)", i)
+			}
+		}
 	}
 }
