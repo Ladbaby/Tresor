@@ -1482,8 +1482,8 @@ function connectLogStream() {
         if (cfg.level && indicator) {
             indicator.textContent = 'Level: ' + cfg.level.charAt(0).toUpperCase() + cfg.level.slice(1);
             // Color-code the indicator by level
-            var colors = { debug: '#6c757d', info: '#0d6efd', warn: '#ffc107', error: '#dc3545' };
-            indicator.style.background = colors[cfg.level] || 'var(--color-primary)';
+            var colors = { debug: '#4a5568', info: '#1a5ab8', warn: '#d49e00', error: '#c53030' };
+            indicator.style.background = colors[cfg.level] || colors.info;
             indicator.style.display = '';
         }
     });
