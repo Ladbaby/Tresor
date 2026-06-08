@@ -920,7 +920,7 @@ document.getElementById('btn-add-model-id').addEventListener('click', () => addN
 
 document.getElementById('btn-fetch-models').addEventListener('click', () => {
     const id = document.getElementById('downstream-id').value;
-    if (id) fetchDownstreamModels(id);
+    fetchDownstreamModels(id);
 });
 
 document.getElementById('downstream-form').addEventListener('submit', async (e) => {
