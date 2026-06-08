@@ -72,11 +72,27 @@ func runDaemon(cfg *config.AppConfig) error {
 	// Configure incoming proxy request authentication
 	eng.SetProxyAuthKeys(cfg.ProxyAPIKeys)
 
+	// Initialize request logger
+	logger := engine.NewRequestLogger()
+	if cfg.LogLevel != "" {
+		logLevel, err := engine.ParseLogLevel(cfg.LogLevel)
+		if err == nil {
+			logger.SetLevel(logLevel)
+		}
+	}
+	eng.SetLogger(logger)
+
 	// Initialize runtime config state in the API layer
-	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab)
+	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel)
+
+	// Wire runtime config to log handlers for settings sync
+	api.SetRuntimeConfig(&api.RuntimeConfig{
+		ProxyMode:  cfg.ProxyMode,
+		LogLevel:   cfg.LogLevel,
+	})
 
 	// Build admin API router
-	adminRouter := api.NewRouter(s, eng, cfg, Version, BuildTime)
+	adminRouter := api.NewRouter(s, eng, logger, cfg, Version, BuildTime)
 	webHandler := api.WebHandler()
 
 	// Start listening

@@ -38,6 +38,7 @@
                 <button class="tab" data-tab="rules">📋 Rules</button>
                 <button class="tab" data-tab="plugins">🧩 Plugins</button>
                 <button class="tab" data-tab="settings">⚙️ Settings</button>
+                <button class="tab" data-tab="logs">📊 Logs</button>
                 <button class="tab" data-tab="about">ℹ️ About</button>
             </nav>
 
@@ -273,6 +274,22 @@
                         </div>
 
                         <div class="settings-group">
+                            <h3>Logging</h3>
+                            <p class="settings-description">
+                                Control request logging verbosity. Entries below the selected level are filtered out.
+                            </p>
+                            <div class="settings-row">
+                                <label for="setting-log-level">Log Level</label>
+                                <select id="setting-log-level">
+                                    <option value="debug">Debug (all requests)</option>
+                                    <option value="info" selected>Info (default)</option>
+                                    <option value="warn">Warn</option>
+                                    <option value="error">Error only</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="settings-group">
                             <h3>Dashboard</h3>
                             <p class="settings-description">
                                 Choose which tab the dashboard opens to on page load or refresh.
@@ -285,6 +302,7 @@
                                     <option value="rules">Rules</option>
                                     <option value="plugins">Plugins</option>
                                     <option value="settings">Settings</option>
+                                    <option value="logs">Logs</option>
                                     <option value="about">About</option>
                                 </select>
                             </div>
@@ -293,6 +311,39 @@
                         <button id="btn-save-settings" class="btn-primary">Save Settings</button>
                         <span id="settings-status" class="settings-status"></span>
                     </div>
+                </section>
+
+                <!-- Logs Tab -->
+                <section id="tab-logs" class="tab-content">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+                        <h2>Request Logs</h2>
+                        <div style="display:flex;gap:0.5rem;align-items:center;">
+                            <span class="badge" id="log-status-badge" style="background:var(--color-success);">● Live</span>
+                            <button onclick="window.clearLogEntries()" class="btn btn-small" style="background:#6c757d;color:white;border:none;padding:0.3rem 0.8rem;border-radius:4px;cursor:pointer;">Clear</button>
+                        </div>
+                    </div>
+                    <div id="log-level-indicator" class="badge" style="background:var(--color-primary);margin-bottom:1rem;display:none;">Level: Info</div>
+                    <div style="overflow-x:auto;border:1px solid var(--border-color);border-radius:8px;">
+                        <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+                            <thead>
+                                <tr style="background:var(--bg-secondary);">
+                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Time</th>
+                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Method</th>
+                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Path</th>
+                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Model</th>
+                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Downstream</th>
+                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Alias</th>
+                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Status</th>
+                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Duration</th>
+                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Error</th>
+                                </tr>
+                            </thead>
+                            <tbody id="logs-table-body">
+                                <!-- Log entries appended here by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                    <p style="color:var(--text-muted);font-size:0.8rem;margin-top:0.5rem;">Up to 500 recent entries shown in real-time via SSE</p>
                 </section>
 
                 <!-- About Tab -->

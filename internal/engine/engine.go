@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"time"
 
 	"tresor/internal/proxy"
 	"tresor/internal/store"
@@ -46,6 +47,7 @@ type Engine struct {
 	registry  PluginRegistry
 	client    *http.Client
 	proxyAuth *proxyAuth
+	logger    *RequestLogger
 }
 
 // New creates a new Engine.
@@ -53,7 +55,18 @@ func New(s *store.Store) *Engine {
 	return &Engine{
 		store:  s,
 		client: &http.Client{},
+		logger: NewRequestLogger(),
 	}
+}
+
+// SetLogger sets the request logger on the engine.
+func (e *Engine) SetLogger(l *RequestLogger) {
+	e.logger = l
+}
+
+// GetLogger returns the request logger.
+func (e *Engine) GetLogger() *RequestLogger {
+	return e.logger
 }
 
 // SetRegistry sets the plugin registry on the engine (called during initialization).
@@ -159,39 +172,104 @@ func ServeAdminOnly(adminHandler http.Handler, listener net.Listener) error {
 	return http.Serve(listener, adminHandler)
 }
 
+// statusCaptureWriter wraps http.ResponseWriter to capture the status code.
+type statusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func newStatusCaptureWriter(w http.ResponseWriter) *statusCaptureWriter {
+	return &statusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
+}
+
+func (w *statusCaptureWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Flush delegates to the underlying ResponseWriter if it supports Flusher.
+func (w *statusCaptureWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// isLLMPath returns true if the path looks like an LLM API endpoint.
+func isLLMPath(path string) bool {
+	if strings.HasPrefix(path, "/v1/") {
+		return true
+	}
+	switch path {
+	case "/chat/completions", "/completions", "/models", "/embeddings":
+		return true
+	case "/messages", "/count_tokens":
+		return true
+	}
+	return false
+}
+
 // HandleProxy is the main proxy handler for LLM requests.
 func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
-	// Only forward certain LLM-type requests; serve admin API via /api/*
-	if strings.HasPrefix(r.URL.Path, "/api/") {
+	// Reject non-LLM paths immediately (browser noise like /favicon.ico).
+	// These don't need logging — they're not gateway requests.
+	if strings.HasPrefix(r.URL.Path, "/api/") || isLLMPath(r.URL.Path) == false {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
+	start := time.Now()
+
+	// Wrap the response writer to capture status code
+	cw := newStatusCaptureWriter(w)
+
+	// Collect metadata for logging
+	entry := RequestLogEntry{
+		Timestamp: start,
+		Method:    r.Method,
+		Path:      r.URL.Path,
+	}
+
 	// Validate incoming proxy API key (if configured)
-	if !e.validateProxyAuth(r, w) {
+	if !e.validateProxyAuth(r, cw) {
+		entry.Status = http.StatusUnauthorized
+		entry.Error = "unauthorized"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
 	// Handle model list requests — aggregate models from all downstreams
 	if r.URL.Path == "/v1/models" || r.URL.Path == "/models" {
-		e.handleModels(w, r)
+		e.handleModels(cw, r)
+		entry.Status = cw.status
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
 	// Read the full body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "failed to read body", http.StatusInternalServerError)
+		http.Error(cw, "failed to read body", http.StatusInternalServerError)
+		entry.Status = http.StatusInternalServerError
+		entry.Error = "failed to read body"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 	r.Body.Close()
 
 	// Extract model name from body (if present)
 	model := extractModel(body)
+	entry.Model = model
 
 	// Model must be specified for forwarding
 	if model == "" {
-		http.Error(w, "request body missing model", http.StatusBadRequest)
+		http.Error(cw, "request body missing model", http.StatusBadRequest)
+		entry.Status = http.StatusBadRequest
+		entry.Error = "missing model"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
@@ -207,17 +285,26 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	alias, err := e.store.FindActiveAlias(model)
 	if err != nil {
 		log.Printf("Error looking up alias for model %s: %v", model, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(cw, "internal error", http.StatusInternalServerError)
+		entry.Status = http.StatusInternalServerError
+		entry.Error = "alias lookup error"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
 	if alias != nil {
 		hasAlias = true
+		entry.AliasID = alias.ID
 		// Alias resolves the downstream and rewrites the model name
 		ds, err = e.store.GetDownstream(alias.DownstreamID)
 		if err != nil {
 			log.Printf("Error getting downstream %s for alias %s: %v", alias.DownstreamID, alias.ID, err)
-			http.Error(w, fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), http.StatusBadGateway)
+			http.Error(cw, fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), http.StatusBadGateway)
+			entry.Status = http.StatusBadGateway
+			entry.Error = "alias downstream missing"
+			entry.Duration = time.Since(start)
+			e.logger.Record(entry)
 			return
 		}
 		currentBody = rewriteModelInBody(body, alias.OutputModelID)
@@ -226,12 +313,20 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		ds, err = e.store.FindDownstreamByOutputModel(model)
 		if err != nil {
 			log.Printf("Error looking up downstream for model %s: %v", model, err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			http.Error(cw, "internal error", http.StatusInternalServerError)
+			entry.Status = http.StatusInternalServerError
+			entry.Error = "downstream lookup error"
+			entry.Duration = time.Since(start)
+			e.logger.Record(entry)
 			return
 		}
 
 		if ds == nil {
-			http.Error(w, fmt.Sprintf("unknown model %q", model), http.StatusNotFound)
+			http.Error(cw, fmt.Sprintf("unknown model %q", model), http.StatusNotFound)
+			entry.Status = http.StatusNotFound
+			entry.Error = "unknown model"
+			entry.Duration = time.Since(start)
+			e.logger.Record(entry)
 			return
 		}
 		// No alias: keep original model in the body
@@ -241,7 +336,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	rule, err := e.store.FindMatchingRule(r.URL.Path, model)
 	if err != nil {
 		log.Printf("Error finding rule: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(cw, "internal error", http.StatusInternalServerError)
+		entry.Status = http.StatusInternalServerError
+		entry.Error = "rule lookup error"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
@@ -252,12 +351,21 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			ruleDs, err := e.store.GetDownstream(rule.ActiveDownstream)
 			if err != nil {
 				log.Printf("Error getting downstream %s for rule %s: %v", rule.ActiveDownstream, rule.ID, err)
-				http.Error(w, fmt.Sprintf("rule %q references missing downstream %q", rule.ID, rule.ActiveDownstream), http.StatusBadGateway)
+				http.Error(cw, fmt.Sprintf("rule %q references missing downstream %q", rule.ID, rule.ActiveDownstream), http.StatusBadGateway)
+				entry.Status = http.StatusBadGateway
+				entry.Error = "rule downstream missing"
+				entry.Duration = time.Since(start)
+				e.logger.Record(entry)
 				return
 			}
 			ds = ruleDs
+			entry.RuleID = rule.ID
 		}
 	}
+
+	// Populate downstream info
+	entry.DownstreamID = ds.ID
+	entry.DownstreamName = ds.Name
 
 	// Build pipeline context
 	ctx := &PipelineContext{
@@ -280,7 +388,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	pipeline, err := ParsePipelineConfig(pipelineConfig, e.registry)
 	if err != nil {
 		log.Printf("Error building pipeline: %v", err)
-		http.Error(w, "pipeline error", http.StatusInternalServerError)
+		http.Error(cw, "pipeline error", http.StatusInternalServerError)
+		entry.Status = http.StatusInternalServerError
+		entry.Error = "pipeline error"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
@@ -315,7 +427,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	currentReq, currentBody, err := ExecuteRequestPipeline(r, currentBody, ctx, pipeline.RequestSteps)
 	if err != nil {
 		log.Printf("Request pipeline error: %v", err)
-		http.Error(w, fmt.Sprintf("request pipeline error: %v", err), http.StatusBadGateway)
+		http.Error(cw, fmt.Sprintf("request pipeline error: %v", err), http.StatusBadGateway)
+		entry.Status = http.StatusBadGateway
+		entry.Error = "request pipeline error"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
@@ -323,7 +439,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	resp, err := e.forwardRequest(currentReq, currentBody, ctx)
 	if err != nil {
 		log.Printf("Forward error: %v", err)
-		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		http.Error(cw, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		entry.Status = http.StatusBadGateway
+		entry.Error = "upstream error"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
@@ -332,10 +452,15 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	isStream := strings.EqualFold(contentType, "text/event-stream")
 
 	if isStream {
+		// Record the entry before streaming (stream duration tracked separately)
+		entry.Status = resp.StatusCode
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
+
 		// Streaming path: pipe SSE events to the client in real-time.
 		// If stream transformers exist, each chunk is transformed on the fly.
 		// Otherwise, events are passed through unchanged but still flushed immediately.
-		e.handleStreamingResponse(w, resp, ctx, pipeline)
+		e.handleStreamingResponse(cw, resp, ctx, pipeline)
 		return
 	}
 
@@ -343,7 +468,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		resp.Body.Close()
-		http.Error(w, "failed to read upstream response", http.StatusInternalServerError)
+		http.Error(cw, "failed to read upstream response", http.StatusInternalServerError)
+		entry.Status = http.StatusInternalServerError
+		entry.Error = "failed to read response"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
@@ -352,16 +481,23 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		resp.Body.Close()
 		log.Printf("Response pipeline error: %v", err)
-		http.Error(w, fmt.Sprintf("response pipeline error: %v", err), http.StatusBadGateway)
+		http.Error(cw, fmt.Sprintf("response pipeline error: %v", err), http.StatusBadGateway)
+		entry.Status = http.StatusBadGateway
+		entry.Error = "response pipeline error"
+		entry.Duration = time.Since(start)
+		e.logger.Record(entry)
 		return
 	}
 
 	// Copy response headers
 	for k, v := range resp.Header {
-		w.Header()[k] = v
+		cw.Header()[k] = v
 	}
-	w.WriteHeader(resp.StatusCode)
-	w.Write(transformedBody)
+	entry.Status = resp.StatusCode
+	entry.Duration = time.Since(start)
+	e.logger.Record(entry)
+	cw.WriteHeader(resp.StatusCode)
+	cw.Write(transformedBody)
 }
 
 // handleStreamingResponse pipes an SSE response from the downstream to the client.

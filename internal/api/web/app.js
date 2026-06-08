@@ -98,6 +98,7 @@ function showDashboard() {
     loadPlugins();
     loadAliasGroups();
     loadSettings();
+    initLogs();
     loadAbout();
 }
 
@@ -156,12 +157,20 @@ document.getElementById('login-form').addEventListener('submit', async function 
 document.getElementById('btn-logout').addEventListener('click', logout);
 
 // ---- API helpers ----
-async function api(path, options = {}) {
-    const url = API_BASE + path;
-    const headers = { 'Content-Type': 'application/json' };
+/**
+ * Build authorization headers for fetch() calls.
+ */
+function buildAuthHeaders() {
+    var headers = { 'Content-Type': 'application/json' };
     if (authToken) {
         headers['Authorization'] = 'Bearer ' + authToken;
     }
+    return headers;
+}
+
+async function api(path, options = {}) {
+    const url = API_BASE + path;
+    const headers = buildAuthHeaders();
     const resp = await fetch(url, {
         headers: { ...headers, ...options.headers },
         ...options,
@@ -1267,6 +1276,11 @@ async function loadSettings() {
         if (defaultTabEl) {
             defaultTabEl.value = cfg.default_tab || 'downstreams';
         }
+        // Populate log level selector
+        var logLevelEl = document.getElementById('setting-log-level');
+        if (logLevelEl) {
+            logLevelEl.value = cfg.log_level || 'info';
+        }
     } catch (err) {
         statusEl.textContent = 'Failed to load settings: ' + err.message;
         statusEl.className = 'settings-status error';
@@ -1361,6 +1375,11 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
             proxy_api_keys: proxyAPIKeys,
             default_tab: document.getElementById('default-tab').value,
         };
+        // Include log level if the selector exists
+        var logLevelEl = document.getElementById('setting-log-level');
+        if (logLevelEl) {
+            body.log_level = logLevelEl.value;
+        }
         // Only send admin_password if the user entered something or wants to clear it
         if (newPassword || clearPassword) {
             body.admin_password = newPassword;
@@ -1391,6 +1410,259 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
         statusEl.className = 'settings-status error';
     }
 });
+
+// ---- Logs ----
+
+var logSSE = null;          // current EventSource connection
+var logEntries = [];        // in-memory log entries (mirrors server buffer)
+var logActive = false;      // whether the Logs tab is currently visible
+
+/**
+ * Initialize the Logs tab. Called once on dashboard load.
+ * Sets up SSE connection management and loads initial entries.
+ */
+function initLogs() {
+    // Load recent entries from the REST API (for initial render)
+    fetchLogs();
+}
+
+/**
+ * Fetch recent log entries via REST API (used for initial load).
+ */
+async function fetchLogs() {
+    try {
+        var url = API_BASE + '/logs';
+        if (authToken) {
+            url += '?token=' + encodeURIComponent(authToken);
+        }
+        var data = await fetch(url).then(function (r) { return r.json(); });
+        logEntries = data || [];
+        renderLogTable(logEntries);
+    } catch (err) {
+        // If the endpoint doesn't exist (old server), skip logs
+    }
+}
+
+/**
+ * Connect to the SSE log stream. Called when the Logs tab becomes active.
+ */
+function connectLogStream() {
+    if (logSSE) return; // already connected
+
+    var indicator = document.getElementById('log-level-indicator');
+    var badge = document.getElementById('log-status-badge');
+
+    // EventSource doesn't support custom headers, so pass auth as query param
+    var url = API_BASE + '/logs/stream';
+    if (authToken) {
+        url += '?token=' + encodeURIComponent(authToken);
+    }
+
+    try {
+        logSSE = new EventSource(url);
+    } catch {
+        if (badge) { badge.textContent = '✗ Offline'; badge.style.background = 'var(--color-danger)'; }
+        return;
+    }
+
+    if (badge) { badge.textContent = '● Live'; badge.style.background = 'var(--color-success)'; }
+
+    logSSE.addEventListener('log', function (e) {
+        var entry;
+        try { entry = JSON.parse(e.data); } catch { return; }
+        // Append to in-memory array and render as new row
+        logEntries.push(entry);
+        if (logEntries.length > 500) logEntries.shift();
+        appendLogRow(entry, true);
+    });
+
+    logSSE.addEventListener('config', function (e) {
+        var cfg;
+        try { cfg = JSON.parse(e.data); } catch { return; }
+        if (cfg.level && indicator) {
+            indicator.textContent = 'Level: ' + cfg.level.charAt(0).toUpperCase() + cfg.level.slice(1);
+            // Color-code the indicator by level
+            var colors = { debug: '#6c757d', info: '#0d6efd', warn: '#ffc107', error: '#dc3545' };
+            indicator.style.background = colors[cfg.level] || 'var(--color-primary)';
+            indicator.style.display = '';
+        }
+    });
+
+    logSSE.addEventListener('error', function () {
+        if (badge) { badge.textContent = '✗ Offline'; badge.style.background = 'var(--color-danger)'; }
+    });
+
+    // When tab becomes inactive, close SSE to save resources
+    var section = document.getElementById('tab-logs');
+    if (section) {
+        section.addEventListener('inactive', function () {
+            disconnectLogStream();
+        });
+    }
+}
+
+/**
+ * Disconnect the SSE log stream. Called when the Logs tab becomes inactive.
+ */
+function disconnectLogStream() {
+    if (logSSE) {
+        logSSE.close();
+        logSSE = null;
+    }
+    var badge = document.getElementById('log-status-badge');
+    if (badge) { badge.textContent = '○ Disconnected'; badge.style.background = '#6c757d'; }
+}
+
+/**
+ * Render the full log table from an array of entries.
+ */
+function renderLogTable(entries) {
+    var tbody = document.getElementById('logs-table-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    entries.forEach(function (entry) {
+        appendLogRow(entry, false);
+    });
+}
+
+/**
+ * Append a single log entry as a table row.
+ */
+function appendLogRow(entry, isNew) {
+    var tbody = document.getElementById('logs-table-body');
+    if (!tbody) return;
+
+    var tr = document.createElement('tr');
+    tr.className = 'log-entry';
+    if (isNew) tr.classList.add('new');
+    if (entry.error || (entry.status >= 500)) tr.classList.add('log-error');
+    else if (entry.status >= 400) tr.classList.add('log-warn');
+
+    // Time
+    var td = document.createElement('td');
+    td.textContent = formatTime(entry.timestamp);
+    tr.appendChild(td);
+
+    // Method
+    td = document.createElement('td');
+    td.textContent = entry.method || '';
+    tr.appendChild(td);
+
+    // Path
+    td = document.createElement('td');
+    td.textContent = entry.path || '';
+    tr.appendChild(td);
+
+    // Model
+    td = document.createElement('td');
+    td.innerHTML = '<code>' + esc(entry.model || '—') + '</code>';
+    tr.appendChild(td);
+
+    // Downstream
+    td = document.createElement('td');
+    td.textContent = entry.downstream_name || entry.downstream_id || '—';
+    tr.appendChild(td);
+
+    // Alias
+    td = document.createElement('td');
+    if (entry.alias_id) {
+        td.innerHTML = '<span class="badge" style="background:#1b4123;color:#3fb950;">' + esc(entry.alias_id) + '</span>';
+    } else {
+        td.textContent = '—';
+    }
+    tr.appendChild(td);
+
+    // Status
+    td = document.createElement('td');
+    var statusClass = 'status-ok';
+    if (entry.status >= 500) statusClass = 'status-error';
+    else if (entry.status >= 400) statusClass = 'status-warn';
+    td.innerHTML = '<span class="' + statusClass + '">' + entry.status + '</span>';
+    tr.appendChild(td);
+
+    // Duration
+    td = document.createElement('td');
+    td.textContent = formatDuration(entry.duration);
+    tr.appendChild(td);
+
+    // Error
+    td = document.createElement('td');
+    if (entry.error) {
+        td.innerHTML = '<span style="color:var(--color-danger);">' + esc(entry.error) + '</span>';
+    } else {
+        td.textContent = '—';
+    }
+    tr.appendChild(td);
+
+    tbody.appendChild(tr);
+
+    // Remove old rows if exceeding 500
+    while (tbody.children.length > 500) {
+        tbody.removeChild(tbody.firstChild);
+    }
+
+    // Remove flash class after animation completes
+    if (isNew) {
+        setTimeout(function () { tr.classList.remove('new'); }, 600);
+    }
+}
+
+/**
+ * Clear all log entries from the table and memory.
+ */
+window.clearLogEntries = function () {
+    var tbody = document.getElementById('logs-table-body');
+    if (tbody) tbody.innerHTML = '';
+    logEntries = [];
+};
+
+/**
+ * Format a timestamp to a readable time string.
+ */
+function formatTime(ts) {
+    if (!ts) return '—';
+    var d;
+    if (typeof ts === 'number') {
+        d = new Date(ts);
+    } else {
+        d = new Date(ts);
+    }
+    if (isNaN(d.getTime())) return String(ts);
+    return d.toLocaleTimeString('en-US', { hour12: false }) + '.' + String(Math.floor(d.getMilliseconds() / 10)).padStart(3, '0');
+}
+
+/**
+ * Format a duration in milliseconds to a readable string.
+ */
+function formatDuration(ms) {
+    if (ms == null || ms === 0) return '—';
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+    var mins = Math.floor(ms / 60000);
+    var secs = ((ms % 60000) / 1000).toFixed(1);
+    return mins + 'm' + secs + 's';
+}
+
+// Intercept tab switching to manage SSE connection lifecycle.
+(function () {
+    var originalActivateTab = window.activateTab;
+    window.activateTab = function (tabId) {
+        // If leaving the Logs tab, disconnect SSE
+        if (!logActive && tabId !== 'logs') {
+            // was already inactive, nothing to do
+        } else if (logActive && tabId !== 'logs') {
+            // Leaving logs tab
+            logActive = false;
+            disconnectLogStream();
+        }
+        // If entering the Logs tab, connect SSE
+        if (tabId === 'logs' && !logActive) {
+            logActive = true;
+            connectLogStream();
+        }
+        originalActivateTab(tabId);
+    };
+})();
 
 // ---- About ----
 

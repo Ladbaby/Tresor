@@ -32,6 +32,10 @@ type AppConfig struct {
 	// "rules", "plugins", or "settings"). Empty string = "downstreams" (default).
 	DefaultTab string `yaml:"default_tab,omitempty"`
 
+	// LogLevel controls request logging verbosity. Values: debug, info, warn, error.
+	// Entries below the selected level are filtered out. Default: info.
+	LogLevel string `yaml:"log_level,omitempty"`
+
 	// Routing data (loaded into SQLite at startup via upsert)
 	Downstreams []DownstreamCfg   `yaml:"downstreams"`
 	Rules       []RuleCfg         `yaml:"rules"`
@@ -114,6 +118,9 @@ func Load(configPath string) (*AppConfig, error) {
 	}
 	if cfg.ProxyMode == "" {
 		cfg.ProxyMode = "auto"
+	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
 	}
 	if cfg.DBPath == "" {
 		cfg.DBPath = defaultDBPath()

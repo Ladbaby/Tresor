@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"tresor/internal/engine"
 	"tresor/internal/proxy"
 )
 
@@ -19,6 +20,7 @@ type RuntimeConfig struct {
 	ProxyAPIKeys  []string `json:"proxy_api_keys"`
 	AdminPassword string   `json:"admin_password,omitempty"`
 	DefaultTab    string   `json:"default_tab,omitempty"`
+	LogLevel      string   `json:"log_level,omitempty"`
 }
 
 // RuntimeConfigResponse is what GET /api/config returns.
@@ -28,6 +30,7 @@ type RuntimeConfigResponse struct {
 	ProxyAPIKeys     []string `json:"proxy_api_keys"`
 	AdminPasswordSet bool     `json:"admin_password_set"`
 	DefaultTab       string   `json:"default_tab,omitempty"`
+	LogLevel         string   `json:"log_level,omitempty"`
 }
 
 var (
@@ -37,12 +40,13 @@ var (
 
 // InitRuntimeConfig sets the initial runtime config from the YAML config so the
 // API reflects what the engine was started with.
-func InitRuntimeConfig(mode string, proxyAPIKeys []string, adminPassword string, defaultTab string) {
+func InitRuntimeConfig(mode string, proxyAPIKeys []string, adminPassword string, defaultTab string, logLevel string) {
 	runtimeCfgMu.Lock()
 	runtimeCfg.ProxyMode = mode
 	runtimeCfg.ProxyAPIKeys = proxyAPIKeys
 	runtimeCfg.AdminPassword = adminPassword
 	runtimeCfg.DefaultTab = defaultTab
+	runtimeCfg.LogLevel = logLevel
 	runtimeCfgMu.Unlock()
 }
 
@@ -57,6 +61,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			ProxyAPIKeys:     cfg.ProxyAPIKeys,
 			AdminPasswordSet: cfg.AdminPassword != "",
 			DefaultTab:       cfg.DefaultTab,
+			LogLevel:         cfg.LogLevel,
 		})
 
 	case http.MethodPut:
@@ -91,11 +96,23 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 
+		// Validate log_level value.
+		if incoming.LogLevel != "" {
+			logLevel, err := engine.ParseLogLevel(incoming.LogLevel)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid log_level; must be one of: debug, info, warn, error")
+				return
+			}
+			// Push the log level change to the logger live.
+			r.logger.SetLevel(logLevel)
+		}
+
 		runtimeCfgMu.Lock()
 		runtimeCfg.ProxyMode = incoming.ProxyMode
 		runtimeCfg.ProxyAPIKeys = incoming.ProxyAPIKeys
 		runtimeCfg.AdminPassword = incoming.AdminPassword
 		runtimeCfg.DefaultTab = incoming.DefaultTab
+		runtimeCfg.LogLevel = incoming.LogLevel
 		runtimeCfgMu.Unlock()
 
 		// Push the change to the running engine live.
@@ -112,6 +129,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		r.cfg.ProxyAPIKeys = incoming.ProxyAPIKeys
 		r.cfg.AdminPassword = incoming.AdminPassword
 		r.cfg.DefaultTab = incoming.DefaultTab
+		r.cfg.LogLevel = incoming.LogLevel
 		go func() {
 			if err := r.store.WriteConfig(r.cfg); err != nil {
 				log.Printf("warning: failed to write config YAML: %v", err)
@@ -123,6 +141,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			ProxyAPIKeys:     incoming.ProxyAPIKeys,
 			AdminPasswordSet: incoming.AdminPassword != "",
 			DefaultTab:       incoming.DefaultTab,
+			LogLevel:         incoming.LogLevel,
 		})
 
 	default:

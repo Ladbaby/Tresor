@@ -1440,3 +1440,41 @@ select option:checked {
     font-size: 0.9rem;
     line-height: 1.6;
 }
+
+/* ============================================================
+   Logs Tab Styles
+   ============================================================ */
+
+#tab-logs table {
+    font-size: 0.85rem;
+}
+#tab-logs th {
+    padding: 0.6rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+    white-space: nowrap;
+}
+#tab-logs td {
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: top;
+}
+#tab-logs tr.log-entry {
+    transition: background 0.15s;
+}
+#tab-logs tr.log-entry.new {
+    animation: logFlash 0.6s ease;
+}
+@keyframes logFlash {
+    0% { background: var(--color-primary); }
+    100% { background: transparent; }
+}
+#tab-logs tr.log-error td {
+    color: var(--color-danger);
+}
+#tab-logs tr.log-warn td {
+    color: #ffc107;
+}
+.status-ok { color: var(--color-success); font-weight: 600; }
+.status-warn { color: #ffc107; font-weight: 600; }
+.status-error { color: var(--color-danger); font-weight: 600; }

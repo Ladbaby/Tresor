@@ -15,6 +15,7 @@ import (
 type Router struct {
 	store     *store.Store
 	engine    *engine.Engine
+	logger    *engine.RequestLogger
 	cfg       *config.AppConfig
 	authMW    *middleware.AuthMiddleware
 	version   string
@@ -22,10 +23,11 @@ type Router struct {
 }
 
 // NewRouter creates an admin API router with all API endpoints.
-func NewRouter(s *store.Store, eng *engine.Engine, cfg *config.AppConfig, version, buildTime string) *Router {
+func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger, cfg *config.AppConfig, version, buildTime string) *Router {
 	return &Router{
 		store:     s,
 		engine:    eng,
+		logger:    logger,
 		cfg:       cfg,
 		authMW:    middleware.NewAuthMiddleware(cfg.AdminPassword),
 		version:   version,
@@ -52,6 +54,17 @@ func (r *Router) Handler() http.Handler {
 		})
 	})
 
+	// Log endpoints — public (used by web UI)
+	mux.Handle("/api/logs/stream", StreamLogs(r.logger))
+	mux.Handle("/api/logs", GetRecentLogs(r.logger))
+	mux.Handle("/api/log_level", r.authMW.Protect(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet {
+			GetLogLevel(r.logger)(w, req)
+		} else {
+			SetLogLevel(r.logger)(w, req)
+		}
+	})))
+
 	// Protected admin routes
 	protected := r.authMW.Protect(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		// Strip /api prefix and dispatch to protected handlers
@@ -76,6 +89,8 @@ func (r *Router) Handler() http.Handler {
 			r.handlePlugins(w, req)
 		case path == "config":
 			r.handleConfig(w, req)
+		case path == "log_level":
+			SetLogLevel(r.logger)(w, req)
 		default:
 			http.NotFound(w, req)
 		}

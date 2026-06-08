@@ -1,0 +1,259 @@
+package engine
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+// LogLevel represents the verbosity of request logging.
+type LogLevel int
+
+const (
+	LogLevelDebug LogLevel = iota
+	LogLevelInfo
+	LogLevelWarn
+	LogLevelError
+)
+
+var logLevelNames = []string{"debug", "info", "warn", "error"}
+
+func (l LogLevel) String() string {
+	if l < 0 || l >= LogLevel(len(logLevelNames)) {
+		return "info"
+	}
+	return logLevelNames[l]
+}
+
+// ParseLogLevel returns a LogLevel from its string name.
+func ParseLogLevel(s string) (LogLevel, error) {
+	s = strings.ToLower(s)
+	for i, name := range logLevelNames {
+		if s == name {
+			return LogLevel(i), nil
+		}
+	}
+	return LogLevelInfo, fmt.Errorf("unknown log level %q; must be one of: %s", s, strings.Join(logLevelNames, ", "))
+}
+
+// RequestLogEntry captures a single gateway request.
+type RequestLogEntry struct {
+	ID            int       `json:"id"`
+	Timestamp     time.Time `json:"timestamp"`
+	Method        string    `json:"method"`
+	Path          string    `json:"path"`
+	Model         string    `json:"model"`
+	DownstreamID  string    `json:"downstream_id"`
+	DownstreamName string   `json:"downstream_name"`
+	AliasID       string    `json:"alias_id,omitempty"`
+	RuleID        string    `json:"rule_id,omitempty"`
+	Status        int       `json:"status"`
+	Duration      time.Duration `json:"duration"`
+	Error         string    `json:"error,omitempty"`
+}
+
+// logSeverity returns the severity level of a log entry based on status code.
+func (e RequestLogEntry) logSeverity() LogLevel {
+	if e.Error != "" {
+		return LogLevelError
+	}
+	if e.Status >= 500 {
+		return LogLevelError
+	}
+	if e.Status >= 400 {
+		return LogLevelWarn
+	}
+	return LogLevelInfo
+}
+
+const maxLogEntries = 500
+
+// RequestLogger collects gateway request logs in a circular buffer
+// and supports SSE streaming for real-time UI updates.
+type RequestLogger struct {
+	mu       sync.RWMutex
+	level    LogLevel
+	entries  []RequestLogEntry
+	nextID   int
+	writers  []logWriter // SSE subscribers
+}
+
+type logWriter struct {
+	flusher http.Flusher
+	writer  http.ResponseWriter
+}
+
+// NewRequestLogger creates a new RequestLogger.
+func NewRequestLogger() *RequestLogger {
+	return &RequestLogger{
+		level:   LogLevelInfo,
+		entries: make([]RequestLogEntry, 0, maxLogEntries),
+	}
+}
+
+// SetLevel updates the log level filter.
+func (l *RequestLogger) SetLevel(level LogLevel) {
+	l.mu.Lock()
+	l.level = level
+	l.mu.Unlock()
+}
+
+// Level returns the current log level.
+func (l *RequestLogger) Level() LogLevel {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.level
+}
+
+// Record adds a new log entry and notifies SSE subscribers.
+func (l *RequestLogger) Record(entry RequestLogEntry) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	entry.ID = l.nextID
+	l.nextID++
+
+	// Check if this entry passes the level filter
+	if entry.logSeverity() < l.level {
+		l.mu.Unlock()
+		return
+	}
+
+	l.entries = append(l.entries, entry)
+	if len(l.entries) > maxLogEntries {
+		l.entries = l.entries[len(l.entries)-maxLogEntries:]
+	}
+
+	// Notify SSE subscribers
+	writers := make([]logWriter, len(l.writers))
+	copy(writers, l.writers)
+	l.mu.Unlock()
+
+	for _, w := range writers {
+		if err := sendSSEEvent(w.writer, w.flusher, "log", entry); err != nil {
+			// Subscriber disconnected — clean it up
+			l.removeWriter(w)
+		}
+	}
+}
+
+// RecentEntries returns the last n entries that pass the level filter.
+func (l *RequestLogger) RecentEntries(n int) []RequestLogEntry {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	filtered := make([]RequestLogEntry, 0, n)
+	// Iterate from newest to oldest, then reverse
+	start := len(l.entries) - n
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(l.entries); i++ {
+		if l.entries[i].logSeverity() >= l.level {
+			filtered = append(filtered, l.entries[i])
+		}
+	}
+	// Reverse to chronological order
+	for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+		filtered[i], filtered[j] = filtered[j], filtered[i]
+	}
+	return filtered
+}
+
+// Subscribe adds an SSE writer. Call this when a new client connects to the stream endpoint.
+func (l *RequestLogger)Subscribe(w http.ResponseWriter, flusher http.Flusher) {
+	l.mu.Lock()
+	l.writers = append(l.writers, logWriter{flusher: flusher, writer: w})
+	l.mu.Unlock()
+}
+
+// Unsubscribe removes an SSE writer.
+func (l *RequestLogger)Unsubscribe(w http.ResponseWriter) {
+	l.mu.Lock()
+	for i, sw := range l.writers {
+		if sw.writer == w {
+			l.writers = append(l.writers[:i], l.writers[i+1:]...)
+			break
+		}
+	}
+	l.mu.Unlock()
+}
+
+// removeWriter removes a writer (called internally when write fails).
+func (l *RequestLogger) removeWriter(w logWriter) {
+	l.mu.Lock()
+	for i, sw := range l.writers {
+		if sw.writer == w.writer {
+			l.writers = append(l.writers[:i], l.writers[i+1:]...)
+			break
+		}
+	}
+	l.mu.Unlock()
+}
+
+// StreamLogs serves an SSE stream of log entries.
+// It first sends recent entries as a batch, then streams new ones in real-time.
+func (l *RequestLogger) StreamLogs(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Send initial batch of recent entries
+	recent := l.RecentEntries(50)
+	for _, entry := range recent {
+		if err := sendSSEEvent(w, flusher, "log", entry); err != nil {
+			log.Printf("SSE write error: %v", err)
+			return
+		}
+	}
+
+	// Subscribe to new entries
+	l.Subscribe(w, flusher)
+	defer l.Unsubscribe(w)
+
+	// Send keep-alive comments to prevent premature disconnect
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	// Wait for client disconnect via request context
+	ctx := r.Context()
+
+	// Broadcast current level and config on connect
+	sendSSEEvent(w, flusher, "config", map[string]interface{}{
+		"level": l.Level().String(),
+	})
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Write SSE comment to keep connection alive
+			fmt.Fprint(w, ": heartbeat\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "event:", event)
+	fmt.Fprintln(w, "data:", string(jsonData))
+	fmt.Fprintln(w, "") // empty line terminates SSE event
+	flusher.Flush()
+	return nil
+}
