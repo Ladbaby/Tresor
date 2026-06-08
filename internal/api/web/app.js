@@ -1416,6 +1416,7 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
 var logSSE = null;          // current EventSource connection
 var logEntries = [];        // in-memory log entries (mirrors server buffer)
 var logActive = false;      // whether the Logs tab is currently visible
+var logPaused = false;      // whether log rendering is paused
 
 /**
  * Initialize the Logs tab. Called once on dashboard load.
@@ -1467,12 +1468,18 @@ function connectLogStream() {
 
     if (badge) { badge.textContent = '● Live'; badge.style.background = 'var(--color-success)'; }
 
+    // Reset pause state on reconnect
+    logPaused = false;
+    var pauseBtn = document.getElementById('btn-pause-logs');
+    if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
+
     logSSE.addEventListener('log', function (e) {
         var entry;
         try { entry = JSON.parse(e.data); } catch { return; }
-        // Append to in-memory array and render as new row
+        // Append to in-memory array (always, so buffered entries replay on resume)
         logEntries.push(entry);
         if (logEntries.length > 500) logEntries.shift();
+        if (logPaused) return; // skip rendering while paused
         appendLogRow(entry, true);
     });
 
@@ -1509,8 +1516,11 @@ function disconnectLogStream() {
         logSSE.close();
         logSSE = null;
     }
+    logPaused = false;
     var badge = document.getElementById('log-status-badge');
     if (badge) { badge.textContent = '○ Disconnected'; badge.style.background = '#6c757d'; }
+    var pauseBtn = document.getElementById('btn-pause-logs');
+    if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
 }
 
 /**
@@ -1614,6 +1624,37 @@ window.clearLogEntries = function () {
     var tbody = document.getElementById('logs-table-body');
     if (tbody) tbody.innerHTML = '';
     logEntries = [];
+};
+
+/**
+ * Toggle pause/resume of log rendering.
+ * Keeps the SSE connection alive — only stops rendering new rows.
+ */
+window.toggleLogPause = function () {
+    logPaused = !logPaused;
+    var btn = document.getElementById('btn-pause-logs');
+    var badge = document.getElementById('log-status-badge');
+    if (btn) {
+        btn.textContent = logPaused ? '▶ Resume' : '⏸ Pause';
+    }
+    if (badge) {
+        if (logPaused) {
+            badge.textContent = '⏸ Paused';
+            badge.style.background = '#d49e00';
+        } else if (logSSE && logSSE.readyState === EventSource.OPEN) {
+            badge.textContent = '● Live';
+            badge.style.background = 'var(--color-success)';
+        } else {
+            badge.textContent = '✗ Offline';
+            badge.style.background = 'var(--color-danger)';
+        }
+    }
+    // When resuming, send a visual cue
+    if (!logPaused && badge) {
+        badge.style.transition = 'color 0.3s';
+        badge.textContent = '● Live';
+        setTimeout(function () { badge.style.transition = ''; }, 300);
+    }
 };
 
 /**

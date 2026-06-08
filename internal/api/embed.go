@@ -10,8 +10,8 @@ import (
 //go:embed web/*
 var webFS embed.FS
 
-// forceRecompile_20260607_logo ensures the embed is refreshed when web files change.
-const forceRecompile = true
+// forceRecompile ensures the embed is refreshed when web files change.
+const forceRecompile_20260608_pause_btn = true
 
 // WebHandler returns an http.Handler that serves the embedded web UI.
 func WebHandler() http.Handler {

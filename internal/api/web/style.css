@@ -1496,3 +1496,20 @@ select option:checked {
 .status-ok { color: var(--color-success); font-weight: 600; }
 .status-warn { color: #ffc107; font-weight: 600; }
 .status-error { color: var(--color-danger); font-weight: 600; }
+
+/* Pause button in Logs tab */
+#btn-pause-logs {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    padding: 0.3rem 0.7rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: background 0.15s;
+    font-family: inherit;
+    white-space: nowrap;
+}
+#btn-pause-logs:hover {
+    background: var(--border-color);
+}
