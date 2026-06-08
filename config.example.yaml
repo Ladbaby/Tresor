@@ -90,6 +90,7 @@ downstreams:
 
 # Model aliases — group by input model, list output options
 # The FIRST option in each group is the active one (is_active managed by DB only)
+# Groups are ordered by array position; web UI supports drag-and-drop reordering.
 aliases:
   - input_model_id: gpt-4o
     options:
@@ -106,3 +107,11 @@ aliases:
       - id: alias-sonnet-anthropic
         downstream_id: anthropic
         output_model_id: claude-sonnet-4-20250514
+
+# Example: regex alias to match all Claude models
+#  - input_model_id: "^claude-.*"
+#    options:
+#      - id: alias-claude-wildcard
+#        downstream_id: anthropic
+#        output_model_id: claude-sonnet-4-20250514
+#        is_regex: true

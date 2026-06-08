@@ -46,12 +46,13 @@ rules:                                # Routing rules (OPTIONAL — only for tra
       - plugin_id: openai2anthropic
     is_enabled: true
 
-aliases:                              # Model name mappings (hot-switchable)
-  - id: alias-gpt4o-anthropic
-    input_model_id: gpt-4o
-    downstream_id: my-provider
-    output_model_id: claude-sonnet-4-20250514
-    is_active: true
+aliases:                              # Model name mappings (hot-switchable, ordered by array position)
+  - input_model_id: gpt-4o
+    options:
+      - id: alias-gpt4o-anthropic
+        downstream_id: my-provider
+        output_model_id: claude-sonnet-4-20250514
+        is_regex: false               # Treat input_model_id as regex (optional)
 ```
 
 On startup, the YAML data is **upserted** into SQLite: existing rows (matched by ID) are updated, new rows are inserted. Rows only in the DB are preserved. If no downstreams/rules/aliases are defined in YAML, built-in defaults are seeded.
@@ -104,9 +105,9 @@ The codebase follows a clean layered structure with three core concerns:
 | `cmd/` | Cobra CLI commands (`root.go`, `run.go`, `rule.go`) |
 | `internal/config/` | YAML configuration loader with auto-detect path resolution |
 | `internal/store/` | SQLite data layer: `store.go` (schema/migrations/upsert), `rule.go` (CRUD + matching), `downstream.go` (CRUD), `alias.go` (alias CRUD + grouping) |
-| `internal/engine/` | Core gateway handler: `engine.go` (gateway forwarding + alias override), `pipeline.go` (transformer orchestration), `types.go` (interfaces) |
+| `internal/engine/` | Core gateway handler: `engine.go` (gateway forwarding + alias override), `pipeline.go` (transformer orchestration), `types.go` (interfaces), `logger.go` (request logging + SSE) |
 | `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go` |
-| `internal/api/` | Admin REST API: `router.go` (routing), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list), `aliases.go` (alias endpoints), `embed.go` (embedded web UI) |
+| `internal/api/` | Admin REST API: `router.go` (routing), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE endpoints), `config.go` (runtime config), `embed.go` (embedded web UI) |
 | `internal/middleware/` | Bearer-token auth middleware for admin API |
 | `internal/api/web/` | Embedded SPA: `index.html`, `style.css`, `app.js` |
 
@@ -114,7 +115,8 @@ The codebase follows a clean layered structure with three core concerns:
 
 1. Client sends request to Tresor gateway → `HandleProxy` reads body, extracts model name
 2. **Model Resolution** (the forwarding gate):
-   - Try active alias via `FindActiveAlias(model)` — if found, use alias's downstream and rewrite the model name in the body
+   - Try active exact alias via `FindActiveAlias(model)` — first tries exact `input_model_id` match
+   - If no exact match, try active regex aliases (`is_regex: true`) — pattern-matched against the model name
    - If no alias, try direct resolution via `FindDownstreamByOutputModel(model)` — matches against downstream `output_model_ids`
    - If neither resolves a downstream → return 404 "unknown model"
 3. **Optional Rule Lookup** (for pipeline transforms only):
@@ -154,12 +156,16 @@ Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plu
 | PUT | `/api/downstreams/{id}` | Update downstream |
 | DELETE | `/api/downstreams/{id}` | Delete downstream (nullifies referencing rules) |
 | GET | `/api/plugins` | List registered plugins |
-| GET | `/api/aliases` | List all alias groups (grouped view) |
+| GET | `/api/aliases` | List all alias groups (grouped view, ordered by group_order) |
 | POST | `/api/aliases` | Create a new alias option |
+| POST | `/api/aliases/reorder` | Reorder groups: `{"order": ["gpt-4o", "claude-sonnet"]}` |
 | GET | `/api/aliases/{id}` | Get single alias |
 | PUT | `/api/aliases/{id}` | Update alias fields |
 | DELETE | `/api/aliases/{id}` | Delete an alias option |
 | PUT | `/api/aliases/{id}/activate` | Hot-switch: activate this alias for its group |
+| DELETE | `/api/aliases/group/{inputModelId}` | Delete all aliases for an input model |
+| GET | `/api/logs` | Get recent log entries (newest first) |
+| GET | `/api/logs/stream` | SSE stream of log entries |
 
 Admin API is protected by optional Bearer-token auth (configured via `admin_password` in YAML). Web UI is embedded via `//go:embed web/*`.
 
