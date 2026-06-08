@@ -2,9 +2,9 @@
 
 # Tresor
 
-> **A single-binary LLM gateway for switching providers at scale with one click.**
+> **Switch LLM Providers for Any Apps with One Click**
 
-**One gateway, One config, One click**
+**One binary, One click, Any App**
 
 <img src="internal/api/web/logo.png" height=200>
 
@@ -20,15 +20,17 @@
 
 ## 🤔 Why Tresor?
 
-- **One gateway**: No need to install on every PC/server where LLM apps live in.
-- **One config**: All LLM apps do not need to reconfigure their LLM providers.
+- **One binary**: No need to install on every PC/server where LLM apps live in.
 - **One click**: LLM provider switch via alias buttons in web UI.
+- **Any Apps**: All LLM apps using OpenAI/Anthropic API do not need to reconfigure their LLM providers.
+    > For apps that do not support customizable endpoint, a possible workaround is to modify DNS records and point the IP address to Tresor.
 
 ||Tresor (Ours)|[cc-switch](https://github.com/farion1231/cc-switch)|[LiteLLM](https://github.com/BerriAI/litellm)
 |---|---|---|---|
-|One gateway|✅|❌(install on every PC)|✅|
-|One config|✅|✅|✅|
+|One binary|✅|❌(install on every PC)|❌(tons of dependencies)|
 |One click|✅|✅|❌(retype model name)|
+|Any App|✅|❌(limited apps)|✅|
+
 
 ### 🔄 The Problem: Switching Providers at Scale
 
