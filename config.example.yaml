@@ -4,7 +4,7 @@
 # Server settings
 bind_addr: "127.0.0.1:11510"
 socket_path: "/tmp/tresor.sock"   # Optional Unix Domain Socket (admin API only)
-db_path: "./tresor.db"             # SQLite database path (~ expands to home dir)
+db_path: "~/.config/tresor/tresor.db"             # SQLite database path (~ expands to home dir)
 admin_password: "admin"               # Optional Bearer token for admin API auth
 proxy_api_keys:                        # Optional: require clients to authenticate
   - sk-proxy-123                       # Clients send "Authorization: Bearer sk-proxy-123"
