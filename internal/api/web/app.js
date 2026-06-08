@@ -1553,9 +1553,9 @@ function appendLogRow(entry, isNew) {
     td.textContent = entry.path || '';
     tr.appendChild(td);
 
-    // Model
+    // Model (show resolved downstream model, fall back to input model)
     td = document.createElement('td');
-    td.innerHTML = '<code>' + esc(entry.model || '—') + '</code>';
+    td.innerHTML = '<code>' + esc(entry.resolved_model || entry.model || '—') + '</code>';
     tr.appendChild(td);
 
     // Downstream
@@ -1565,8 +1565,8 @@ function appendLogRow(entry, isNew) {
 
     // Alias
     td = document.createElement('td');
-    if (entry.alias_id) {
-        td.innerHTML = '<span class="badge" style="background:#1b4123;color:#3fb950;">' + esc(entry.alias_id) + '</span>';
+    if (entry.alias_group) {
+        td.innerHTML = '<span class="badge">' + esc(entry.alias_group) + '</span>';
     } else {
         td.textContent = '—';
     }
@@ -1628,7 +1628,7 @@ function formatTime(ts) {
         d = new Date(ts);
     }
     if (isNaN(d.getTime())) return String(ts);
-    return d.toLocaleTimeString('en-US', { hour12: false }) + '.' + String(Math.floor(d.getMilliseconds() / 10)).padStart(3, '0');
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
 /**

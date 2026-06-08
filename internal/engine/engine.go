@@ -233,7 +233,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	if !e.validateProxyAuth(r, cw) {
 		entry.Status = http.StatusUnauthorized
 		entry.Error = "unauthorized"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -242,7 +242,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/models" || r.URL.Path == "/models" {
 		e.handleModels(cw, r)
 		entry.Status = cw.status
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -253,7 +253,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, "failed to read body", http.StatusInternalServerError)
 		entry.Status = http.StatusInternalServerError
 		entry.Error = "failed to read body"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -268,7 +268,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, "request body missing model", http.StatusBadRequest)
 		entry.Status = http.StatusBadRequest
 		entry.Error = "missing model"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -288,14 +288,14 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, "internal error", http.StatusInternalServerError)
 		entry.Status = http.StatusInternalServerError
 		entry.Error = "alias lookup error"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
 
 	if alias != nil {
 		hasAlias = true
-		entry.AliasID = alias.ID
+		entry.AliasGroup = alias.InputModelID
 		// Alias resolves the downstream and rewrites the model name
 		ds, err = e.store.GetDownstream(alias.DownstreamID)
 		if err != nil {
@@ -303,11 +303,12 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			http.Error(cw, fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), http.StatusBadGateway)
 			entry.Status = http.StatusBadGateway
 			entry.Error = "alias downstream missing"
-			entry.Duration = time.Since(start)
+			entry.Duration = DurationMs(time.Since(start))
 			e.logger.Record(entry)
 			return
 		}
 		currentBody = rewriteModelInBody(body, alias.OutputModelID)
+		entry.ResolvedModel = alias.OutputModelID
 	} else {
 		// Step 2: No alias — try direct downstream by output_model_ids
 		ds, err = e.store.FindDownstreamByOutputModel(model)
@@ -316,7 +317,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			http.Error(cw, "internal error", http.StatusInternalServerError)
 			entry.Status = http.StatusInternalServerError
 			entry.Error = "downstream lookup error"
-			entry.Duration = time.Since(start)
+			entry.Duration = DurationMs(time.Since(start))
 			e.logger.Record(entry)
 			return
 		}
@@ -325,11 +326,12 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			http.Error(cw, fmt.Sprintf("unknown model %q", model), http.StatusNotFound)
 			entry.Status = http.StatusNotFound
 			entry.Error = "unknown model"
-			entry.Duration = time.Since(start)
+			entry.Duration = DurationMs(time.Since(start))
 			e.logger.Record(entry)
 			return
 		}
 		// No alias: keep original model in the body
+		entry.ResolvedModel = model
 	}
 
 	// Step 3: Optional rule lookup (for pipeline transforms only)
@@ -339,7 +341,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, "internal error", http.StatusInternalServerError)
 		entry.Status = http.StatusInternalServerError
 		entry.Error = "rule lookup error"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -354,7 +356,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				http.Error(cw, fmt.Sprintf("rule %q references missing downstream %q", rule.ID, rule.ActiveDownstream), http.StatusBadGateway)
 				entry.Status = http.StatusBadGateway
 				entry.Error = "rule downstream missing"
-				entry.Duration = time.Since(start)
+				entry.Duration = DurationMs(time.Since(start))
 				e.logger.Record(entry)
 				return
 			}
@@ -391,7 +393,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, "pipeline error", http.StatusInternalServerError)
 		entry.Status = http.StatusInternalServerError
 		entry.Error = "pipeline error"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -430,7 +432,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, fmt.Sprintf("request pipeline error: %v", err), http.StatusBadGateway)
 		entry.Status = http.StatusBadGateway
 		entry.Error = "request pipeline error"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -442,7 +444,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		entry.Status = http.StatusBadGateway
 		entry.Error = "upstream error"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -454,7 +456,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	if isStream {
 		// Record the entry before streaming (stream duration tracked separately)
 		entry.Status = resp.StatusCode
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 
 		// Streaming path: pipe SSE events to the client in real-time.
@@ -471,7 +473,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, "failed to read upstream response", http.StatusInternalServerError)
 		entry.Status = http.StatusInternalServerError
 		entry.Error = "failed to read response"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -484,7 +486,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(cw, fmt.Sprintf("response pipeline error: %v", err), http.StatusBadGateway)
 		entry.Status = http.StatusBadGateway
 		entry.Error = "response pipeline error"
-		entry.Duration = time.Since(start)
+		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 		return
 	}
@@ -494,7 +496,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		cw.Header()[k] = v
 	}
 	entry.Status = resp.StatusCode
-	entry.Duration = time.Since(start)
+	entry.Duration = DurationMs(time.Since(start))
 	e.logger.Record(entry)
 	cw.WriteHeader(resp.StatusCode)
 	cw.Write(transformedBody)
