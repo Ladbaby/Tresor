@@ -580,7 +580,7 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 				// Emit first arguments fragment if present
 				if tc.Function.Arguments != "" {
-					existing.argumentsAccum += tc.Function.Arguments
+					acc.argumentsAccum += tc.Function.Arguments
 					delta := struct {
 						Type  string `json:"type"`
 						Index int    `json:"index"`
