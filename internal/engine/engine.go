@@ -431,8 +431,9 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Forward the request to the downstream
-	resp, err := e.forwardRequest(currentReq, currentBody, ctx)
+	resp, cancel, err := e.forwardRequest(currentReq, currentBody, ctx)
 	if err != nil {
+		cancel()
 		log.Printf("Forward error: %v", err)
 		http.Error(cw, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		entry.Status = http.StatusBadGateway
@@ -455,14 +456,15 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		// Streaming path: pipe SSE events to the client in real-time.
 		// If stream transformers exist, each chunk is transformed on the fly.
 		// Otherwise, events are passed through unchanged but still flushed immediately.
-		e.handleStreamingResponse(cw, resp, ctx, &pipeline)
+		e.handleStreamingResponse(cw, resp, ctx, &pipeline, cancel)
 		return
 	}
 
 	// Non-streaming response: buffer and transform
 	respBody, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	cancel()
 	if err != nil {
-		resp.Body.Close()
 		http.Error(cw, "failed to read upstream response", http.StatusInternalServerError)
 		entry.Status = http.StatusInternalServerError
 		entry.Error = "failed to read response"
@@ -474,7 +476,6 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// Execute response transformers
 	transformedBody, err := ExecuteResponsePipeline(resp, respBody, ctx, pipeline.ResponseSteps)
 	if err != nil {
-		resp.Body.Close()
 		log.Printf("Response pipeline error: %v", err)
 		http.Error(cw, fmt.Sprintf("response pipeline error: %v", err), http.StatusBadGateway)
 		entry.Status = http.StatusBadGateway
@@ -498,8 +499,10 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 // handleStreamingResponse pipes an SSE response from the downstream to the client.
 // If stream transformers exist, each SSE event is transformed before sending.
 // Without stream transformers, the response is passed through line-by-line (no buffering).
-func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline) {
-	defer resp.Body.Close()
+// The cancel function is called after the stream completes to clean up the downstream context.
+func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc) {
+		defer resp.Body.Close()
+		defer cancel()
 
 	// Copy SSE-relevant headers to the client response
 	for _, header := range []string{"Content-Type", "Cache-Control", "Connection"} {
@@ -622,7 +625,8 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 // forwardRequest sends the (possibly transformed) request to the target downstream.
 // SSRF validation is not applied here — downstreams are admin-configured via auth-protected API.
-func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *PipelineContext) (*http.Response, error) {
+// Returns the response and a cancel function; caller must call cancel after consuming resp.Body.
+func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *PipelineContext) (*http.Response, context.CancelFunc, error) {
 	baseURL := strings.TrimRight(ctx.TargetDownstream.BaseURL, "/")
 
 	// Determine the path to append. If the base_url already contains the API
@@ -644,16 +648,16 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse target URL: %w", err)
+		return nil, nil, fmt.Errorf("parse target URL: %w", err)
 	}
 
 	// Build forwarded request. Use a detached context so the downstream connection
 	// isn't killed if the client disconnects (common with long-running SSE streams).
 	forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer forwardCancel()
 	forwardedReq, err := http.NewRequestWithContext(forwardCtx, original.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("create forwarded request: %w", err)
+		forwardCancel()
+		return nil, nil, fmt.Errorf("create forwarded request: %w", err)
 	}
 
 	// Copy headers, overriding Host and Authorization
@@ -680,7 +684,12 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	}
 	forwardedReq.Header.Set("Host", parsedURL.Host)
 
-	return e.client.Do(forwardedReq)
+	resp, err := e.client.Do(forwardedReq)
+	if err != nil {
+		forwardCancel()
+		return nil, nil, err
+	}
+	return resp, forwardCancel, nil
 }
 
 // extractModel parses the request body JSON to find the "model" field.
