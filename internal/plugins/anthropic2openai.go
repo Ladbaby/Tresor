@@ -14,12 +14,26 @@ import (
 type Anthropic2OpenAI struct{}
 
 type anthropicRequest2 struct {
-	Model       string               `json:"model"`
-	MaxTokens   int                  `json:"max_tokens"`
-	Messages    []AnthropicMessage   `json:"messages"`
-	System      *flexibleContent     `json:"system,omitempty"`
-	Temperature float64              `json:"temperature,omitempty"`
-	Stream      bool                 `json:"stream,omitempty"`
+	Model         string           `json:"model"`
+	MaxTokens     int              `json:"max_tokens"`
+	Messages      json.RawMessage  `json:"messages"`
+	System        *flexibleContent `json:"system,omitempty"`
+	Temperature   float64          `json:"temperature,omitempty"`
+	Stream        bool             `json:"stream,omitempty"`
+	Tools         json.RawMessage  `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage  `json:"tool_choice,omitempty"`
+	StopSequences []string         `json:"stop_sequences,omitempty"`
+}
+
+// anthropicContentBlock2 is a rich content block struct used for request conversion.
+type anthropicContentBlock2 struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
 }
 
 // TransformRequest converts an Anthropic Messages request into an OpenAI Chat Completion request.
@@ -29,36 +43,184 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 		return nil, nil, fmt.Errorf("anthropic2openai: failed to parse request: %w", err)
 	}
 
-	// Build OpenAI request
-	openAIReq := openAIChatRequest{
-		Model:       mapModelReverse(anthropicReq.Model),
-		Messages:    make([]openAIChatMessage, 0),
-		MaxTokens:   anthropicReq.MaxTokens,
-		Temperature: anthropicReq.Temperature,
-		Stream:      anthropicReq.Stream,
+	// Build OpenAI request body as a map for maximum flexibility
+	openAIBody := map[string]interface{}{
+		"model":       mapModelReverse(anthropicReq.Model),
+		"messages":    make([]map[string]interface{}, 0),
+		"max_tokens":  anthropicReq.MaxTokens,
+		"temperature": anthropicReq.Temperature,
+		"stream":      anthropicReq.Stream,
 	}
 
-	// If there's a system prompt, add it as a system message at the start
-	if anthropicReq.System != nil && anthropicReq.System.Text != "" {
-		openAIReq.Messages = append(openAIReq.Messages, openAIChatMessage{
-			Role:    "system",
-			Content: anthropicReq.System.Text,
-		})
+	// Convert stop_sequences → stop
+	if len(anthropicReq.StopSequences) > 0 {
+		openAIBody["stop"] = anthropicReq.StopSequences
 	}
 
-	// Convert Anthropic messages to OpenAI format
-	for _, msg := range anthropicReq.Messages {
-		content := ""
-		if msg.Content != nil {
-			content = msg.Content.Text
+	// Convert tool definitions: Anthropic → OpenAI format
+	if len(anthropicReq.Tools) > 0 {
+		var anthropicTools []map[string]interface{}
+		if err := json.Unmarshal(anthropicReq.Tools, &anthropicTools); err == nil {
+			openAITools := make([]map[string]interface{}, 0, len(anthropicTools))
+			for _, at := range anthropicTools {
+				name, _ := at["name"].(string)
+				desc, _ := at["description"].(string)
+				inputSchema := at["input_schema"]
+				openAITool := map[string]interface{}{
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":        name,
+						"description": desc,
+						"parameters":  inputSchema,
+					},
+				}
+				openAITools = append(openAITools, openAITool)
+			}
+			openAIBody["tools"] = openAITools
 		}
-		openAIReq.Messages = append(openAIReq.Messages, openAIChatMessage{
-			Role:    msg.Role,
-			Content: content,
+	}
+
+	// Convert tool_choice: Anthropic → OpenAI format
+	if len(anthropicReq.ToolChoice) > 0 {
+		var tc struct {
+			Type string `json:"type"`
+			Name string `json:"name,omitempty"`
+		}
+		if err := json.Unmarshal(anthropicReq.ToolChoice, &tc); err == nil {
+			switch tc.Type {
+			case "auto":
+				openAIBody["tool_choice"] = "auto"
+			case "any":
+				openAIBody["tool_choice"] = "required"
+			case "tool":
+				openAIBody["tool_choice"] = map[string]interface{}{
+					"type": "function",
+					"function": map[string]interface{}{
+						"name": tc.Name,
+					},
+				}
+			default:
+				openAIBody["tool_choice"] = tc.Type
+			}
+		}
+	}
+
+	// Convert system prompt
+	var oaiMessages []map[string]interface{}
+	if anthropicReq.System != nil && anthropicReq.System.Text != "" {
+		oaiMessages = append(oaiMessages, map[string]interface{}{
+			"role":    "system",
+			"content": anthropicReq.System.Text,
 		})
 	}
 
-	newBody, err := json.Marshal(openAIReq)
+	// Convert Anthropic messages to OpenAI format, handling content blocks
+	var anthroMessages []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(anthropicReq.Messages, &anthroMessages); err == nil {
+		for _, msg := range anthroMessages {
+			// Try plain string content first
+			var contentStr string
+			if json.Unmarshal(msg.Content, &contentStr) == nil {
+				oaiMessages = append(oaiMessages, map[string]interface{}{
+					"role":    msg.Role,
+					"content": contentStr,
+				})
+				continue
+			}
+
+			// Try array of content blocks
+			var blocks []anthropicContentBlock2
+			if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+				// Unknown format — pass raw content
+				oaiMessages = append(oaiMessages, map[string]interface{}{
+					"role":    msg.Role,
+					"content": string(msg.Content),
+				})
+				continue
+			}
+
+			// Process content blocks
+			var textParts []string
+			var toolCalls []openAIChatToolCall
+			hasToolUse := false
+			hasToolResult := false
+
+			for _, block := range blocks {
+				switch block.Type {
+				case "text":
+					if block.Text != "" {
+						textParts = append(textParts, block.Text)
+					}
+				case "thinking":
+					if block.Text != "" {
+						textParts = append(textParts, block.Text)
+					}
+				case "tool_use":
+					hasToolUse = true
+					tc := openAIChatToolCall{
+						ID:   block.ID,
+						Type: "function",
+					}
+					tc.Function.Name = block.Name
+					if block.Input != nil {
+						tc.Function.Arguments = string(block.Input)
+					}
+					toolCalls = append(toolCalls, tc)
+				case "tool_result":
+					hasToolResult = true
+					// tool_result becomes a separate "tool" role message
+					toolContent := ""
+					if block.Content != nil {
+						// Content can be string or array
+						var s string
+						if json.Unmarshal(block.Content, &s) == nil {
+							toolContent = s
+						} else {
+							var innerBlocks []anthropicContentBlock2
+							if json.Unmarshal(block.Content, &innerBlocks) == nil {
+								for _, ib := range innerBlocks {
+									if ib.Type == "text" {
+										toolContent += ib.Text
+									}
+								}
+							}
+						}
+					}
+					oaiMessages = append(oaiMessages, map[string]interface{}{
+						"role":         "tool",
+						"content":      toolContent,
+						"tool_call_id": block.ToolUseID,
+					})
+				}
+			}
+
+			if hasToolUse {
+				text := joinTextParts(textParts)
+				oaiMsg := map[string]interface{}{
+					"role":       "assistant",
+					"content":    text,
+					"tool_calls": toolCalls,
+				}
+				oaiMessages = append(oaiMessages, oaiMsg)
+			} else if hasToolResult {
+				// Already handled above — tool_result messages are appended inline
+			} else {
+				// Regular text-only message
+				text := joinTextParts(textParts)
+				oaiMessages = append(oaiMessages, map[string]interface{}{
+					"role":    msg.Role,
+					"content": text,
+				})
+			}
+		}
+	}
+
+	openAIBody["messages"] = oaiMessages
+
+	newBody, err := json.Marshal(openAIBody)
 	if err != nil {
 		return nil, nil, fmt.Errorf("anthropic2openai: failed to marshal request: %w", err)
 	}
@@ -80,6 +242,25 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 	return newReq, newBody, nil
 }
 
+// joinTextParts concatenates text parts with a newline.
+func joinTextParts(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	default:
+		var b bytes.Buffer
+		for i, p := range parts {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(p)
+		}
+		return b.String()
+	}
+}
+
 // TransformResponse converts an OpenAI Chat Completion response into an Anthropic Messages response.
 func (t *Anthropic2OpenAI) TransformResponse(resp *http.Response, body []byte, ctx *engine.PipelineContext) ([]byte, error) {
 	contentType := resp.Header.Get("Content-Type")
@@ -96,7 +277,6 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 	var out bytes.Buffer
 	inContentBlock := false
 	messageStarted := false
-	pendingContentBlock := false
 	outputTextLen := 0 // accumulated output text length (for usage estimate)
 
 	parseOpenAISSE(body, func(data []byte) bool {
@@ -129,90 +309,48 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 		}
 
 		for _, choice := range chunk.Choices {
-			if choice.Delta.Role == "assistant" && !inContentBlock && !pendingContentBlock {
-				if choice.Delta.Content != "" {
-					// Has content right away — emit content_block_start immediately
-					msg := struct {
-						Type         string `json:"type"`
-						ContentBlock struct {
-							Type string `json:"type"`
-							Text string `json:"text"`
-						} `json:"content_block"`
-						Index int `json:"index"`
-					}{
-						Type:  "content_block_start",
-						Index: choice.Index,
-					}
-					msg.ContentBlock.Type = "text"
-					msg.ContentBlock.Text = choice.Delta.Content
-					outputTextLen += len(choice.Delta.Content)
-					writeAnthropicSSE(&out, "content_block_start", msg)
-					inContentBlock = true
-				} else {
-					// Empty content — defer until first real content arrives
-					pendingContentBlock = true
+			if choice.Delta.Role == "assistant" && !inContentBlock {
+				// Always emit content_block_start immediately, even with empty text.
+				// Deferring (pendingContentBlock) caused an empty data: \n\n SSE event
+				// that could confuse Anthropic SDK event parsers.
+				msg := struct {
+					Type         string `json:"type"`
+					ContentBlock struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content_block"`
+					Index int `json:"index"`
+				}{
+					Type:  "content_block_start",
+					Index: choice.Index,
 				}
+				msg.ContentBlock.Type = "text"
+				msg.ContentBlock.Text = choice.Delta.Content
+				outputTextLen += len(choice.Delta.Content)
+				writeAnthropicSSE(&out, "content_block_start", msg)
+				inContentBlock = true
 			} else if choice.Delta.Content != "" {
-				if pendingContentBlock {
-					// First non-empty content — emit content_block_start (not delta)
-					msg := struct {
-						Type         string `json:"type"`
-						ContentBlock struct {
-							Type string `json:"type"`
-							Text string `json:"text"`
-						} `json:"content_block"`
-						Index int `json:"index"`
-					}{
-						Type:  "content_block_start",
-						Index: choice.Index,
-					}
-					msg.ContentBlock.Type = "text"
-					msg.ContentBlock.Text = choice.Delta.Content
-					outputTextLen += len(choice.Delta.Content)
-					writeAnthropicSSE(&out, "content_block_start", msg)
-					inContentBlock = true
-					pendingContentBlock = false
-				} else {
-					delta := struct {
-						Type  string `json:"type"`
-						Index int    `json:"index"`
-						Delta struct {
-							Type string `json:"type"`
-							Text string `json:"text"`
-						} `json:"delta"`
-					}{
-						Type:  "content_block_delta",
-						Index: choice.Index,
-					}
-					delta.Delta.Type = "text_delta"
-					delta.Delta.Text = choice.Delta.Content
-					outputTextLen += len(choice.Delta.Content)
-					writeAnthropicSSE(&out, "content_block_delta", delta)
+				delta := struct {
+					Type  string `json:"type"`
+					Index int    `json:"index"`
+					Delta struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"delta"`
+				}{
+					Type:  "content_block_delta",
+					Index: choice.Index,
 				}
+				delta.Delta.Type = "text_delta"
+				delta.Delta.Text = choice.Delta.Content
+				outputTextLen += len(choice.Delta.Content)
+				writeAnthropicSSE(&out, "content_block_delta", delta)
 			}
 
 			if choice.FinishReason != nil {
 				stopReason := *choice.FinishReason
 				if stopReason == "stop" {
 					stopReason = "end_turn"
-				}
-				if pendingContentBlock {
-					// Finish reason before any content — flush empty block
-					msg := struct {
-						Type         string `json:"type"`
-						ContentBlock struct {
-							Type string `json:"type"`
-							Text string `json:"text"`
-						} `json:"content_block"`
-						Index int `json:"index"`
-					}{
-						Type:  "content_block_start",
-						Index: choice.Index,
-					}
-					msg.ContentBlock.Type = "text"
-					writeAnthropicSSE(&out, "content_block_start", msg)
-					inContentBlock = true
-					pendingContentBlock = false
 				}
 				writeAnthropicSSE(&out, "content_block_stop", struct {
 					Type  string `json:"type"`
@@ -253,14 +391,28 @@ func (t *Anthropic2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 		return body, nil
 	}
 
-	// Build Anthropic response
+	// Build Anthropic response content blocks (text + tool_use)
 	content := make([]anthropicContent, 0)
-	text := ""
 	for _, choice := range openAIResp.Choices {
-		text += choice.Message.Content
-	}
-	if text != "" {
-		content = append(content, anthropicContent{Type: "text", Text: text})
+		// Add text content if present
+		if choice.Message.Content != "" {
+			content = append(content, anthropicContent{Type: "text", Text: choice.Message.Content})
+		}
+		// Add tool_use content blocks for each tool call
+		for _, tc := range choice.Message.ToolCalls {
+			input := json.RawMessage(tc.Function.Arguments)
+			// Parse arguments string as JSON for a prettier output
+			var parsed interface{}
+			if json.Unmarshal([]byte(tc.Function.Arguments), &parsed) == nil {
+				input, _ = json.Marshal(parsed)
+			}
+			content = append(content, anthropicContent{
+				Type:  "tool_use",
+				ID:    tc.ID,
+				Name:  tc.Function.Name,
+				Input: input,
+			})
+		}
 	}
 
 	stopReason := "end_turn"
@@ -339,6 +491,10 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		state.ID = oaiChunk.ID
 		state.Model = mapModel(oaiChunk.Model)
 		state.messageStarted = true
+		// Initialize tool call tracking
+		if state.toolCallAcc == nil {
+			state.toolCallAcc = make(map[int]*toolCallAccum)
+		}
 		msg := struct {
 			Type    string `json:"type"`
 			Message struct {
@@ -355,57 +511,110 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		writeAnthropicSSE(&out, "message_start", msg)
 	}
 
+	// Ensure tool call accumulator map is initialized
+	if state.toolCallAcc == nil {
+		state.toolCallAcc = make(map[int]*toolCallAccum)
+	}
+
 	for _, choice := range oaiChunk.Choices {
-		if choice.Delta.Role == "assistant" && !state.inContentBlock && !state.pendingContentBlock {
-			if choice.Delta.Content != "" {
-				// Has content right away — emit content_block_start immediately
-				msg := struct {
-					Type         string `json:"type"`
-					ContentBlock struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"content_block"`
-					Index int `json:"index"`
-				}{Type: "content_block_start", Index: choice.Index}
-				msg.ContentBlock.Type = "text"
-				msg.ContentBlock.Text = choice.Delta.Content
-				state.outputTokens += len(choice.Delta.Content)
-				writeAnthropicSSE(&out, "content_block_start", msg)
-				state.inContentBlock = true
-			} else {
-				// Empty content — defer until first real content arrives
-				state.pendingContentBlock = true
-			}
+		if choice.Delta.Role == "assistant" && !state.inContentBlock {
+			// Always emit content_block_start immediately, even with empty text.
+			msg := struct {
+				Type         string `json:"type"`
+				ContentBlock struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content_block"`
+				Index int `json:"index"`
+			}{Type: "content_block_start", Index: choice.Index}
+			msg.ContentBlock.Type = "text"
+			msg.ContentBlock.Text = choice.Delta.Content
+			state.outputTokens += len(choice.Delta.Content)
+			state.contentBlockIdx++
+			writeAnthropicSSE(&out, "content_block_start", msg)
+			state.inContentBlock = true
 		} else if choice.Delta.Content != "" {
-			if state.pendingContentBlock {
-				// First non-empty content — emit content_block_start (not delta)
+			delta := struct {
+				Type  string `json:"type"`
+				Index int    `json:"index"`
+				Delta struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"delta"`
+			}{Type: "content_block_delta", Index: choice.Index}
+			delta.Delta.Type = "text_delta"
+			delta.Delta.Text = choice.Delta.Content
+			state.outputTokens += len(choice.Delta.Content)
+			writeAnthropicSSE(&out, "content_block_delta", delta)
+		}
+
+		// Handle tool calls in streaming delta
+		for _, tc := range choice.Delta.ToolCalls {
+			existing, exists := state.toolCallAcc[tc.Index]
+			if !exists {
+				// New tool call — emit content_block_start with type "tool_use"
+				state.contentBlockIdx++
+				acc := &toolCallAccum{
+					assignedBlockIdx: state.contentBlockIdx,
+					id:               tc.ID,
+					name:             tc.Function.Name,
+				}
+				state.toolCallAcc[tc.Index] = acc
+
 				msg := struct {
 					Type         string `json:"type"`
 					ContentBlock struct {
 						Type string `json:"type"`
-						Text string `json:"text"`
+						ID   string `json:"id"`
+						Name string `json:"name"`
 					} `json:"content_block"`
 					Index int `json:"index"`
-				}{Type: "content_block_start", Index: choice.Index}
-				msg.ContentBlock.Type = "text"
-				msg.ContentBlock.Text = choice.Delta.Content
-				state.outputTokens += len(choice.Delta.Content)
+				}{
+					Type:  "content_block_start",
+					Index: state.contentBlockIdx,
+				}
+				msg.ContentBlock.Type = "tool_use"
+				msg.ContentBlock.ID = tc.ID
+				msg.ContentBlock.Name = tc.Function.Name
 				writeAnthropicSSE(&out, "content_block_start", msg)
-				state.inContentBlock = true
-				state.pendingContentBlock = false
+
+				// Emit first arguments fragment if present
+				if tc.Function.Arguments != "" {
+					existing.argumentsAccum += tc.Function.Arguments
+					delta := struct {
+						Type  string `json:"type"`
+						Index int    `json:"index"`
+						Delta struct {
+							Type        string `json:"type"`
+							PartialJSON string `json:"partial_json"`
+						} `json:"delta"`
+					}{
+						Type:  "content_block_delta",
+						Index: state.contentBlockIdx,
+					}
+					delta.Delta.Type = "input_json_delta"
+					delta.Delta.PartialJSON = tc.Function.Arguments
+					writeAnthropicSSE(&out, "content_block_delta", delta)
+				}
 			} else {
-				delta := struct {
-					Type  string `json:"type"`
-					Index int    `json:"index"`
-					Delta struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"delta"`
-				}{Type: "content_block_delta", Index: choice.Index}
-				delta.Delta.Type = "text_delta"
-				delta.Delta.Text = choice.Delta.Content
-				state.outputTokens += len(choice.Delta.Content)
-				writeAnthropicSSE(&out, "content_block_delta", delta)
+				// Existing tool call — append arguments delta
+				if tc.Function.Arguments != "" {
+					existing.argumentsAccum += tc.Function.Arguments
+					delta := struct {
+						Type  string `json:"type"`
+						Index int    `json:"index"`
+						Delta struct {
+							Type        string `json:"type"`
+							PartialJSON string `json:"partial_json"`
+						} `json:"delta"`
+					}{
+						Type:  "content_block_delta",
+						Index: existing.assignedBlockIdx,
+					}
+					delta.Delta.Type = "input_json_delta"
+					delta.Delta.PartialJSON = tc.Function.Arguments
+					writeAnthropicSSE(&out, "content_block_delta", delta)
+				}
 			}
 		}
 
@@ -414,25 +623,28 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			if stopReason == "stop" {
 				stopReason = "end_turn"
 			}
-			if state.pendingContentBlock {
-				// Finish reason before any content — flush empty block first
-				msg := struct {
-					Type         string `json:"type"`
-					ContentBlock struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"content_block"`
-					Index int `json:"index"`
-				}{Type: "content_block_start", Index: choice.Index}
-				msg.ContentBlock.Type = "text"
-				writeAnthropicSSE(&out, "content_block_start", msg)
-				state.inContentBlock = true
-				state.pendingContentBlock = false
+			if stopReason == "tool_calls" {
+				stopReason = "tool_use"
 			}
-			writeAnthropicSSE(&out, "content_block_stop", struct {
-				Type  string `json:"type"`
-				Index int    `json:"index"`
-			}{Type: "content_block_stop", Index: choice.Index})
+
+			// Close text content block if open
+			if state.inContentBlock {
+				writeAnthropicSSE(&out, "content_block_stop", struct {
+					Type  string `json:"type"`
+					Index int    `json:"index"`
+				}{Type: "content_block_stop", Index: choice.Index})
+				state.inContentBlock = false
+			}
+
+			// Close tool call content blocks
+			for _, acc := range state.toolCallAcc {
+				writeAnthropicSSE(&out, "content_block_stop", struct {
+					Type  string `json:"type"`
+					Index int    `json:"index"`
+				}{Type: "content_block_stop", Index: acc.assignedBlockIdx})
+			}
+			state.toolCallAcc = nil
+
 			outputTokens := state.outputTokens / 4
 			if outputTokens < 1 {
 				outputTokens = 1
@@ -457,15 +669,26 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	return engine.SSEChunk{EventType: "", Data: out.Bytes()}, nil
 }
 
+// toolCallAccum tracks a tool call being built across streaming chunks.
+type toolCallAccum struct {
+	assignedBlockIdx int
+	id               string
+	name             string
+	argumentsAccum   string
+}
+
 // anthropic2openaiStreamState tracks state across SSE chunks for a single stream.
 type anthropic2openaiStreamState struct {
-	ID                  string
-	Model               string
-	messageStarted      bool
-	inContentBlock      bool
-	messageDeltaSent    bool
-	pendingContentBlock bool   // role="assistant" seen but content was empty
-	outputTokens        int    // accumulated output text (rough estimate for usage)
+	ID               string
+	Model            string
+	messageStarted   bool
+	inContentBlock   bool
+	messageDeltaSent bool
+	outputTokens     int // accumulated output text (rough estimate for usage)
+
+	// Tool call tracking across chunks
+	contentBlockIdx int                    // sequential content block index across the message
+	toolCallAcc     map[int]*toolCallAccum // OpenAI tool_call index → accumulator
 }
 
 // Ensure interface compliance.

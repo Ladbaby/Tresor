@@ -99,10 +99,22 @@ type openAIChunkChoice struct {
 	FinishReason *string     `json:"finish_reason,omitempty"`
 }
 
+// openAIToolCallDelta represents a tool call in a streaming delta.
+type openAIToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Function struct {
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+	} `json:"function,omitempty"`
+}
+
 // openAIDelta represents the content delta in a streaming choice.
 type openAIDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string               `json:"role,omitempty"`
+	Content   string               `json:"content,omitempty"`
+	ToolCalls []openAIToolCallDelta `json:"tool_calls,omitempty"`
 }
 
 // writeSSEData marshals v as JSON and writes an SSE "data:" line to buf.

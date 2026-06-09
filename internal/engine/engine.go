@@ -587,6 +587,11 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			log.Printf("Stream transform error: %v", err)
 			return
 		}
+		// Safety guard: skip empty data to avoid sending data: \n\n that could
+		// confuse downstream event parsers (e.g. Anthropic SDK).
+		if len(chunk.Data) == 0 {
+			return
+		}
 
 		// If the transformer output contains SSE event boundaries (\n\n), it is
 		// already formatted SSE — write it directly without wrapping in data:.
