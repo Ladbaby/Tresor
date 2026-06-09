@@ -114,6 +114,11 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 		})
 	}
 
+	// Ensure oaiMessages is never nil so it marshals as [] not null
+	if oaiMessages == nil {
+		oaiMessages = make([]map[string]interface{}, 0)
+	}
+
 	// Convert Anthropic messages to OpenAI format, handling content blocks
 	var anthroMessages []struct {
 		Role    string          `json:"role"`
@@ -351,6 +356,9 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 				stopReason := *choice.FinishReason
 				if stopReason == "stop" {
 					stopReason = "end_turn"
+				}
+				if stopReason == "tool_calls" {
+					stopReason = "tool_use"
 				}
 				writeAnthropicSSE(&out, "content_block_stop", struct {
 					Type  string `json:"type"`
@@ -620,11 +628,13 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 		if choice.FinishReason != nil {
 			stopReason := *choice.FinishReason
-			if stopReason == "stop" {
+			switch stopReason {
+			case "stop":
 				stopReason = "end_turn"
-			}
-			if stopReason == "tool_calls" {
+			case "tool_calls":
 				stopReason = "tool_use"
+			case "length":
+				stopReason = "max_tokens"
 			}
 
 			// Close text content block if open

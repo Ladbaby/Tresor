@@ -626,6 +626,10 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		// OpenAI uses "[DONE]" marker — write it as the data payload
 		return engine.SSEChunk{EventType: "", Data: []byte("[DONE]")}, nil
 
+	case "content_block_stop":
+		// OpenAI format has no block stop events — no output needed
+		return engine.SSEChunk{}, nil
+
 	default:
 		// Unknown event — pass through unchanged
 		return chunk, nil
