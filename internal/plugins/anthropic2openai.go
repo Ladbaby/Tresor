@@ -230,18 +230,32 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 	var out bytes.Buffer
 
+	// Check for [DONE] marker BEFORE JSON parsing — it is not valid JSON.
+	if string(bytes.TrimSpace(chunk.Data)) == "[DONE]" {
+		if state.messageDeltaSent {
+			// Finish reason was already emitted — just close the stream.
+			writeAnthropicSSE(&out, "message_stop", struct{ Type string `json:"type"` }{Type: "message_stop"})
+		} else {
+			// No finish reason seen (some non-OpenAI servers omit it) — emit message_delta + message_stop.
+			msgDelta := struct {
+				Type  string `json:"type"`
+				Delta struct {
+					StopReason   string `json:"stop_reason"`
+					StopSequence string `json:"stop_sequence"`
+				} `json:"delta"`
+			}{Type: "message_delta"}
+			msgDelta.Delta.StopReason = "end_turn"
+			writeAnthropicSSE(&out, "message_delta", msgDelta)
+			writeAnthropicSSE(&out, "message_stop", struct{ Type string `json:"type"` }{Type: "message_stop"})
+		}
+		return engine.SSEChunk{EventType: "", Data: out.Bytes()}, nil
+	}
+
 	// Parse the OpenAI chunk
 	var oaiChunk openAIChunk
 	if err := json.Unmarshal(chunk.Data, &oaiChunk); err != nil {
 		// Not valid JSON — pass through unchanged
 		return chunk, nil
-	}
-
-	// Check for [DONE] marker
-	if string(bytes.TrimSpace(chunk.Data)) == "[DONE]" {
-		// Emit message_stop to close the Anthropic stream
-		writeAnthropicSSE(&out, "message_stop", struct{ Type string `json:"type"` }{Type: "message_stop"})
-		return engine.SSEChunk{EventType: "", Data: out.Bytes()}, nil
 	}
 
 	// First chunk: emit message_start
@@ -304,7 +318,7 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			}{Type: "message_delta"}
 			msgDelta.Delta.StopReason = stopReason
 			writeAnthropicSSE(&out, "message_delta", msgDelta)
-			writeAnthropicSSE(&out, "message_stop", struct{ Type string `json:"type"` }{Type: "message_stop"})
+			state.messageDeltaSent = true
 		}
 	}
 
@@ -313,10 +327,11 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 // anthropic2openaiStreamState tracks state across SSE chunks for a single stream.
 type anthropic2openaiStreamState struct {
-	ID             string
-	Model          string
-	messageStarted bool
-	inContentBlock bool
+	ID               string
+	Model            string
+	messageStarted   bool
+	inContentBlock   bool
+	messageDeltaSent bool
 }
 
 // Ensure interface compliance.
