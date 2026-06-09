@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -444,19 +445,15 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if this is a streaming (SSE) response
-	contentType := resp.Header.Get("Content-Type")
-	isStream := strings.EqualFold(contentType, "text/event-stream")
+	isStream := isEventStream(resp.Header.Get("Content-Type"))
 
 	if isStream {
-		// Record the entry before streaming (stream duration tracked separately)
+		// Record latency immediately (time-to-first-response, not full stream duration).
 		entry.Status = resp.StatusCode
 		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
 
-		// Streaming path: pipe SSE events to the client in real-time.
-		// If stream transformers exist, each chunk is transformed on the fly.
-		// Otherwise, events are passed through unchanged but still flushed immediately.
-		e.handleStreamingResponse(cw, resp, ctx, &pipeline, cancel)
+		e.handleStreamingResponse(cw, resp, ctx, &pipeline, cancel, r.Context())
 		return
 	}
 
@@ -465,8 +462,12 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	resp.Body.Close()
 	cancel()
 	if err != nil {
-		http.Error(cw, "failed to read upstream response", http.StatusInternalServerError)
-		entry.Status = http.StatusInternalServerError
+		errMsg := fmt.Sprintf("failed to read upstream response (%d)", resp.StatusCode)
+		if len(respBody) > 0 {
+			errMsg += ": " + truncateString(string(respBody), 500)
+		}
+		http.Error(cw, errMsg, http.StatusBadGateway)
+		entry.Status = http.StatusBadGateway
 		entry.Error = "failed to read response"
 		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
@@ -500,9 +501,9 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 // If stream transformers exist, each SSE event is transformed before sending.
 // Without stream transformers, the response is passed through line-by-line (no buffering).
 // The cancel function is called after the stream completes to clean up the downstream context.
-func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc) {
-		defer resp.Body.Close()
-		defer cancel()
+func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context) {
+	defer resp.Body.Close()
+	defer cancel()
 
 	// Copy SSE-relevant headers to the client response
 	for _, header := range []string{"Content-Type", "Cache-Control", "Connection"} {
@@ -530,13 +531,16 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	// Passthrough mode: no transformers — write each line immediately with flush
 	if !hasTransformers {
 		for scanner.Scan() {
+			select {
+			case <-clientCtx.Done():
+				return
+			default:
+			}
 			line := strings.TrimRight(scanner.Text(), "\r")
 			w.Write([]byte(line + "\n"))
 			flusher.Flush()
 		}
 		if err := scanner.Err(); err != nil {
-			// Common causes: client disconnected, downstream closed connection.
-			// Not an error worth alarming about — just log at debug level.
 			log.Printf("Stream ended: %v", err)
 		}
 		return
@@ -549,6 +553,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	flushEvent := func() {
 		if len(dataLines) == 0 {
 			return
+		}
+
+		select {
+		case <-clientCtx.Done():
+			return
+		default:
 		}
 
 		// Combine data lines to get the raw SSE payload
@@ -586,6 +596,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	}
 
 	for scanner.Scan() {
+		select {
+		case <-clientCtx.Done():
+			return
+		default:
+		}
+
 		line := strings.TrimRight(scanner.Text(), "\r")
 
 		if line == "" {
@@ -617,8 +633,6 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	flushEvent()
 
 	if err := scanner.Err(); err != nil {
-		// Common causes: client disconnected, downstream closed connection.
-		// Not an error worth alarming about — just log at debug level.
 		log.Printf("Stream ended: %v", err)
 	}
 }
@@ -679,7 +693,12 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		hasAuthHeader := forwardedReq.Header.Get("Authorization") != "" ||
 			forwardedReq.Header.Get("x-api-key") != ""
 		if !hasAuthHeader {
-			forwardedReq.Header.Set("Authorization", "Bearer "+ctx.TargetDownstream.APIKey)
+			if slices.Contains(ctx.TargetDownstream.ApiFormats, "anthropic") {
+				forwardedReq.Header.Set("x-api-key", ctx.TargetDownstream.APIKey)
+				forwardedReq.Header.Set("anthropic-version", "2023-06-01")
+			} else {
+				forwardedReq.Header.Set("Authorization", "Bearer "+ctx.TargetDownstream.APIKey)
+			}
 		}
 	}
 	forwardedReq.Header.Set("Host", parsedURL.Host)
@@ -734,6 +753,22 @@ func detectInputFormat(path string) string {
 	default:
 		return ""
 	}
+}
+
+func isEventStream(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = contentType
+	}
+	return strings.EqualFold(mediaType, "text/event-stream")
+}
+
+// truncateString truncates a string to n characters, adding "..." if truncated.
+func truncateString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // pluginInList checks if a transformer with the given type name is already in the request pipeline.
