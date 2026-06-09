@@ -56,7 +56,13 @@ func (t *OpenAI2Anthropic) TransformRequest(req *http.Request, body []byte, ctx 
 
 	for _, msg := range openAIReq.Messages {
 		if msg.Role == "system" {
-			anthropicReq.System = &flexibleContent{Text: msg.Content}
+			if anthropicReq.System == nil {
+				anthropicReq.System = &flexibleContent{}
+			}
+			if anthropicReq.System.Text != "" {
+				anthropicReq.System.Text += "\n"
+			}
+			anthropicReq.System.Text += msg.Content
 			continue
 		}
 		anthropicReq.Messages = append(anthropicReq.Messages, AnthropicMessage{
@@ -343,8 +349,8 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			data, _ := json.Marshal(outChunk)
 			return engine.SSEChunk{EventType: "", Data: data}, nil
 		}
-		// Non-text block or empty — pass through silently (no output)
-		return chunk, nil
+		// Non-text block or empty — skip (no output)
+		return engine.SSEChunk{}, nil
 
 	case "content_block_delta":
 		var delta struct {
@@ -367,7 +373,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			data, _ := json.Marshal(outChunk)
 			return engine.SSEChunk{EventType: "", Data: data}, nil
 		}
-		return chunk, nil
+		return engine.SSEChunk{}, nil
 
 	case "message_delta":
 		var md struct {

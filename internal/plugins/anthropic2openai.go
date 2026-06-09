@@ -48,9 +48,13 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 
 	// Convert Anthropic messages to OpenAI format
 	for _, msg := range anthropicReq.Messages {
+		content := ""
+		if msg.Content != nil {
+			content = msg.Content.Text
+		}
 		openAIReq.Messages = append(openAIReq.Messages, openAIChatMessage{
 			Role:    msg.Role,
-			Content: msg.Content.Text,
+			Content: content,
 		})
 	}
 
@@ -101,7 +105,7 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 
 		if !messageStarted {
 			id = chunk.ID
-			model = chunk.Model
+			model = mapModel(chunk.Model)
 			messageStarted = true
 			// Emit message_start to match Anthropic SSE protocol
 			msg := struct {
@@ -122,18 +126,18 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 			if choice.Delta.Role == "assistant" && !inContentBlock {
 				// Start of assistant response
 				msg := struct {
-					Type    string `json:"type"`
-					Content struct {
+					Type         string `json:"type"`
+					ContentBlock struct {
 						Type string `json:"type"`
 						Text string `json:"text"`
-					} `json:"content"`
+					} `json:"content_block"`
 					Index int `json:"index"`
 				}{
 					Type:  "content_block_start",
 					Index: choice.Index,
 				}
-				msg.Content.Type = "text"
-				msg.Content.Text = choice.Delta.Content
+				msg.ContentBlock.Type = "text"
+				msg.ContentBlock.Text = choice.Delta.Content
 				writeAnthropicSSE(&out, "content_block_start", msg)
 				inContentBlock = true
 			} else if choice.Delta.Content != "" {
@@ -158,6 +162,7 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 				if stopReason == "stop" {
 					stopReason = "end_turn"
 				}
+				writeAnthropicSSE(&out, "content_block_stop", struct{ Type string `json:"type"` }{Type: "content_block_stop"})
 				msgDelta := struct {
 					Type  string `json:"type"`
 					Delta struct {
@@ -204,7 +209,7 @@ func (t *Anthropic2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 
 	anthropicResp := anthropicResponse{
 		ID:      openAIResp.ID,
-		Model:   mapModelReverse(openAIResp.Model),
+		Model:   mapModel(openAIResp.Model),
 		Content: content,
 		Usage: struct {
 			InputTokens  int `json:"input_tokens"`
@@ -261,7 +266,7 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	// First chunk: emit message_start
 	if !state.messageStarted {
 		state.ID = oaiChunk.ID
-		state.Model = oaiChunk.Model
+		state.Model = mapModel(oaiChunk.Model)
 		state.messageStarted = true
 		msg := struct {
 			Type    string `json:"type"`
@@ -279,15 +284,15 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		if choice.Delta.Role == "assistant" && !state.inContentBlock {
 			// Start of assistant response -> content_block_start
 			msg := struct {
-				Type    string `json:"type"`
-				Content struct {
+				Type         string `json:"type"`
+				ContentBlock struct {
 					Type string `json:"type"`
 					Text string `json:"text"`
-				} `json:"content"`
+				} `json:"content_block"`
 				Index int `json:"index"`
 			}{Type: "content_block_start", Index: choice.Index}
-			msg.Content.Type = "text"
-			msg.Content.Text = choice.Delta.Content
+			msg.ContentBlock.Type = "text"
+			msg.ContentBlock.Text = choice.Delta.Content
 			writeAnthropicSSE(&out, "content_block_start", msg)
 			state.inContentBlock = true
 		} else if choice.Delta.Content != "" {
@@ -309,6 +314,7 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			if stopReason == "stop" {
 				stopReason = "end_turn"
 			}
+			writeAnthropicSSE(&out, "content_block_stop", struct{ Type string `json:"type"` }{Type: "content_block_stop"})
 			msgDelta := struct {
 				Type  string `json:"type"`
 				Delta struct {
