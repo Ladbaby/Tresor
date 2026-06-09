@@ -549,6 +549,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	// Transform mode: accumulate SSE events, transform, then write
 	var eventLine string
 	var dataLines []string
+	var doneSent bool // tracks whether downstream sent [DONE] marker
 
 	flushEvent := func() {
 		if len(dataLines) == 0 {
@@ -564,6 +565,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		// Combine data lines to get the raw SSE payload
 		rawData := strings.Join(dataLines, "\n")
 		chunk := SSEChunk{EventType: eventLine, Data: []byte(rawData)}
+
+		// Track whether the downstream sent [DONE] so we know if synthetic
+		// termination is needed when the stream ends.
+		if eventLine == "" && strings.TrimSpace(rawData) == "[DONE]" {
+			doneSent = true
+		}
 
 		// Run through stream transformers
 		var err error
@@ -631,6 +638,24 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 	// Flush any remaining event (handles responses that don't end with \n\n)
 	flushEvent()
+
+	// If the downstream closed the stream without a [DONE] marker, send a
+	// synthetic one through the pipeline so stream transformers can emit their
+	// termination sequence (e.g. message_stop for Anthropic format). Without
+	// this, the client would hang waiting for the stream to end, eventually
+	// timeout, and retry — producing duplicate requests.
+	if !doneSent {
+		select {
+		case <-clientCtx.Done():
+		default:
+			syntheticChunk := SSEChunk{Data: []byte("[DONE]")}
+			transformed, err := ExecuteStreamResponsePipeline(syntheticChunk, ctx, pipeline.StreamResponseSteps)
+			if err == nil && len(transformed.Data) > 0 {
+				w.Write(transformed.Data)
+				flusher.Flush()
+			}
+		}
+	}
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("Stream ended: %v", err)
