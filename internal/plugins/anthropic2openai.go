@@ -96,6 +96,7 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 	var out bytes.Buffer
 	inContentBlock := false
 	messageStarted := false
+	pendingContentBlock := false
 
 	parseOpenAISSE(body, func(data []byte) bool {
 		var chunk openAIChunk
@@ -123,38 +124,63 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 		}
 
 		for _, choice := range chunk.Choices {
-			if choice.Delta.Role == "assistant" && !inContentBlock {
-				// Start of assistant response
-				msg := struct {
-					Type         string `json:"type"`
-					ContentBlock struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"content_block"`
-					Index int `json:"index"`
-				}{
-					Type:  "content_block_start",
-					Index: choice.Index,
+			if choice.Delta.Role == "assistant" && !inContentBlock && !pendingContentBlock {
+				if choice.Delta.Content != "" {
+					// Has content right away — emit content_block_start immediately
+					msg := struct {
+						Type         string `json:"type"`
+						ContentBlock struct {
+							Type string `json:"type"`
+							Text string `json:"text"`
+						} `json:"content_block"`
+						Index int `json:"index"`
+					}{
+						Type:  "content_block_start",
+						Index: choice.Index,
+					}
+					msg.ContentBlock.Type = "text"
+					msg.ContentBlock.Text = choice.Delta.Content
+					writeAnthropicSSE(&out, "content_block_start", msg)
+					inContentBlock = true
+				} else {
+					// Empty content — defer until first real content arrives
+					pendingContentBlock = true
 				}
-				msg.ContentBlock.Type = "text"
-				msg.ContentBlock.Text = choice.Delta.Content
-				writeAnthropicSSE(&out, "content_block_start", msg)
-				inContentBlock = true
 			} else if choice.Delta.Content != "" {
-				delta := struct {
-					Type  string `json:"type"`
-					Index int    `json:"index"`
-					Delta struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"delta"`
-				}{
-					Type:  "content_block_delta",
-					Index: choice.Index,
+				if pendingContentBlock {
+					// First non-empty content — emit content_block_start (not delta)
+					msg := struct {
+						Type         string `json:"type"`
+						ContentBlock struct {
+							Type string `json:"type"`
+							Text string `json:"text"`
+						} `json:"content_block"`
+						Index int `json:"index"`
+					}{
+						Type:  "content_block_start",
+						Index: choice.Index,
+					}
+					msg.ContentBlock.Type = "text"
+					msg.ContentBlock.Text = choice.Delta.Content
+					writeAnthropicSSE(&out, "content_block_start", msg)
+					inContentBlock = true
+					pendingContentBlock = false
+				} else {
+					delta := struct {
+						Type  string `json:"type"`
+						Index int    `json:"index"`
+						Delta struct {
+							Type string `json:"type"`
+							Text string `json:"text"`
+						} `json:"delta"`
+					}{
+						Type:  "content_block_delta",
+						Index: choice.Index,
+					}
+					delta.Delta.Type = "text_delta"
+					delta.Delta.Text = choice.Delta.Content
+					writeAnthropicSSE(&out, "content_block_delta", delta)
 				}
-				delta.Delta.Type = "text_delta"
-				delta.Delta.Text = choice.Delta.Content
-				writeAnthropicSSE(&out, "content_block_delta", delta)
 			}
 
 			if choice.FinishReason != nil {
@@ -162,7 +188,28 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 				if stopReason == "stop" {
 					stopReason = "end_turn"
 				}
-				writeAnthropicSSE(&out, "content_block_stop", struct{ Type string `json:"type"` }{Type: "content_block_stop"})
+				if pendingContentBlock {
+					// Finish reason before any content — flush empty block
+					msg := struct {
+						Type         string `json:"type"`
+						ContentBlock struct {
+							Type string `json:"type"`
+							Text string `json:"text"`
+						} `json:"content_block"`
+						Index int `json:"index"`
+					}{
+						Type:  "content_block_start",
+						Index: choice.Index,
+					}
+					msg.ContentBlock.Type = "text"
+					writeAnthropicSSE(&out, "content_block_start", msg)
+					inContentBlock = true
+					pendingContentBlock = false
+				}
+				writeAnthropicSSE(&out, "content_block_stop", struct {
+					Type  string `json:"type"`
+					Index int    `json:"index"`
+				}{Type: "content_block_stop", Index: choice.Index})
 				msgDelta := struct {
 					Type  string `json:"type"`
 					Delta struct {
@@ -281,32 +328,54 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	}
 
 	for _, choice := range oaiChunk.Choices {
-		if choice.Delta.Role == "assistant" && !state.inContentBlock {
-			// Start of assistant response -> content_block_start
-			msg := struct {
-				Type         string `json:"type"`
-				ContentBlock struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content_block"`
-				Index int `json:"index"`
-			}{Type: "content_block_start", Index: choice.Index}
-			msg.ContentBlock.Type = "text"
-			msg.ContentBlock.Text = choice.Delta.Content
-			writeAnthropicSSE(&out, "content_block_start", msg)
-			state.inContentBlock = true
+		if choice.Delta.Role == "assistant" && !state.inContentBlock && !state.pendingContentBlock {
+			if choice.Delta.Content != "" {
+				// Has content right away — emit content_block_start immediately
+				msg := struct {
+					Type         string `json:"type"`
+					ContentBlock struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content_block"`
+					Index int `json:"index"`
+				}{Type: "content_block_start", Index: choice.Index}
+				msg.ContentBlock.Type = "text"
+				msg.ContentBlock.Text = choice.Delta.Content
+				writeAnthropicSSE(&out, "content_block_start", msg)
+				state.inContentBlock = true
+			} else {
+				// Empty content — defer until first real content arrives
+				state.pendingContentBlock = true
+			}
 		} else if choice.Delta.Content != "" {
-			delta := struct {
-				Type  string `json:"type"`
-				Index int    `json:"index"`
-				Delta struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"delta"`
-			}{Type: "content_block_delta", Index: choice.Index}
-			delta.Delta.Type = "text_delta"
-			delta.Delta.Text = choice.Delta.Content
-			writeAnthropicSSE(&out, "content_block_delta", delta)
+			if state.pendingContentBlock {
+				// First non-empty content — emit content_block_start (not delta)
+				msg := struct {
+					Type         string `json:"type"`
+					ContentBlock struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content_block"`
+					Index int `json:"index"`
+				}{Type: "content_block_start", Index: choice.Index}
+				msg.ContentBlock.Type = "text"
+				msg.ContentBlock.Text = choice.Delta.Content
+				writeAnthropicSSE(&out, "content_block_start", msg)
+				state.inContentBlock = true
+				state.pendingContentBlock = false
+			} else {
+				delta := struct {
+					Type  string `json:"type"`
+					Index int    `json:"index"`
+					Delta struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"delta"`
+				}{Type: "content_block_delta", Index: choice.Index}
+				delta.Delta.Type = "text_delta"
+				delta.Delta.Text = choice.Delta.Content
+				writeAnthropicSSE(&out, "content_block_delta", delta)
+			}
 		}
 
 		if choice.FinishReason != nil {
@@ -314,7 +383,25 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			if stopReason == "stop" {
 				stopReason = "end_turn"
 			}
-			writeAnthropicSSE(&out, "content_block_stop", struct{ Type string `json:"type"` }{Type: "content_block_stop"})
+			if state.pendingContentBlock {
+				// Finish reason before any content — flush empty block first
+				msg := struct {
+					Type         string `json:"type"`
+					ContentBlock struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content_block"`
+					Index int `json:"index"`
+				}{Type: "content_block_start", Index: choice.Index}
+				msg.ContentBlock.Type = "text"
+				writeAnthropicSSE(&out, "content_block_start", msg)
+				state.inContentBlock = true
+				state.pendingContentBlock = false
+			}
+			writeAnthropicSSE(&out, "content_block_stop", struct {
+					Type  string `json:"type"`
+					Index int    `json:"index"`
+				}{Type: "content_block_stop", Index: choice.Index})
 			msgDelta := struct {
 				Type  string `json:"type"`
 				Delta struct {
@@ -333,11 +420,12 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 // anthropic2openaiStreamState tracks state across SSE chunks for a single stream.
 type anthropic2openaiStreamState struct {
-	ID               string
-	Model            string
-	messageStarted   bool
-	inContentBlock   bool
-	messageDeltaSent bool
+	ID                  string
+	Model               string
+	messageStarted      bool
+	inContentBlock      bool
+	messageDeltaSent    bool
+	pendingContentBlock bool // role="assistant" seen but content was empty
 }
 
 // Ensure interface compliance.
