@@ -682,6 +682,285 @@ func TestAnthropic2OpenAI_TransformRequest_ToolUseContentBlocks(t *testing.T) {
 	}
 }
 
+func TestAnthropic2OpenAI_TransformRequest_ToolResultWithImage(t *testing.T) {
+	p := &Anthropic2OpenAI{}
+
+	// Anthropic request with tool_result containing an image in inner content
+	body, _ := json.Marshal(map[string]interface{}{
+		"model":      "claude-sonnet-4-20250514",
+		"max_tokens": 200,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Show me a chart"},
+			map[string]interface{}{
+				"role": "assistant",
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "Here is your chart:"},
+					map[string]interface{}{"type": "tool_use", "id": "tu_1", "name": "render_chart", "input": map[string]interface{}{"data": []interface{}{1, 2, 3}}},
+				},
+			},
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "tu_1",
+						"content": []interface{}{
+							map[string]interface{}{"type": "text", "text": "Chart rendered successfully"},
+							map[string]interface{}{
+								"type": "image",
+								"source": map[string]interface{}{
+									"type":       "base64",
+									"media_type": "image/png",
+									"data":       "Y2hhcnQtZGF0YQ==",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var openAIReq map[string]interface{}
+	json.Unmarshal(newBody, &openAIReq)
+
+	messages := openAIReq["messages"].([]interface{})
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(messages))
+	}
+
+	// Third message should be the tool role with multi-modal content array
+	toolMsg := messages[2].(map[string]interface{})
+	if toolMsg["role"] != "tool" {
+		t.Fatalf("expected tool role, got %v", toolMsg["role"])
+	}
+	if toolMsg["tool_call_id"] != "tu_1" {
+		t.Fatalf("expected tool_call_id tu_1, got %v", toolMsg["tool_call_id"])
+	}
+
+	// Content should be an array (multi-modal), not a plain string
+	contentArr, ok := toolMsg["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected content to be an array for multi-modal tool message, got type %T", toolMsg["content"])
+	}
+	if len(contentArr) != 2 {
+		t.Fatalf("expected 2 content parts (text + image), got %d", len(contentArr))
+	}
+
+	// First part: text
+	textPart := contentArr[0].(map[string]interface{})
+	if textPart["type"] != "text" {
+		t.Fatalf("expected first part type text, got %v", textPart["type"])
+	}
+	if textPart["text"] != "Chart rendered successfully" {
+		t.Fatalf("expected text 'Chart rendered successfully', got %v", textPart["text"])
+	}
+
+	// Second part: image_url
+	imgPart := contentArr[1].(map[string]interface{})
+	if imgPart["type"] != "image_url" {
+		t.Fatalf("expected second part type image_url, got %v", imgPart["type"])
+	}
+	imgURL := imgPart["image_url"].(map[string]interface{})
+	url := imgURL["url"].(string)
+	if url != "data:image/png;base64,Y2hhcnQtZGF0YQ==" {
+		t.Fatalf("expected url 'data:image/png;base64,Y2hhcnQtZGF0YQ==', got %v", url)
+	}
+}
+
+func TestAnthropic2OpenAI_TransformRequest_UserMessageWithImage(t *testing.T) {
+	p := &Anthropic2OpenAI{}
+
+	// Anthropic request with user message containing text + image content blocks
+	body, _ := json.Marshal(map[string]interface{}{
+		"model":      "claude-sonnet-4-20250514",
+		"max_tokens": 200,
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "What is in this image?"},
+					map[string]interface{}{
+						"type": "image",
+						"source": map[string]interface{}{
+							"type":       "base64",
+							"media_type": "image/jpeg",
+							"data":       "aW1hZ2UtZGF0YQ==",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var openAIReq map[string]interface{}
+	json.Unmarshal(newBody, &openAIReq)
+
+	messages := openAIReq["messages"].([]interface{})
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+
+	userMsg := messages[0].(map[string]interface{})
+	if userMsg["role"] != "user" {
+		t.Fatalf("expected user role, got %v", userMsg["role"])
+	}
+
+	// Content should be an array (multi-modal), not a plain string
+	contentArr, ok := userMsg["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected content to be an array for multi-modal message, got type %T val %v", userMsg["content"], userMsg["content"])
+	}
+	if len(contentArr) != 2 {
+		t.Fatalf("expected 2 content parts (text + image), got %d", len(contentArr))
+	}
+
+	// First part: text
+	textPart := contentArr[0].(map[string]interface{})
+	if textPart["type"] != "text" {
+		t.Fatalf("expected first part type text, got %v", textPart["type"])
+	}
+	if textPart["text"] != "What is in this image?" {
+		t.Fatalf("expected text 'What is in this image?', got %v", textPart["text"])
+	}
+
+	// Second part: image_url
+	imgPart := contentArr[1].(map[string]interface{})
+	if imgPart["type"] != "image_url" {
+		t.Fatalf("expected second part type image_url, got %v", imgPart["type"])
+	}
+	imgURL := imgPart["image_url"].(map[string]interface{})
+	url := imgURL["url"].(string)
+	if url != "data:image/jpeg;base64,aW1hZ2UtZGF0YQ==" {
+		t.Fatalf("expected url 'data:image/jpeg;base64,aW1hZ2UtZGF0YQ==', got %v", url)
+	}
+}
+
+func TestAnthropic2OpenAI_TransformRequest_ImageUrlSource(t *testing.T) {
+	p := &Anthropic2OpenAI{}
+
+	// Anthropic request with URL-sourced image
+	body, _ := json.Marshal(map[string]interface{}{
+		"model":      "claude-sonnet-4-20250514",
+		"max_tokens": 200,
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "What is this?"},
+					map[string]interface{}{
+						"type": "image",
+						"source": map[string]interface{}{
+							"type": "url",
+							"url":  "https://example.com/photo.png",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var openAIReq map[string]interface{}
+	json.Unmarshal(newBody, &openAIReq)
+
+	messages := openAIReq["messages"].([]interface{})
+	userMsg := messages[0].(map[string]interface{})
+	contentArr := userMsg["content"].([]interface{})
+	imgPart := contentArr[1].(map[string]interface{})
+	imgURL := imgPart["image_url"].(map[string]interface{})
+	if imgURL["url"] != "https://example.com/photo.png" {
+		t.Fatalf("expected url 'https://example.com/photo.png', got %v", imgURL["url"])
+	}
+}
+
+func TestAnthropic2OpenAI_TransformRequest_AssistantWithImage(t *testing.T) {
+	p := &Anthropic2OpenAI{}
+
+	// Assistant message with both tool_use and image content blocks
+	body, _ := json.Marshal(map[string]interface{}{
+		"model":      "claude-sonnet-4-20250514",
+		"max_tokens": 200,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Draw a chart"},
+			map[string]interface{}{
+				"role": "assistant",
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "Here you go:"},
+					map[string]interface{}{"type": "tool_use", "id": "tu_1", "name": "draw_chart", "input": map[string]interface{}{"width": 400}},
+					map[string]interface{}{
+						"type": "image",
+						"source": map[string]interface{}{
+							"type":       "base64",
+							"media_type": "image/png",
+							"data":       "Y2hhcnQ=",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var openAIReq map[string]interface{}
+	json.Unmarshal(newBody, &openAIReq)
+
+	messages := openAIReq["messages"].([]interface{})
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	// Assistant message should have content as array (text + image), not plain string
+	assistantMsg := messages[1].(map[string]interface{})
+	contentArr, ok := assistantMsg["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected content to be array for assistant with images, got type %T", assistantMsg["content"])
+	}
+
+	// Should have text part and image part
+	if len(contentArr) != 2 {
+		t.Fatalf("expected 2 content parts (text + image), got %d", len(contentArr))
+	}
+	textPart := contentArr[0].(map[string]interface{})
+	if textPart["type"] != "text" || textPart["text"] != "Here you go:" {
+		t.Fatalf("unexpected text part: %v", textPart)
+	}
+	imgPart := contentArr[1].(map[string]interface{})
+	if imgPart["type"] != "image_url" {
+		t.Fatalf("expected image_url, got %v", imgPart["type"])
+	}
+}
+
 func TestAnthropic2OpenAI_TransformRequest_ThinkingBlock(t *testing.T) {
 	p := &Anthropic2OpenAI{}
 
