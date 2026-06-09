@@ -27,15 +27,10 @@ type openAIChatRequest struct {
 	System      string              `json:"system,omitempty"`
 }
 
-type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
 type anthropicRequest struct {
 	Model       string             `json:"model"`
 	MaxTokens   int                `json:"max_tokens"`
-	Messages    []anthropicMessage `json:"messages"`
+	Messages    []AnthropicMessage `json:"messages"`
 	System      string             `json:"system,omitempty"`
 	Temperature float64            `json:"temperature,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
@@ -64,15 +59,17 @@ func (t *OpenAI2Anthropic) TransformRequest(req *http.Request, body []byte, ctx 
 			anthropicReq.System = msg.Content
 			continue
 		}
-		anthropicReq.Messages = append(anthropicReq.Messages, anthropicMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
+		anthropicReq.Messages = append(anthropicReq.Messages, AnthropicMessage{
+			Role: msg.Role,
+			Content: flexibleContent{
+				Text: msg.Content,
+			},
 		})
 	}
 
 	// Ensure at least one message
 	if len(anthropicReq.Messages) == 0 {
-		anthropicReq.Messages = []anthropicMessage{{Role: "user", Content: "Hello"}}
+		anthropicReq.Messages = []AnthropicMessage{{Role: "user", Content: flexibleContent{Text: "Hello"}}}
 	}
 	if anthropicReq.MaxTokens <= 0 {
 		anthropicReq.MaxTokens = 1024

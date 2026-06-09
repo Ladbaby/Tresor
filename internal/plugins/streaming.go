@@ -7,6 +7,63 @@ import (
 	"strings"
 )
 
+// anthropicContentBlock represents a single content block in an Anthropic message.
+// Modern Anthropic API uses content blocks (arrays) instead of plain strings.
+type anthropicContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+// flexibleContent represents message content that can be either a plain string
+// or an array of content blocks. UnmarshalJSON handles both formats.
+type flexibleContent struct {
+	// Text holds the extracted plain-text representation.
+	// For string content: the string itself.
+	// For array content: concatenated text from all "text" type blocks.
+	Text string
+}
+
+func (c *flexibleContent) UnmarshalJSON(data []byte) error {
+	// Try string first
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		c.Text = s
+		return nil
+	}
+
+	// Try array of content blocks
+	var blocks []anthropicContentBlock
+	if err := json.Unmarshal(data, &blocks); err != nil {
+		return fmt.Errorf("flexibleContent: invalid format: %w", err)
+	}
+
+	// Concatenate all text blocks
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	c.Text = strings.Join(parts, "\n")
+	return nil
+}
+
+func (c *flexibleContent) MarshalJSON() ([]byte, error) {
+	// Marshal as content block for Anthropic compatibility:
+	// {"type": "text", "text": "Hello"}
+	return json.Marshal(map[string]interface{}{
+		"type": "text",
+		"text": c.Text,
+	})
+}
+
+// AnthropicMessage represents a message in Anthropic Messages API format.
+// Content can be either a plain string or an array of content blocks.
+type AnthropicMessage struct {
+	Role    string            `json:"role"`
+	Content flexibleContent   `json:"content"`
+}
+
 // openAIChunk represents an OpenAI chat completion streaming chunk.
 type openAIChunk struct {
 	ID      string             `json:"id"`

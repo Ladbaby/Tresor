@@ -143,6 +143,102 @@ func TestAnthropic2OpenAI_TransformRequest(t *testing.T) {
 	}
 }
 
+func TestAnthropic2OpenAI_TransformRequest_ContentBlocks(t *testing.T) {
+	p := &Anthropic2OpenAI{}
+
+	// Modern Anthropic format: content as array of content blocks
+	anthropicReq := map[string]interface{}{
+		"model":    "claude-sonnet-4-20250514",
+		"max_tokens": 200,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "Hello"},
+			}},
+			map[string]interface{}{"role": "assistant", "content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "Hi there"},
+			}},
+			map[string]interface{}{"role": "user", "content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "How are you?"},
+			}},
+		},
+	}
+	body, _ := json.Marshal(anthropicReq)
+
+	req, _ := http.NewRequest("POST", "http://example.com/v1/messages", bytes.NewReader(body))
+
+	ctx := &engine.PipelineContext{
+		TargetDownstream: &engine.Downstream{
+			APIKey: "sk-openai-test",
+		},
+	}
+
+	newReq, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform with content blocks: %v", err)
+	}
+
+	// Verify path changed
+	if !strings.Contains(newReq.URL.Path, "/v1/chat/completions") {
+		t.Fatalf("expected /v1/chat/completions, got %s", newReq.URL.Path)
+	}
+
+	// Verify transformed body
+	var openAIReq map[string]interface{}
+	if err := json.Unmarshal(newBody, &openAIReq); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	messages := openAIReq["messages"].([]interface{})
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(messages))
+	}
+
+	// Verify content was extracted from content blocks
+	userMsg := messages[0].(map[string]interface{})
+	if userMsg["content"] != "Hello" {
+		t.Fatalf("expected 'Hello', got %v", userMsg["content"])
+	}
+
+	assistantMsg := messages[1].(map[string]interface{})
+	if assistantMsg["content"] != "Hi there" {
+		t.Fatalf("expected 'Hi there', got %v", assistantMsg["content"])
+	}
+}
+
+func TestAnthropic2OpenAI_TransformRequest_MixedContent(t *testing.T) {
+	p := &Anthropic2OpenAI{}
+
+	// Mixed: first message uses string content, second uses content blocks
+	anthropicReq := map[string]interface{}{
+		"model":    "claude-sonnet-4-20250514",
+		"max_tokens": 200,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Hello"},
+			map[string]interface{}{"role": "assistant", "content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "Hi there"},
+			}},
+		},
+	}
+	body, _ := json.Marshal(anthropicReq)
+
+	req, _ := http.NewRequest("POST", "http://example.com/v1/messages", bytes.NewReader(body))
+
+	ctx := &engine.PipelineContext{
+		TargetDownstream: &engine.Downstream{
+			APIKey: "sk-openai-test",
+		},
+	}
+
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform with mixed content: %v", err)
+	}
+
+	if !strings.Contains(newReq.URL.Path, "/v1/chat/completions") {
+		t.Fatalf("expected /v1/chat/completions, got %s", newReq.URL.Path)
+	}
+}
+
 func TestRegistry_ListPlugins(t *testing.T) {
 	r := NewRegistry()
 	plugins := r.ListPlugins()
