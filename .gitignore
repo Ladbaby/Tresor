@@ -1,3 +1,4 @@
+.agents/*
 config.yaml
 notes.md
 *.db
