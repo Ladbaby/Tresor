@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"tresor/internal/config"
 
@@ -17,6 +19,11 @@ type Store struct {
 
 // Open opens (or creates) the SQLite database and runs migrations.
 func Open(dbPath string) (*Store, error) {
+	// Ensure parent directory exists so SQLite can create the file
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return nil, fmt.Errorf("create db dir: %w", err)
+	}
+
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
