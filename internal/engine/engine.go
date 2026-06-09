@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -486,10 +487,17 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy response headers
+	// Copy response headers, but strip framing headers that are now stale
+	// after response transformation. The transformed body is always different
+	// from the upstream body, so Content-Length and Transfer-Encoding from the
+	// upstream response are invalid.
 	for k, v := range resp.Header {
+		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") {
+			continue
+		}
 		cw.Header()[k] = v
 	}
+	cw.Header().Set("Content-Length", strconv.Itoa(len(transformedBody)))
 	entry.Status = resp.StatusCode
 	entry.Duration = DurationMs(time.Since(start))
 	e.logger.Record(entry)
@@ -687,7 +695,7 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse target URL: %w", err)
+		return nil, func() {}, fmt.Errorf("parse target URL: %w", err)
 	}
 
 	// Build forwarded request. Use a detached context so the downstream connection
@@ -696,7 +704,7 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	forwardedReq, err := http.NewRequestWithContext(forwardCtx, original.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		forwardCancel()
-		return nil, nil, fmt.Errorf("create forwarded request: %w", err)
+		return nil, func() {}, fmt.Errorf("create forwarded request: %w", err)
 	}
 
 	// Copy headers, overriding Host and Authorization
@@ -731,7 +739,7 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	resp, err := e.client.Do(forwardedReq)
 	if err != nil {
 		forwardCancel()
-		return nil, nil, err
+		return nil, func() {}, err
 	}
 	return resp, forwardCancel, nil
 }
