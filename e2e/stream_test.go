@@ -1,0 +1,447 @@
+//go:build integration
+
+package e2e
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+const tresorPort = 9199
+
+// TestAnthropicToOpenAIStreaming verifies that auto-translation from
+// Anthropic Messages format to OpenAI Chat Completion format works
+// correctly for streaming (SSE) responses.
+//
+// Scenario: Client sends Anthropic-format streaming request to Tresor.
+// Tresor auto-translates to OpenAI format, forwards to downstream, receives
+// OpenAI SSE response, and transforms it back to Anthropic SSE format for
+// the client.
+func TestAnthropicToOpenAIStreaming(t *testing.T) {
+	// --- Step 1: Start a mock OpenAI server ---
+	mockPort := 9280
+	mockServer := startMockOpenAIServer(t, mockPort)
+	defer mockServer.Close()
+
+	// --- Step 2: Configure Tresor with the mock downstream ---
+	tmpDir, err := os.MkdirTemp("", "tresor-e2e-stream-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+
+	// Downstream is OpenAI-format, no alias configured.
+	// Auto-translation should kick in: Anthropic input → OpenAI downstream.
+	cfgContent := fmt.Sprintf(`
+bind_addr: 127.0.0.1:%d
+db_path: %s
+
+downstreams:
+  - id: mock-openai
+    name: Mock OpenAI
+    api_formats: [openai]
+    base_url: http://127.0.0.1:%d/v1
+    api_key: sk-mock-key
+    output_model_ids:
+      - gpt-4o
+      - gpt-4o-mini
+`, tresorPort, dbPath, mockPort)
+
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// --- Step 3: Start Tresor daemon ---
+	binary, err := filepath.Abs("../tresor.exe")
+	if err != nil {
+		t.Fatalf("Failed to resolve binary path: %v", err)
+	}
+
+	cmd := exec.Command(binary, "run", "--config", cfgPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start daemon: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	// Wait for Tresor to start
+	time.Sleep(2 * time.Second)
+
+	// Health check
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/health", tresorPort))
+	if err != nil || resp.StatusCode != 200 {
+		cmd.Process.Kill()
+		t.Fatalf("Tresor not ready: err=%v, status=%d", err, safeStatus(resp))
+	}
+	resp.Body.Close()
+
+	// --- Step 4: Send Anthropic-format streaming request ---
+	// The request uses Anthropic Messages format (/v1/messages path)
+	// with stream: true. Auto-translation should convert it to OpenAI format.
+	anthropicReq := map[string]interface{}{
+		"model":      "gpt-4o",
+		"max_tokens": 100,
+		"stream":     true,
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Say hello briefly"},
+		},
+	}
+	body, _ := json.Marshal(anthropicReq)
+
+	req, _ := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/v1/messages", tresorPort),
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	t.Logf("Response status: %d, content-type: %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected 200, got %d: %s", resp.StatusCode, bodyBytes)
+	}
+
+	// --- Step 5: Parse the SSE stream and verify Anthropic format ---
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.EqualFold(contentType, "text/event-stream") {
+		t.Fatalf("Expected text/event-stream, got %s", contentType)
+	}
+
+	// Parse SSE events from the response
+	var events []sseEvent
+	scanner := bufio.NewScanner(resp.Body)
+	var event string
+	var data strings.Builder
+
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if line == "" {
+			// End of SSE event
+			if data.Len() > 0 {
+				events = append(events, sseEvent{Type: event, Data: data.String()})
+				data.Reset()
+			}
+			event = ""
+			continue
+		}
+		if strings.HasPrefix(line, "event: ") {
+			event = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			data.WriteString(strings.TrimPrefix(line, "data: "))
+		}
+	}
+	// Flush last event
+	if data.Len() > 0 {
+		events = append(events, sseEvent{Type: event, Data: data.String()})
+	}
+
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("Scanner error: %v", err)
+	}
+
+	t.Logf("Received %d SSE events", len(events))
+	for i, e := range events {
+		t.Logf("  Event %d: type=%q, data=%s", i, e.Type, e.Data)
+	}
+
+	// Verify the event sequence matches Anthropic SSE protocol
+	if len(events) == 0 {
+		t.Fatal("Expected at least 1 SSE event, got 0")
+	}
+
+	// Collect typed events (skip passthrough lines with no event type)
+	var typed []sseEvent
+	for _, e := range events {
+		if e.Type != "" {
+			typed = append(typed, e)
+		}
+	}
+
+	if len(typed) == 0 {
+		t.Fatal("Expected at least 1 typed SSE event, got 0")
+	}
+
+	// Verify required event types are present
+	msgStart := findEvent(typed, "message_start")
+	if msgStart == nil {
+		t.Fatal("message_start event not found")
+	}
+
+	contentStart := findEvent(typed, "content_block_start")
+	if contentStart == nil {
+		t.Fatal("content_block_start event not found")
+	}
+
+	deltas := findEvents(typed, "content_block_delta")
+	if len(deltas) == 0 {
+		t.Fatal("content_block_delta events not found (expected at least 1)")
+	}
+
+	msgDelta := findEvent(typed, "message_delta")
+	if msgDelta == nil {
+		t.Fatal("message_delta event not found")
+	}
+
+	msgStop := findEvent(typed, "message_stop")
+	if msgStop == nil {
+		t.Fatal("message_stop event not found")
+	}
+
+	// Verify ordering by finding indices in typed slice
+	idxOf := func(eventType string) int {
+		for i, e := range typed {
+			if e.Type == eventType {
+				return i
+			}
+		}
+		return -1
+	}
+	iMsgStart := idxOf("message_start")
+	iContentStart := idxOf("content_block_start")
+	iFirstDelta := idxOf("content_block_delta")
+	iMsgDelta := idxOf("message_delta")
+	iMsgStop := idxOf("message_stop")
+	if iMsgStart >= iContentStart {
+		t.Error("message_start should come before content_block_start")
+	}
+	if iContentStart >= iFirstDelta {
+		t.Error("content_block_start should come before first content_block_delta")
+	}
+	if iFirstDelta >= iMsgDelta {
+		t.Error("first content_block_delta should come before message_delta")
+	}
+	if iMsgDelta >= iMsgStop {
+		t.Error("message_delta should come before message_stop")
+	}
+
+	// Verify message_start contains valid message structure
+	var msgStartData struct {
+		Type    string `json:"type"`
+		Message struct {
+			ID    string `json:"id"`
+			Model string `json:"model"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(msgStart.Data), &msgStartData); err != nil {
+		t.Errorf("Failed to parse message_start data: %v", err)
+	} else {
+		if msgStartData.Type != "message_start" {
+			t.Errorf("message_start type mismatch: got %q", msgStartData.Type)
+		}
+		if msgStartData.Message.ID == "" {
+			t.Error("message_start missing message ID")
+		}
+		t.Logf("message_start: id=%s, model=%s", msgStartData.Message.ID, msgStartData.Message.Model)
+	}
+
+	// Verify content_block_delta contains text
+	var totalText strings.Builder
+	for _, d := range deltas {
+		var deltaData struct {
+			Type  string `json:"type"`
+			Index int    `json:"index"`
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(d.Data), &deltaData); err != nil {
+			t.Errorf("Failed to parse content_block_delta: %v", err)
+		} else if deltaData.Delta.Type == "text_delta" {
+			totalText.WriteString(deltaData.Delta.Text)
+		}
+	}
+	text := totalText.String()
+	if text == "" {
+		t.Error("content_block_delta events contained no text")
+	} else {
+		t.Logf("Total streamed text: %q", text)
+	}
+
+	// Verify message_delta stop_reason
+	var msgDeltaData struct {
+		Type  string `json:"type"`
+		Delta struct {
+			StopReason   string `json:"stop_reason"`
+			StopSequence string `json:"stop_sequence"`
+		} `json:"delta"`
+	}
+	if err := json.Unmarshal([]byte(msgDelta.Data), &msgDeltaData); err != nil {
+		t.Errorf("Failed to parse message_delta data: %v", err)
+	} else {
+		if msgDeltaData.Delta.StopReason == "" {
+			t.Error("message_delta missing stop_reason")
+		} else {
+			t.Logf("message_delta: stop_reason=%s", msgDeltaData.Delta.StopReason)
+		}
+	}
+
+	t.Log("=== Anthropic→OpenAI streaming auto-translation verified ===")
+}
+
+type sseEvent struct {
+	Type string
+	Data string
+}
+
+func findEvent(events []sseEvent, eventType string) *sseEvent {
+	for i, e := range events {
+		if e.Type == eventType {
+			return &events[i]
+		}
+	}
+	return nil
+}
+
+func findEvents(events []sseEvent, eventType string) []sseEvent {
+	var result []sseEvent
+	for _, e := range events {
+		if e.Type == eventType {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+func safeStatus(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
+}
+
+// startMockOpenAIServer creates a mock OpenAI chat completions server
+// that responds with streaming SSE.
+func startMockOpenAIServer(t *testing.T, port int) *http.Server {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		// Read and verify the request is in OpenAI format
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+
+		t.Logf("Mock OpenAI received: model=%s, stream=%v, messages=%d", req.Model, req.Stream, len(req.Messages))
+
+		// Verify the request was auto-translated to OpenAI format
+		if req.Model == "" {
+			t.Error("Mock OpenAI: model was empty in forwarded request")
+		}
+
+		// Respond with streaming SSE (OpenAI format)
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		// Emit initial chunk with role
+		chunk1 := map[string]interface{}{
+			"id":      "chatcmpl-test001",
+			"object":  "chat.completion.chunk",
+			"model":   req.Model,
+			"choices": []map[string]interface{}{
+				{"index": 0, "delta": map[string]string{"role": "assistant", "content": ""}},
+			},
+		}
+		writeMockSSE(w, chunk1)
+		flusher.Flush()
+
+		// Emit content chunks
+		words := []string{"Hello", " ", "world", "!", " ", "How", " ", "can", " ", "I", " ", "help", " ", "you", "?"}
+		for _, word := range words {
+			chunk := map[string]interface{}{
+				"id":      "chatcmpl-test001",
+				"object":  "chat.completion.chunk",
+				"model":   req.Model,
+				"choices": []map[string]interface{}{
+					{"index": 0, "delta": map[string]string{"content": word}},
+				},
+			}
+			writeMockSSE(w, chunk)
+			flusher.Flush()
+		}
+
+		// Emit finish chunk
+		finishReason := "stop"
+		chunkLast := map[string]interface{}{
+			"id":      "chatcmpl-test001",
+			"object":  "chat.completion.chunk",
+			"model":   req.Model,
+			"choices": []map[string]interface{}{
+				{"index": 0, "delta": map[string]string{}, "finish_reason": finishReason},
+			},
+		}
+		writeMockSSE(w, chunkLast)
+		flusher.Flush()
+
+		// Emit [DONE] marker
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+
+		t.Log("Mock OpenAI: stream completed")
+	})
+
+	// Also handle /v1/models endpoint
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data":   []map[string]interface{}{{"id": "gpt-4o", "object": "model"}},
+		})
+	})
+
+	server := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", port), Handler: mux}
+	go server.ListenAndServe()
+
+	// Wait for server to be ready
+	timeout := time.After(5 * time.Second)
+	for {
+		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			conn.Close()
+			t.Logf("Mock OpenAI server listening on :%d", port)
+			return server
+		}
+		select {
+		case <-timeout:
+			t.Fatal("Mock OpenAI server failed to start")
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+func writeMockSSE(w http.ResponseWriter, v interface{}) {
+	data, _ := json.Marshal(v)
+	fmt.Fprintf(w, "data: %s\n\n", string(data))
+}
