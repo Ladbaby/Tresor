@@ -148,7 +148,8 @@ type openAIChatResponse struct {
 func (t *OpenAI2Anthropic) transformJSONResponse(body []byte) ([]byte, error) {
 	var anthropicResp anthropicResponse
 	if err := json.Unmarshal(body, &anthropicResp); err != nil {
-		return nil, fmt.Errorf("openai2anthropic: failed to parse response: %w", err)
+		// Not valid JSON (e.g. downstream error page) — pass through unchanged
+		return body, nil
 	}
 
 	// Build OpenAI response
@@ -307,7 +308,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(chunk.Data, &msg); err != nil {
-			return chunk, fmt.Errorf("openai2anthropic stream: parse message_start: %w", err)
+			return chunk, nil
 		}
 		state.ID = msg.Message.ID
 		state.Model = msg.Message.Model
@@ -330,7 +331,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			} `json:"content_block"`
 		}
 		if err := json.Unmarshal(chunk.Data, &block); err != nil {
-			return chunk, fmt.Errorf("openai2anthropic stream: parse content_block_start: %w", err)
+			return chunk, nil
 		}
 		if block.ContentBlock.Type == "text" && block.ContentBlock.Text != "" {
 			outChunk := openAIChunk{
@@ -354,7 +355,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			} `json:"delta"`
 		}
 		if err := json.Unmarshal(chunk.Data, &delta); err != nil {
-			return chunk, fmt.Errorf("openai2anthropic stream: parse content_block_delta: %w", err)
+			return chunk, nil
 		}
 		if delta.Delta.Type == "text_delta" && delta.Delta.Text != "" {
 			outChunk := openAIChunk{
@@ -376,7 +377,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			} `json:"delta"`
 		}
 		if err := json.Unmarshal(chunk.Data, &md); err != nil {
-			return chunk, fmt.Errorf("openai2anthropic stream: parse message_delta: %w", err)
+			return chunk, nil
 		}
 		finishReason := md.Delta.StopReason
 		if finishReason == "end_turn" {

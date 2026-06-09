@@ -181,7 +181,8 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 func (t *Anthropic2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 	var openAIResp openAIChatResponse
 	if err := json.Unmarshal(body, &openAIResp); err != nil {
-		return nil, fmt.Errorf("anthropic2openai: failed to parse response: %w", err)
+		// Not valid JSON (e.g. downstream error page) — pass through unchanged
+		return body, nil
 	}
 
 	// Build Anthropic response
@@ -232,7 +233,8 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	// Parse the OpenAI chunk
 	var oaiChunk openAIChunk
 	if err := json.Unmarshal(chunk.Data, &oaiChunk); err != nil {
-		return chunk, fmt.Errorf("anthropic2openai stream: parse chunk: %w", err)
+		// Not valid JSON — pass through unchanged
+		return chunk, nil
 	}
 
 	// Check for [DONE] marker
