@@ -557,6 +557,16 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			return
 		}
 
+		// If the transformer output contains SSE event boundaries (\n\n), it is
+		// already formatted SSE — write it directly without wrapping in data:.
+		// This handles format transformers (e.g. anthropic2openai) that produce
+		// multiple SSE events from a single upstream data line.
+		if strings.Contains(string(chunk.Data), "\n\n") {
+			w.Write(chunk.Data)
+			flusher.Flush()
+			return
+		}
+
 		out := &bytes.Buffer{}
 		if chunk.EventType != "" {
 			fmt.Fprintf(out, "event: %s\n", chunk.EventType)
