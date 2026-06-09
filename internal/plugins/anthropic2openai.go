@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"tresor/internal/engine"
 )
@@ -19,7 +20,11 @@ type anthropicRequest2 struct {
 	Messages      json.RawMessage  `json:"messages"`
 	System        *flexibleContent `json:"system,omitempty"`
 	Temperature   float64          `json:"temperature,omitempty"`
+	TopP          float64          `json:"top_p,omitempty"`
+	TopK          int              `json:"top_k,omitempty"`
 	Stream        bool             `json:"stream,omitempty"`
+	Thinking      json.RawMessage  `json:"thinking,omitempty"`
+	Metadata      json.RawMessage  `json:"metadata,omitempty"`
 	Tools         json.RawMessage  `json:"tools,omitempty"`
 	ToolChoice    json.RawMessage  `json:"tool_choice,omitempty"`
 	StopSequences []string         `json:"stop_sequences,omitempty"`
@@ -43,18 +48,61 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 		return nil, nil, fmt.Errorf("anthropic2openai: failed to parse request: %w", err)
 	}
 
+	// Default max_tokens to 4096 if not specified (Anthropic requires this, but be robust)
+	maxTokens := anthropicReq.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 4096
+	}
+
 	// Build OpenAI request body as a map for maximum flexibility
 	openAIBody := map[string]interface{}{
 		"model":       mapModelReverse(anthropicReq.Model),
 		"messages":    make([]map[string]interface{}, 0),
-		"max_tokens":  anthropicReq.MaxTokens,
+		"max_tokens":  maxTokens,
 		"temperature": anthropicReq.Temperature,
 		"stream":      anthropicReq.Stream,
+	}
+
+	// Pass through top_p and top_k if set
+	if anthropicReq.TopP > 0 {
+		openAIBody["top_p"] = anthropicReq.TopP
+	}
+	if anthropicReq.TopK > 0 {
+		openAIBody["top_k"] = anthropicReq.TopK
 	}
 
 	// Convert stop_sequences → stop
 	if len(anthropicReq.StopSequences) > 0 {
 		openAIBody["stop"] = anthropicReq.StopSequences
+	}
+
+	// Convert thinking param: thinking.type == "enabled" → thinking_budget_tokens
+	if len(anthropicReq.Thinking) > 0 {
+		var thinking struct {
+			Type         string `json:"type"`
+			BudgetTokens int    `json:"budget_tokens"`
+		}
+		if err := json.Unmarshal(anthropicReq.Thinking, &thinking); err == nil {
+			if thinking.Type == "enabled" {
+				budget := thinking.BudgetTokens
+				if budget <= 0 {
+					budget = 10000
+				}
+				openAIBody["thinking_budget_tokens"] = budget
+			}
+		}
+	}
+
+	// Convert metadata.user_id → __metadata_user_id
+	if len(anthropicReq.Metadata) > 0 {
+		var metadata struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.Unmarshal(anthropicReq.Metadata, &metadata); err == nil {
+			if metadata.UserID != "" {
+				openAIBody["__metadata_user_id"] = metadata.UserID
+			}
+		}
 	}
 
 	// Convert tool definitions: Anthropic → OpenAI format
@@ -108,9 +156,10 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 	// Convert system prompt
 	var oaiMessages []map[string]interface{}
 	if anthropicReq.System != nil && anthropicReq.System.Text != "" {
+		sysContent := normalizeAnthropicBillingHeader(anthropicReq.System.Text)
 		oaiMessages = append(oaiMessages, map[string]interface{}{
 			"role":    "system",
-			"content": anthropicReq.System.Text,
+			"content": sysContent,
 		})
 	}
 
@@ -150,6 +199,7 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 			// Process content blocks
 			var textParts []string
 			var toolCalls []openAIChatToolCall
+			var reasoningContent string
 			hasToolUse := false
 			hasToolResult := false
 
@@ -161,7 +211,7 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 					}
 				case "thinking":
 					if block.Text != "" {
-						textParts = append(textParts, block.Text)
+						reasoningContent += block.Text
 					}
 				case "tool_use":
 					hasToolUse = true
@@ -209,16 +259,23 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 					"content":    text,
 					"tool_calls": toolCalls,
 				}
+				if reasoningContent != "" {
+					oaiMsg["reasoning_content"] = reasoningContent
+				}
 				oaiMessages = append(oaiMessages, oaiMsg)
 			} else if hasToolResult {
 				// Already handled above — tool_result messages are appended inline
 			} else {
 				// Regular text-only message
 				text := joinTextParts(textParts)
-				oaiMessages = append(oaiMessages, map[string]interface{}{
+				oaiMsg := map[string]interface{}{
 					"role":    msg.Role,
 					"content": text,
-				})
+				}
+				if reasoningContent != "" {
+					oaiMsg["reasoning_content"] = reasoningContent
+				}
+				oaiMessages = append(oaiMessages, oaiMsg)
 			}
 		}
 	}
@@ -264,6 +321,25 @@ func joinTextParts(parts []string) string {
 		}
 		return b.String()
 	}
+}
+
+// normalizeAnthropicBillingHeader scrubs Claude Code billing headers from system prompt text.
+// Replaces the 5 characters after "cch=" with "fffff" to prevent usage data leakage.
+func normalizeAnthropicBillingHeader(systemText string) string {
+	const prefix = "x-anthropic-billing-header:"
+	if !strings.HasPrefix(systemText, prefix) {
+		return systemText
+	}
+	afterPrefix := systemText[len(prefix):]
+	cchIdx := strings.Index(afterPrefix, "cch=")
+	if cchIdx < 0 {
+		return systemText
+	}
+	replaceIdx := len(prefix) + cchIdx + 4 // position of first char after "cch="
+	if replaceIdx+5 < len(systemText) && systemText[replaceIdx+5] == ';' {
+		return systemText[:replaceIdx] + "fffff" + systemText[replaceIdx+5:]
+	}
+	return systemText
 }
 
 // TransformResponse converts an OpenAI Chat Completion response into an Anthropic Messages response.

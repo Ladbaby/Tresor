@@ -712,10 +712,20 @@ func TestAnthropic2OpenAI_TransformRequest_ThinkingBlock(t *testing.T) {
 
 	messages := openAIReq["messages"].([]interface{})
 	msg := messages[0].(map[string]interface{})
-	// Thinking + text should be concatenated
-	content := msg["content"].(string)
-	if !strings.Contains(content, "think") || !strings.Contains(content, "answer") {
-		t.Fatalf("expected both thinking and text content, got %v", content)
+
+	// Content should only contain the text block, not thinking
+	content, _ := msg["content"].(string)
+	if content != "Here is my answer" {
+		t.Fatalf("expected content 'Here is my answer', got %v", content)
+	}
+
+	// Thinking block should be in reasoning_content field
+	reasoning, hasReasoning := msg["reasoning_content"]
+	if !hasReasoning {
+		t.Fatal("expected reasoning_content field for thinking block")
+	}
+	if reasoning != "I need to think about this" {
+		t.Fatalf("expected reasoning_content 'I need to think about this', got %v", reasoning)
 	}
 }
 
