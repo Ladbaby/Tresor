@@ -54,7 +54,7 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 		}
 		_ = r.writeConfig()
 		ds.APIKey = "***"
-		writeJSON(w, http.StatusCreated, ds)
+		writeJSONWithWarning(w, http.StatusCreated, ds, proxy.IsBareIP(ds.BaseURL))
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -159,7 +159,7 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 		}
 		_ = r.writeConfig()
 		ds.APIKey = "***"
-		writeJSON(w, http.StatusOK, ds)
+		writeJSONWithWarning(w, http.StatusOK, ds, proxy.IsBareIP(ds.BaseURL))
 
 	case http.MethodDelete:
 		if err := r.store.DeleteDownstream(id); err != nil {

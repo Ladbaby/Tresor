@@ -1010,16 +1010,18 @@ document.getElementById('downstream-form').addEventListener('submit', async (e) 
     body.output_model_ids = modelIds;
 
     try {
-        if (id) {
-            await api('/downstreams/' + id, {
+        const resp = id
+            ? await api('/downstreams/' + id, {
                 method: 'PUT',
                 body: JSON.stringify(body),
-            });
-        } else {
-            await api('/downstreams', {
+            })
+            : await api('/downstreams', {
                 method: 'POST',
                 body: JSON.stringify(body),
             });
+        // Response is a downstream object with an optional "warning" field
+        if (resp.warning) {
+            alert('Warning: ' + resp.warning);
         }
         document.getElementById('downstream-modal').classList.add('hidden');
         loadDownstreams();

@@ -242,3 +242,19 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
+
+// writeJSONWithWarning writes a downstream as JSON, appending a bare-IP warning
+// when isBareIP is true. Downstream fields are at the top level so existing
+// consumers (and tests) can decode directly into store.Downstream; the extra
+// "warning" key is simply ignored by the decoder.
+func writeJSONWithWarning(w http.ResponseWriter, status int, ds store.Downstream, isBareIP bool) {
+	type downstreamWithWarning struct {
+		store.Downstream
+		Warning string `json:"warning,omitempty"`
+	}
+	dw := downstreamWithWarning{Downstream: ds}
+	if isBareIP {
+		dw.Warning = "base_url uses a bare IP address: traffic is sent unencrypted and may be interceptible"
+	}
+	writeJSON(w, status, dw)
+}
