@@ -14,12 +14,12 @@ import (
 type Anthropic2OpenAI struct{}
 
 type anthropicRequest2 struct {
-	Model       string              `json:"model"`
-	MaxTokens   int                 `json:"max_tokens"`
-	Messages    []AnthropicMessage  `json:"messages"`
-	System      string              `json:"system,omitempty"`
-	Temperature float64             `json:"temperature,omitempty"`
-	Stream      bool                `json:"stream,omitempty"`
+	Model       string               `json:"model"`
+	MaxTokens   int                  `json:"max_tokens"`
+	Messages    []AnthropicMessage   `json:"messages"`
+	System      *flexibleContent     `json:"system,omitempty"`
+	Temperature float64              `json:"temperature,omitempty"`
+	Stream      bool                 `json:"stream,omitempty"`
 }
 
 // TransformRequest converts an Anthropic Messages request into an OpenAI Chat Completion request.
@@ -39,10 +39,10 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 	}
 
 	// If there's a system prompt, add it as a system message at the start
-	if anthropicReq.System != "" {
+	if anthropicReq.System != nil && anthropicReq.System.Text != "" {
 		openAIReq.Messages = append(openAIReq.Messages, openAIChatMessage{
 			Role:    "system",
-			Content: anthropicReq.System,
+			Content: anthropicReq.System.Text,
 		})
 	}
 

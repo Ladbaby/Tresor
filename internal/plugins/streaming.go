@@ -48,20 +48,40 @@ func (c *flexibleContent) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (c *flexibleContent) MarshalJSON() ([]byte, error) {
-	// Marshal as content block for Anthropic compatibility:
-	// {"type": "text", "text": "Hello"}
-	return json.Marshal(map[string]interface{}{
-		"type": "text",
-		"text": c.Text,
+func (c flexibleContent) MarshalJSON() ([]byte, error) {
+	// Marshal as plain string (used for system prompt field)
+	return json.Marshal(c.Text)
+}
+
+// contentBlockArray represents message content that marshals as an Anthropic
+// content block array: [{"type":"text","text":"Hello"}].
+type contentBlockArray struct {
+	Text string
+}
+
+func (c *contentBlockArray) UnmarshalJSON(data []byte) error {
+	// Reuse flexibleContent's unmarshal logic
+	var fc flexibleContent
+	if err := fc.UnmarshalJSON(data); err != nil {
+		return err
+	}
+	c.Text = fc.Text
+	return nil
+}
+
+func (c contentBlockArray) MarshalJSON() ([]byte, error) {
+	// Marshal as Anthropic content block array
+	return json.Marshal([]map[string]interface{}{
+		{"type": "text", "text": c.Text},
 	})
 }
 
 // AnthropicMessage represents a message in Anthropic Messages API format.
-// Content can be either a plain string or an array of content blocks.
+// Content can be either a plain string or an array of content blocks on input.
+// Marshals as a content block array for Anthropic compatibility.
 type AnthropicMessage struct {
-	Role    string            `json:"role"`
-	Content flexibleContent   `json:"content"`
+	Role    string             `json:"role"`
+	Content *contentBlockArray `json:"content"`
 }
 
 // openAIChunk represents an OpenAI chat completion streaming chunk.
