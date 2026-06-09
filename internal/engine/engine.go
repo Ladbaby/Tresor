@@ -3,6 +3,7 @@ package engine
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -531,7 +532,9 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			flusher.Flush()
 		}
 		if err := scanner.Err(); err != nil {
-			log.Printf("Stream scanner error: %v", err)
+			// Common causes: client disconnected, downstream closed connection.
+			// Not an error worth alarming about — just log at debug level.
+			log.Printf("Stream ended: %v", err)
 		}
 		return
 	}
@@ -611,7 +614,9 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	flushEvent()
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("Stream scanner error: %v", err)
+		// Common causes: client disconnected, downstream closed connection.
+		// Not an error worth alarming about — just log at debug level.
+		log.Printf("Stream ended: %v", err)
 	}
 }
 
@@ -642,8 +647,11 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		return nil, fmt.Errorf("parse target URL: %w", err)
 	}
 
-	// Build forwarded request
-	forwardedReq, err := http.NewRequestWithContext(original.Context(), original.Method, targetURL, bytes.NewReader(body))
+	// Build forwarded request. Use a detached context so the downstream connection
+	// isn't killed if the client disconnects (common with long-running SSE streams).
+	forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer forwardCancel()
+	forwardedReq, err := http.NewRequestWithContext(forwardCtx, original.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create forwarded request: %w", err)
 	}
