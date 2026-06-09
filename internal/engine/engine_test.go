@@ -823,3 +823,38 @@ func TestEngine_HandleProxy_AutoTranslate_Anthropic2OpenAI(t *testing.T) {
 		t.Fatalf("expected X-Auto-Translated: anthropic2openai, got %q", translatedHeader)
 	}
 }
+
+func TestEngine_HandleProxy_AutoTranslate_DoesNotDuplicateExistingTranslator(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	addDownstream(t, s, "oa-ds", "OADS", dsServer.URL, "key-1", "openai")
+	addOutputModelIDs(t, s, "oa-ds", "claude-sonnet")
+	addRule(t, s, "manual-a2o", "Manual A2O", "/v1/messages", "", "oa-ds",
+		`[{"plugin_id":"anthropic2openai"}]`, true)
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"claude-sonnet","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	if translatedHeader != "anthropic2openai" {
+		t.Fatalf("expected one Anthropic2OpenAI transform, got header %q", translatedHeader)
+	}
+}

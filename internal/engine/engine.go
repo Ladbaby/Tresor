@@ -712,7 +712,7 @@ func detectInputFormat(path string) string {
 // pluginInList checks if a transformer with the given type name is already in the request pipeline.
 func pluginInList(transformers []RequestTransformer, typeName string) bool {
 	for _, t := range transformers {
-		if reflect.TypeOf(t).Name() == typeName {
+		if transformerTypeName(t) == typeName {
 			return true
 		}
 	}
@@ -722,7 +722,7 @@ func pluginInList(transformers []RequestTransformer, typeName string) bool {
 // pluginInListResp checks if a transformer with the given type name is already in the response pipeline.
 func pluginInListResp(transformers []ResponseTransformer, typeName string) bool {
 	for _, t := range transformers {
-		if reflect.TypeOf(t).Name() == typeName {
+		if transformerTypeName(t) == typeName {
 			return true
 		}
 	}
@@ -732,11 +732,22 @@ func pluginInListResp(transformers []ResponseTransformer, typeName string) bool 
 // pluginInListStream checks if a transformer with the given type name is already in the stream pipeline.
 func pluginInListStream(transformers []StreamResponseTransformer, typeName string) bool {
 	for _, t := range transformers {
-		if reflect.TypeOf(t).Name() == typeName {
+		if transformerTypeName(t) == typeName {
 			return true
 		}
 	}
 	return false
+}
+
+func transformerTypeName(t interface{}) string {
+	typ := reflect.TypeOf(t)
+	if typ == nil {
+		return ""
+	}
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	return typ.Name()
 }
 
 // handleModels responds to GET /v1/models with an aggregated model list from
