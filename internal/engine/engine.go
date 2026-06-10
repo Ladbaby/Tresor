@@ -213,8 +213,26 @@ func isLLMPath(path string) bool {
 	return false
 }
 
+// corsHeaders writes CORS headers into the response. These are needed so that
+// browser-based LLM clients (e.g. Claude plugin webviews) can make cross-origin
+// requests to the gateway.
+func corsHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, anthropic-version")
+}
+
 // HandleProxy is the main proxy handler for LLM requests.
 func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
+	// Handle CORS preflight (OPTIONS) before any auth check.
+	// Browsers never send Authorization headers on preflight requests, so
+	// authenticating the OPTIONS request would always fail.
+	corsHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	// Reject non-LLM paths immediately (browser noise like /favicon.ico).
 	// These don't need logging — they're not gateway requests.
 	if strings.HasPrefix(r.URL.Path, "/api/") || isLLMPath(r.URL.Path) == false {
