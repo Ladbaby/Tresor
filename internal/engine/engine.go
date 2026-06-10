@@ -572,6 +572,27 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 	hasTransformers := len(pipeline.StreamResponseSteps) > 0
 
+	// clientGone is set when a write to the response fails, indicating the client
+	// has disconnected. Once set, the function stops reading from the downstream.
+	var clientGone bool
+	tryWrite := func(p []byte) bool {
+		if clientGone {
+			return false
+		}
+		if _, err := w.Write(p); err != nil {
+			clientGone = true
+			return false
+		}
+		return true
+	}
+	tryFlush := func() bool {
+		if clientGone {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
 	// Passthrough mode: no transformers — write each line immediately with flush
 	if !hasTransformers {
 		for scanner.Scan() {
@@ -581,7 +602,9 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			default:
 			}
 			line := strings.TrimRight(scanner.Text(), "\r")
-			w.Write([]byte(line + "\n"))
+			if !tryWrite([]byte(line + "\n")) {
+				return
+			}
 			flusher.Flush()
 		}
 		if err := scanner.Err(); err != nil {
@@ -595,14 +618,18 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	var dataLines []string
 	var doneSent bool // tracks whether downstream sent [DONE] marker
 
-	flushEvent := func() {
+	flushEvent := func() bool {
 		if len(dataLines) == 0 {
-			return
+			return true
+		}
+
+		if clientGone {
+			return false
 		}
 
 		select {
 		case <-clientCtx.Done():
-			return
+			return false
 		default:
 		}
 
@@ -621,12 +648,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		chunk, err = ExecuteStreamResponsePipeline(chunk, ctx, pipeline.StreamResponseSteps)
 		if err != nil {
 			log.Printf("Stream transform error: %v", err)
-			return
+			return true
 		}
 		// Safety guard: skip empty data to avoid sending data: \n\n that could
 		// confuse downstream event parsers (e.g. Anthropic SDK).
 		if len(chunk.Data) == 0 {
-			return
+			return true
 		}
 
 		// If the transformer output contains SSE event boundaries (\n\n), it is
@@ -634,9 +661,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		// This handles format transformers (e.g. anthropic2openai) that produce
 		// multiple SSE events from a single upstream data line.
 		if strings.Contains(string(chunk.Data), "\n\n") {
-			w.Write(chunk.Data)
-			flusher.Flush()
-			return
+			return tryWrite(chunk.Data) && tryFlush()
 		}
 
 		out := &bytes.Buffer{}
@@ -647,8 +672,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		out.Write(chunk.Data)
 		out.WriteString("\n\n")
 
-		w.Write(out.Bytes())
-		flusher.Flush()
+		return tryWrite(out.Bytes()) && tryFlush()
 	}
 
 	for scanner.Scan() {
@@ -662,7 +686,9 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 		if line == "" {
 			// Empty line terminates an SSE event — flush it
-			flushEvent()
+			if !flushEvent() {
+				return
+			}
 			eventLine = ""
 			dataLines = nil
 			continue
@@ -670,8 +696,6 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 		if strings.HasPrefix(line, "event: ") {
 			eventLine = strings.TrimPrefix(line, "event: ")
-			// Don't write the event line here — flushEvent will emit it
-			// as part of the complete SSE event after data lines are collected.
 			continue
 		}
 
@@ -681,26 +705,29 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		}
 
 		// Unknown line type — pass through as-is
-		w.Write([]byte(line + "\n"))
+		if !tryWrite([]byte(line + "\n")) {
+			return
+		}
 		flusher.Flush()
 	}
 
 	// Flush any remaining event (handles responses that don't end with \n\n)
 	flushEvent()
 
-	// If the downstream closed the stream without a [DONE] marker, send a
-	// synthetic one through the pipeline so stream transformers can emit their
-	// termination sequence (e.g. message_stop for Anthropic format). Without
-	// this, the client would hang waiting for the stream to end, eventually
-	// timeout, and retry — producing duplicate requests.
-	if !doneSent {
+	// If the downstream closed the stream without a [DONE] marker and the client
+	// is still connected, send a synthetic one through the pipeline so stream
+	// transformers can emit their termination sequence (e.g. message_stop for
+	// Anthropic format). Without this, the client would hang waiting for the
+	// stream to end, eventually timeout, and retry — producing duplicate requests.
+	if !doneSent && !clientGone {
 		select {
 		case <-clientCtx.Done():
+			return
 		default:
 			syntheticChunk := SSEChunk{Data: []byte("[DONE]")}
 			transformed, err := ExecuteStreamResponsePipeline(syntheticChunk, ctx, pipeline.StreamResponseSteps)
 			if err == nil && len(transformed.Data) > 0 {
-				w.Write(transformed.Data)
+				tryWrite(transformed.Data)
 				flusher.Flush()
 			}
 		}
@@ -741,7 +768,7 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 
 	// Build forwarded request. Use a detached context so the downstream connection
 	// isn't killed if the client disconnects (common with long-running SSE streams).
-	forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	forwardedReq, err := http.NewRequestWithContext(forwardCtx, original.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		forwardCancel()
