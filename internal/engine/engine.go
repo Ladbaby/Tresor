@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -850,30 +851,88 @@ func transformerTypeName(t interface{}) string {
 	return typ.Name()
 }
 
-// handleModels responds to GET /v1/models with an aggregated model list from
-// all downstreams and aliases, formatted as an OpenAI-style model list response.
+// modelRecord is one entry in the OpenAI-compatible /v1/models listing.
+type modelRecord struct {
+	ID          string         `json:"id"`
+	Object      string         `json:"object"`
+	Created     int64          `json:"created"`
+	OwnedBy     string         `json:"owned_by"`
+	Name        string         `json:"name,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Meta        map[string]any `json:"meta,omitempty"`
+}
+
+// handleModels responds to GET /v1/models and GET /models with an aggregated
+// model list from all downstreams and aliases, formatted as an OpenAI-style
+// model list response. Each entry carries downstream attribution (owned_by)
+// and metadata (name, source type).
 // Proxy auth is validated by HandleProxy before reaching this function.
 func (e *Engine) handleModels(w http.ResponseWriter) {
-	models, err := e.store.ListAllModels()
+	created := time.Now().Unix()
+	data := make([]modelRecord, 0)
+
+	newRecord := func(id, name, ownedBy string, source string) modelRecord {
+		rec := modelRecord{
+			ID:      id,
+			Object:  "model",
+			Created: created,
+			OwnedBy: ownedBy,
+			Name:    name,
+		}
+		rec.Meta = map[string]any{"source": source}
+		return rec
+	}
+
+	// Models from downstream output_model_ids
+	downstreams, err := e.store.ListDownstreams()
 	if err != nil {
-		log.Printf("Error listing models: %v", err)
+		log.Printf("Error listing downstreams for models: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-
-	openAIModels := make([]map[string]interface{}, 0, len(models))
-	for _, m := range models {
-		openAIModels = append(openAIModels, map[string]interface{}{
-			"id":       m,
-			"object":   "model",
-			"created":  1700000000,
-			"owned_by": "tresor",
-		})
+	for _, ds := range downstreams {
+		for _, m := range ds.OutputModelIDs {
+			data = append(data, newRecord(m, ds.Name, ds.ID, "downstream"))
+		}
 	}
 
+	// Models from aliases (input and output)
+	aliases, err := e.store.ListAliases()
+	if err != nil {
+		log.Printf("Error listing aliases for models: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// Build a downstream ID -> name lookup
+	dsName := make(map[string]string, len(downstreams))
+	for _, ds := range downstreams {
+		dsName[ds.ID] = ds.Name
+	}
+
+	for _, a := range aliases {
+		// Skip regex aliases for input_model_id (they represent patterns, not model IDs)
+		if !a.IsRegex {
+			data = append(data, newRecord(a.InputModelID, dsName[a.DownstreamID], a.DownstreamID, "alias"))
+		}
+		data = append(data, newRecord(a.OutputModelID, dsName[a.DownstreamID], a.DownstreamID, "alias"))
+	}
+
+	// Deduplicate: keep the first occurrence of each model ID
+	seen := make(map[string]struct{}, len(data))
+	deduped := make([]modelRecord, 0, len(data))
+	for _, m := range data {
+		if _, ok := seen[m.ID]; !ok {
+			seen[m.ID] = struct{}{}
+			deduped = append(deduped, m)
+		}
+	}
+
+	// Sort by ID for deterministic output
+	sort.Slice(deduped, func(i, j int) bool { return deduped[i].ID < deduped[j].ID })
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"object": "list",
-		"data":   openAIModels,
+		"data":   deduped,
 	})
 }
