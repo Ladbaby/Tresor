@@ -103,18 +103,27 @@ func (e *Engine) SetProxyAuthKeys(keys []string) {
 	e.proxyAuth = &proxyAuth{enabled: true, keys: keySet}
 }
 
-// validateProxyAuth checks the Authorization header against the configured proxy API keys.
+// validateProxyAuth checks the proxy API key sent by the client, supporting both
+// Authorization: Bearer <key> and x-api-key: <key> headers (the latter is used by
+// Anthropic-format clients like the Claude Office plugin).
 // If auth is enabled and the key is invalid, it writes a 401 response and returns false.
-// On success (or when auth is disabled), it returns true and strips the Authorization
-// header from the request so the downstream's own API key can be injected cleanly.
+// On success (or when auth is disabled), it returns true and strips the auth header
+// from the request so the downstream's own API key can be injected cleanly.
 func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool {
 	if e.proxyAuth == nil || !e.proxyAuth.enabled {
 		return true
 	}
 
-	token := r.Header.Get("Authorization")
-	if strings.HasPrefix(token, "Bearer ") {
-		token = strings.TrimPrefix(token, "Bearer ")
+	// Try Authorization: Bearer <key> first, then x-api-key: <key>
+	token := ""
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		token = strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	if token == "" {
+		if xak := r.Header.Get("x-api-key"); xak != "" {
+			token = xak
+		}
 	}
 
 	if _, ok := e.proxyAuth.keys[token]; !ok {
@@ -127,9 +136,10 @@ func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool 
 		return false
 	}
 
-	// Strip the client's Authorization header so it doesn't leak to downstream.
+	// Strip the client's auth header so it doesn't leak to downstream.
 	// The downstream will receive its own API key from config.
 	r.Header.Del("Authorization")
+	r.Header.Del("x-api-key")
 
 	return true
 }
