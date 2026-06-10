@@ -79,14 +79,20 @@ func (e *Engine) SetRegistry(r PluginRegistry) {
 	e.registry = r
 }
 
-// SetProxyMode configures the outbound HTTP client's proxy behavior.
+// SetProxyMode configures the outbound HTTP client's proxy behavior and transport settings.
 // It replaces the default http.Client with one that uses a custom Transport
 // respecting the given proxy mode (auto, env, windows, none).
 func (e *Engine) SetProxyMode(mode proxy.Mode) {
 	transport := &http.Transport{
-		Proxy: proxy.ProxyFunc(mode),
+		Proxy:               proxy.ProxyFunc(mode),
+		IdleConnTimeout:     30 * time.Second,       // Close idle connections after 30s of inactivity
+		MaxIdleConns:        25,                      // Total idle connection pool
+		MaxIdleConnsPerHost: 5,                       // Per-downstream idle pool
+		DisableCompression:  false,
 	}
-	e.client = &http.Client{Transport: transport}
+	e.client = &http.Client{
+		Transport: transport,
+	}
 }
 
 // SetProxyAuthKeys configures API key authentication for incoming proxy requests.
@@ -734,7 +740,7 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 
 	// Build forwarded request. Use a detached context so the downstream connection
 	// isn't killed if the client disconnects (common with long-running SSE streams).
-	forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	forwardedReq, err := http.NewRequestWithContext(forwardCtx, original.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		forwardCancel()
