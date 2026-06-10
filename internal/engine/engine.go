@@ -231,11 +231,12 @@ func isLLMPath(path string) bool {
 
 // corsHeaders writes CORS headers into the response. These are needed so that
 // browser-based LLM clients (e.g. Claude plugin webviews) can make cross-origin
-// requests to the gateway.
+// requests to the gateway. We list all headers used by the Anthropic SDK/Stainless
+// library so CORS preflights don't reject the actual request.
 func corsHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, anthropic-version")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-dangerous-direct-browser-access, x-stainless-arch, x-stainless-helper-method, x-stainless-lang, x-stainless-os, x-stainless-package-version, x-stainless-retry-count, x-stainless-runtime, x-stainless-runtime-version, x-stainless-timeout")
 }
 
 // HandleProxy is the main proxy handler for LLM requests.
