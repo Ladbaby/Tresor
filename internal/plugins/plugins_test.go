@@ -1636,8 +1636,8 @@ func TestOpenAI2Anthropic_TransformStreamChunk_ContentBlockStop(t *testing.T) {
 func TestRegistry_ListPlugins(t *testing.T) {
 	r := NewRegistry()
 	plugins := r.ListPlugins()
-	if len(plugins) != 4 {
-		t.Fatalf("expected 4 plugins, got %d", len(plugins))
+	if len(plugins) != 8 {
+		t.Fatalf("expected 8 plugins, got %d", len(plugins))
 	}
 
 	ids := make(map[string]bool)
@@ -1654,7 +1654,19 @@ func TestRegistry_ListPlugins(t *testing.T) {
 		t.Fatal("expected anthropic2openai plugin")
 	}
 	if !ids["fix_anthropic_images"] {
+		if !ids["openai2responses"] {
+			t.Fatal("expected openai2responses plugin")
+		}
+		if !ids["anthropic2responses"] {
+			t.Fatal("expected anthropic2responses plugin")
+		}
 		t.Fatal("expected fix_anthropic_images plugin")
+	}
+	if !ids["responses2openai"] {
+		t.Fatal("expected responses2openai plugin")
+	}
+	if !ids["responses2anthropic"] {
+		t.Fatal("expected responses2anthropic plugin")
 	}
 }
 
@@ -1868,38 +1880,811 @@ data: {"type":"message_stop"}
 	}
 }
 
-func TestAnthropic2OpenAI_ResponseStreaming(t *testing.T) {
-	p := &Anthropic2OpenAI{}
-	input := `data: {"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+// ----- Responses2OpenAI tests -----
 
-data: {"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
-
-data: [DONE]
-
-`
-	resp := &http.Response{Header: http.Header{}}
-	resp.Header.Set("Content-Type", "text/event-stream")
-
-	newBody, err := p.TransformResponse(resp, []byte(input), &engine.PipelineContext{})
+func TestResponses2OpenAI_TransformRequest_Basic(t *testing.T) {
+	p := &Responses2OpenAI{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"instructions": "Be helpful",
+		"input": [{"role": "user", "content": "Hello"}],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
 	if err != nil {
-		t.Fatalf("transform streaming response: %v", err)
+		t.Fatal(err)
 	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages := result["messages"].([]interface{})
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+	sys := messages[0].(map[string]interface{})
+	if sys["role"] != "system" || sys["content"] != "Be helpful" {
+		t.Fatalf("expected system message 'Be helpful', got %v", sys)
+	}
+	user := messages[1].(map[string]interface{})
+	if user["role"] != "user" || user["content"] != "Hello" {
+		t.Fatalf("expected user message 'Hello', got %v", user)
+	}
+	if result["model"] != "gpt-4o" {
+		t.Fatalf("expected model gpt-4o, got %v", result["model"])
+	}
+	if newReq.URL.Path != "/v1/chat/completions" {
+		t.Fatalf("expected path /v1/chat/completions, got %s", newReq.URL.Path)
+	}
+}
 
-	output := string(newBody)
-	if !strings.Contains(output, "event: message_start") {
-		t.Fatal("expected message_start event", output)
+func TestResponses2OpenAI_TransformRequest_ToolCall(t *testing.T) {
+	p := &Responses2OpenAI{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": [
+			{"role": "user", "content": "What's the weather?"},
+			{"type": "function_call", "call_id": "call_123", "name": "get_weather", "arguments": "{\"city\":\"London\"}"},
+			{"type": "function_call_output", "call_id": "call_123", "output": "Sunny"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(output, "event: content_block_delta") {
-		t.Fatal("expected content_block_delta events")
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages := result["messages"].([]interface{})
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(messages))
+	}
+	// Assistant with tool_calls
+	assistant := messages[1].(map[string]interface{})
+	if assistant["role"] != "assistant" {
+		t.Fatalf("expected assistant role, got %v", assistant["role"])
+	}
+	tcs := assistant["tool_calls"].([]interface{})
+	if len(tcs) != 1 {
+		t.Fatalf("expected 1 tool_call, got %d", len(tcs))
+	}
+	// Tool result
+	tool := messages[2].(map[string]interface{})
+	if tool["role"] != "tool" {
+		t.Fatalf("expected tool role, got %v", tool["role"])
+	}
+	if tool["content"] != "Sunny" {
+		t.Fatalf("expected tool content 'Sunny', got %v", tool["content"])
+	}
+}
+
+func TestResponses2OpenAI_TransformRequest_Reasoning(t *testing.T) {
+	p := &Responses2OpenAI{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": [{"role": "user", "content": "Think hard"}],
+		"reasoning": {"effort": "high"},
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if result["reasoning_effort"] != "high" {
+		t.Fatalf("expected reasoning_effort 'high', got %v", result["reasoning_effort"])
+	}
+}
+
+func TestResponses2OpenAI_TransformResponse_NonStreaming(t *testing.T) {
+	p := &Responses2OpenAI{}
+	respBody := []byte(`{
+		"id": "chatcmpl-123",
+		"object": "chat.completion",
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "Hello world"},
+			"finish_reason": "stop"
+		}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+	}`)
+	httpResp := &http.Response{Header: http.Header{}}
+	transformed, err := p.TransformResponse(httpResp, respBody, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result responsesResponse
+	if err := json.Unmarshal(transformed, &result); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if result.Object != "response" {
+		t.Fatalf("expected object 'response', got %s", result.Object)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("expected status 'completed', got %s", result.Status)
+	}
+	if len(result.Output) != 1 {
+		t.Fatalf("expected 1 output item, got %d", len(result.Output))
+	}
+	if result.Output[0].Type != "output_text" {
+		t.Fatalf("expected output_text type, got %s", result.Output[0].Type)
+	}
+	if result.Output[0].Text != "Hello world" {
+		t.Fatalf("expected text 'Hello world', got %s", result.Output[0].Text)
+	}
+	if result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 20 {
+		t.Fatalf("unexpected usage: %+v", result.Usage)
+	}
+}
+
+func TestResponses2OpenAI_TransformStreamChunk_FirstChunk(t *testing.T) {
+	p := &Responses2OpenAI{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+	chunk := engine.SSEChunk{
+		Data: []byte(`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4o","choices":[]}`),
+	}
+	result, err := p.TransformStreamChunk(chunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "response.created") {
+		t.Fatal("expected response.created event, got:", output)
+	}
+	if !strings.Contains(output, "response.in_progress") {
+		t.Fatal("expected response.in_progress event, got:", output)
+	}
+}
+
+func TestResponses2OpenAI_TransformStreamChunk_Content(t *testing.T) {
+	p := &Responses2OpenAI{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+	// First call: role chunk to initialize state
+	initChunk := engine.SSEChunk{
+		Data: []byte(`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`),
+	}
+	p.TransformStreamChunk(initChunk, ctx)
+	// Content delta
+	contentChunk := engine.SSEChunk{
+		Data: []byte(`{"id":"chatcmpl-123","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"}}]}`),
+	}
+	result, err := p.TransformStreamChunk(contentChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "response.output_text.delta") {
+		t.Fatal("expected response.output_text.delta event, got:", output)
 	}
 	if !strings.Contains(output, "Hello") {
-		t.Fatal("expected content 'Hello'")
+		t.Fatal("expected content 'Hello', got:", output)
 	}
-	if !strings.Contains(output, "event: message_stop") {
-		t.Fatal("expected message_stop event")
+}
+
+// ----- Responses2Anthropic tests -----
+
+func TestResponses2Anthropic_TransformRequest_Basic(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"instructions": "Be helpful",
+		"input": [{"role": "user", "content": "Hello"}],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if result["system"] != "Be helpful" {
+		t.Fatalf("expected system 'Be helpful', got %v", result["system"])
+	}
+	messages := result["messages"].([]interface{})
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+	user := messages[0].(map[string]interface{})
+	if user["role"] != "user" || user["content"] != "Hello" {
+		t.Fatalf("expected user message 'Hello', got %v", user)
+	}
+	if newReq.URL.Path != "/v1/messages" {
+		t.Fatalf("expected path /v1/messages, got %s", newReq.URL.Path)
+	}
+}
+
+func TestResponses2Anthropic_TransformRequest_ToolCall(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "Weather?"},
+			{"type": "function_call", "call_id": "call_123", "name": "get_weather", "arguments": "{\"city\":\"London\"}"},
+			{"type": "function_call_output", "call_id": "call_123", "output": "Sunny"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages := result["messages"].([]interface{})
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(messages))
+	}
+	// Assistant with tool_use
+	assistant := messages[1].(map[string]interface{})
+	if assistant["role"] != "assistant" {
+		t.Fatalf("expected assistant role, got %v", assistant["role"])
+	}
+	content := assistant["content"].([]interface{})
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content block, got %d", len(content))
+	}
+	block := content[0].(map[string]interface{})
+	if block["type"] != "tool_use" {
+		t.Fatalf("expected tool_use block, got %v", block["type"])
+	}
+}
+
+func TestResponses2Anthropic_TransformRequest_Tools(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [{"role": "user", "content": "Hello"}],
+		"tools": [{"type": "function", "function": {"name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	tools := result["tools"].([]interface{})
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	tool := tools[0].(map[string]interface{})
+	if tool["name"] != "get_weather" {
+		t.Fatalf("expected tool name 'get_weather', got %v", tool["name"])
+	}
+	if tool["input_schema"] == nil {
+		t.Fatal("expected input_schema on anthropic tool")
+	}
+}
+
+func TestResponses2Anthropic_TransformRequest_Reasoning(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [{"role": "user", "content": "Think"}],
+		"reasoning": {"effort": "high"},
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	thinking := result["thinking"].(map[string]interface{})
+	if thinking["type"] != "enabled" {
+		t.Fatalf("expected thinking type 'enabled', got %v", thinking["type"])
+	}
+	budget := int(thinking["budget_tokens"].(float64))
+	if budget != 16000 {
+		t.Fatalf("expected budget 16000 for 'high' effort, got %d", budget)
+	}
+}
+
+func TestResponses2Anthropic_TransformResponse_NonStreaming(t *testing.T) {
+	p := &Responses2Anthropic{}
+	respBody := []byte(`{
+		"id": "msg_123",
+		"model": "claude-sonnet-4-20250514",
+		"content": [{"type": "text", "text": "Hello there"}],
+		"usage": {"input_tokens": 10, "output_tokens": 20},
+		"stop_reason": "end_turn"
+	}`)
+	httpResp := &http.Response{Header: http.Header{}}
+	transformed, err := p.TransformResponse(httpResp, respBody, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result responsesResponse
+	if err := json.Unmarshal(transformed, &result); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if result.Object != "response" {
+		t.Fatalf("expected object 'response', got %s", result.Object)
+	}
+	if len(result.Output) != 1 {
+		t.Fatalf("expected 1 output item, got %d", len(result.Output))
+	}
+	if result.Output[0].Type != "output_text" {
+		t.Fatalf("expected output_text type, got %s", result.Output[0].Type)
+	}
+	if result.Output[0].Text != "Hello there" {
+		t.Fatalf("expected text 'Hello there', got %s", result.Output[0].Text)
+	}
+	if result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 20 {
+		t.Fatalf("unexpected usage: %+v", result.Usage)
+	}
+}
+
+func TestResponses2Anthropic_TransformStreamChunk_MessageStart(t *testing.T) {
+	p := &Responses2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+	chunk := engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"msg_123","model":"claude-sonnet-4-20250514"}}`),
+	}
+	result, err := p.TransformStreamChunk(chunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "response.created") {
+		t.Fatal("expected response.created event, got:", output)
+	}
+	if !strings.Contains(output, "response.in_progress") {
+		t.Fatal("expected response.in_progress event, got:", output)
+	}
+}
+
+func TestResponses2Anthropic_TransformStreamChunk_TextDelta(t *testing.T) {
+	p := &Responses2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+	// Prime state with message_start
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"msg_123","model":"claude-sonnet-4-20250514"}}`),
+	}, ctx)
+
+	// text_delta
+	deltaChunk := engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`),
+	}
+	result, err := p.TransformStreamChunk(deltaChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "response.output_text.delta") {
+		t.Fatal("expected response.output_text.delta event, got:", output)
+	}
+	if !strings.Contains(output, "Hello") {
+		t.Fatal("expected text 'Hello', got:", output)
+	}
+}
+
+func TestResponses2Anthropic_TransformStreamChunk_MessageStop(t *testing.T) {
+	p := &Responses2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+	// Prime state
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"msg_123","model":"claude-sonnet-4-20250514"}}`),
+	}, ctx)
+	// Send a text delta first
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`),
+	}, ctx)
+
+	// message_stop
+	stopChunk := engine.SSEChunk{
+		EventType: "message_stop",
+		Data:      []byte(`{"type":"message_stop"}`),
+	}
+	result, err := p.TransformStreamChunk(stopChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "response.output_text.done") {
+		t.Fatal("expected response.output_text.done event, got:", output)
+	}
+	if !strings.Contains(output, "response.completed") {
+		t.Fatal("expected response.completed event, got:", output)
+	}
+}
+
+
+// ----- OpenAI2Responses tests -----
+
+func TestOpenAI2Responses_TransformRequest_Basic(t *testing.T) {
+	p := &OpenAI2Responses{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "system", "content": "Be helpful"},
+			{"role": "user", "content": "Hello"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if result["instructions"] != "Be helpful" {
+		t.Fatalf("expected instructions 'Be helpful', got %v", result["instructions"])
+	}
+	input := result["input"].([]interface{})
+	if len(input) != 1 {
+		t.Fatalf("expected 1 input item, got %d", len(input))
+	}
+	user := input[0].(map[string]interface{})
+	if user["role"] != "user" || user["content"] != "Hello" {
+		t.Fatalf("expected user message 'Hello', got %v", user)
+	}
+	if newReq.URL.Path != "/v1/responses" {
+		t.Fatalf("expected path /v1/responses, got %s", newReq.URL.Path)
+	}
+}
+
+func TestOpenAI2Responses_TransformRequest_ToolCall(t *testing.T) {
+	p := &OpenAI2Responses{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Weather?"},
+			{"role": "assistant", "content": "", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"London\"}"}}]},
+			{"role": "tool", "tool_call_id": "call_123", "content": "Sunny"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	input := result["input"].([]interface{})
+	if len(input) != 3 {
+		t.Fatalf("expected 3 input items, got %d", len(input))
+	}
+	fc := input[1].(map[string]interface{})
+	if fc["type"] != "function_call" {
+		t.Fatalf("expected function_call type, got %v", fc["type"])
+	}
+	if fc["name"] != "get_weather" {
+		t.Fatalf("expected name get_weather, got %v", fc["name"])
+	}
+	fco := input[2].(map[string]interface{})
+	if fco["type"] != "function_call_output" {
+		t.Fatalf("expected function_call_output type, got %v", fco["type"])
+	}
+	if fco["output"] != "Sunny" {
+		t.Fatalf("expected output 'Sunny', got %v", fco["output"])
+	}
+}
+
+func TestOpenAI2Responses_TransformRequest_Reasoning(t *testing.T) {
+	p := &OpenAI2Responses{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role": "user", "content": "Think"}],
+		"reasoning_effort": "high",
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	reasoning := result["reasoning"].(map[string]interface{})
+	if reasoning["effort"] != "high" {
+		t.Fatalf("expected reasoning.effort 'high', got %v", reasoning["effort"])
+	}
+}
+
+func TestOpenAI2Responses_TransformResponse_NonStreaming(t *testing.T) {
+	p := &OpenAI2Responses{}
+	respBody := []byte(`{
+		"id": "resp_123",
+		"object": "response",
+		"status": "completed",
+		"model": "gpt-4o",
+		"output": [
+			{"type": "output_text", "text": "Hello world"}
+		],
+		"usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+	}`)
+	httpResp := &http.Response{Header: http.Header{}}
+	transformed, err := p.TransformResponse(httpResp, respBody, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(transformed, &result); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if result["object"] != "chat.completion" {
+		t.Fatalf("expected object 'chat.completion', got %s", result["object"])
+	}
+	choices := result["choices"].([]interface{})
+	msg := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+	if msg["content"] != "Hello world" {
+		t.Fatalf("expected content 'Hello world', got %s", msg["content"])
+	}
+	if msg["role"] != "assistant" {
+		t.Fatalf("expected role 'assistant', got %s", msg["role"])
+	}
+}
+
+func TestOpenAI2Responses_TransformStreamChunk_TextDelta(t *testing.T) {
+	p := &OpenAI2Responses{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.created",
+		Data:      []byte(`{"type":"response.created","response":{"id":"resp_123","model":"gpt-4o"}}`),
+	}, ctx)
+
+	deltaChunk := engine.SSEChunk{
+		EventType: "response.output_text.delta",
+		Data:      []byte(`{"type":"response.output_text.delta","output_id":"out_1","delta":"Hello","index":0}`),
+	}
+	result, err := p.TransformStreamChunk(deltaChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "data: ") {
+		t.Fatal("expected 'data: ' prefix, got:", output)
+	}
+	if !strings.Contains(output, "Hello") {
+		t.Fatal("expected content 'Hello', got:", output)
+	}
+}
+
+func TestOpenAI2Responses_TransformStreamChunk_Completed(t *testing.T) {
+	p := &OpenAI2Responses{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.created",
+		Data:      []byte(`{"type":"response.created","response":{"id":"resp_123","model":"gpt-4o"}}`),
+	}, ctx)
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.in_progress",
+		Data:      []byte(`{"type":"response.in_progress"}`),
+	}, ctx)
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.output_text.delta",
+		Data:      []byte(`{"type":"response.output_text.delta","output_id":"out_1","delta":"Hello","index":0}`),
+	}, ctx)
+
+	completedChunk := engine.SSEChunk{
+		EventType: "response.completed",
+		Data:      []byte(`{"type":"response.completed","response":{"id":"resp_123","status":"completed","usage":{"input_tokens":10,"output_tokens":20}}}`),
+	}
+	result, err := p.TransformStreamChunk(completedChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "finish_reason") {
+		t.Fatal("expected finish_reason in completed chunk, got:", output)
+	}
+	if !strings.Contains(output, "[DONE]") {
+		t.Fatal("expected [DONE] marker, got:", output)
+	}
+}
+
+// ----- Anthropic2Responses tests -----
+
+func TestAnthropic2Responses_TransformRequest_Basic(t *testing.T) {
+	p := &Anthropic2Responses{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"system": "Be helpful",
+		"messages": [{"role": "user", "content": "Hello"}],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/messages", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if result["instructions"] != "Be helpful" {
+		t.Fatalf("expected instructions 'Be helpful', got %v", result["instructions"])
+	}
+	input := result["input"].([]interface{})
+	if len(input) != 1 {
+		t.Fatalf("expected 1 input item, got %d", len(input))
+	}
+	user := input[0].(map[string]interface{})
+	if user["role"] != "user" || user["content"] != "Hello" {
+		t.Fatalf("expected user message 'Hello', got %v", user)
+	}
+	if newReq.URL.Path != "/v1/responses" {
+		t.Fatalf("expected path /v1/responses, got %s", newReq.URL.Path)
+	}
+}
+
+func TestAnthropic2Responses_TransformRequest_ToolCall(t *testing.T) {
+	p := &Anthropic2Responses{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"messages": [
+			{"role": "user", "content": "Weather?"},
+			{"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {"city": "London"}}]},
+			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_123", "content": "Sunny"}]}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/messages", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	input := result["input"].([]interface{})
+	if len(input) < 3 {
+		t.Fatalf("expected at least 3 input items, got %d", len(input))
+	}
+	fc := input[1].(map[string]interface{})
+	if fc["type"] != "function_call" {
+		t.Fatalf("expected function_call type, got %v", fc["type"])
+	}
+	if fc["name"] != "get_weather" {
+		t.Fatalf("expected name 'get_weather', got %v", fc["name"])
+	}
+}
+
+func TestAnthropic2Responses_TransformRequest_Thinking(t *testing.T) {
+	p := &Anthropic2Responses{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"messages": [{"role": "user", "content": "Think"}],
+		"thinking": {"type": "enabled", "budget_tokens": 16000},
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/messages", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	reasoning := result["reasoning"].(map[string]interface{})
+	if reasoning["effort"] != "high" {
+		t.Fatalf("expected reasoning.effort 'high', got %v", reasoning["effort"])
+	}
+}
+
+func TestAnthropic2Responses_TransformResponse_NonStreaming(t *testing.T) {
+	p := &Anthropic2Responses{}
+	respBody := []byte(`{
+		"id": "resp_123",
+		"object": "response",
+		"status": "completed",
+		"model": "claude-sonnet-4-20250514",
+		"output": [
+			{"type": "output_text", "text": "Hello there"}
+		],
+		"usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+	}`)
+	httpResp := &http.Response{Header: http.Header{}}
+	transformed, err := p.TransformResponse(httpResp, respBody, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(transformed, &result); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if result["type"] != "message" {
+		t.Fatalf("expected type 'message', got %s", result["type"])
+	}
+	content := result["content"].([]interface{})
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content block, got %d", len(content))
+	}
+	block := content[0].(map[string]interface{})
+	if block["type"] != "text" || block["text"] != "Hello there" {
+		t.Fatalf("expected text block 'Hello there', got %v", block)
+	}
+}
+
+func TestAnthropic2Responses_TransformStreamChunk_MessageStart(t *testing.T) {
+	p := &Anthropic2Responses{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	chunk := engine.SSEChunk{
+		EventType: "response.created",
+		Data:      []byte(`{"type":"response.created","response":{"id":"resp_123","model":"claude-sonnet-4-20250514"}}`),
+	}
+	result, err := p.TransformStreamChunk(chunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "message_start") {
+		t.Fatal("expected message_start event, got:", output)
+	}
+}
+
+func TestAnthropic2Responses_TransformStreamChunk_TextDelta(t *testing.T) {
+	p := &Anthropic2Responses{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.created",
+		Data:      []byte(`{"type":"response.created","response":{"id":"resp_123","model":"claude-sonnet-4-20250514"}}`),
+	}, ctx)
+
+	deltaChunk := engine.SSEChunk{
+		EventType: "response.output_text.delta",
+		Data:      []byte(`{"type":"response.output_text.delta","output_id":"out_1","delta":"Hello","index":0}`),
+	}
+	result, err := p.TransformStreamChunk(deltaChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "content_block_delta") && !strings.Contains(output, "content_block_start") {
+		t.Fatal("expected content_block_delta or content_block_start event, got:", output)
 	}
 }

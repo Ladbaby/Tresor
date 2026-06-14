@@ -73,6 +73,50 @@ func NewRegistry() engine.PluginRegistry {
 		return &Anthropic2OpenAI{}, nil
 	})
 
+	r.register("responses2openai", engine.PluginInfo{
+		ID:          "responses2openai",
+		Description: "Converts OpenAI Responses API requests to Chat Completions format and vice versa",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &Responses2OpenAI{}, nil
+	})
+
+	r.register("responses2anthropic", engine.PluginInfo{
+		ID:          "responses2anthropic",
+		Description: "Converts OpenAI Responses API requests to Anthropic Messages format and vice versa",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &Responses2Anthropic{}, nil
+	})
+
+	r.register("openai2responses", engine.PluginInfo{
+		ID:          "openai2responses",
+		Description: "Converts OpenAI Chat Completion requests to Responses API format",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &OpenAI2Responses{}, nil
+	})
+
+	r.register("anthropic2responses", engine.PluginInfo{
+		ID:          "anthropic2responses",
+		Description: "Converts Anthropic Messages requests to Responses API format",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &Anthropic2Responses{}, nil
+	})
+
 	return r
 }
 

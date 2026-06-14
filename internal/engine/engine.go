@@ -434,9 +434,31 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	if inputFormat != "" && len(ds.ApiFormats) > 0 && !slices.Contains(ds.ApiFormats, inputFormat) {
 		pluginID := "openai2anthropic"
 		typeName := "OpenAI2Anthropic"
-		if inputFormat == "anthropic" {
-			pluginID = "anthropic2openai"
-			typeName = "Anthropic2OpenAI"
+		switch inputFormat {
+		case "openai":
+			if slices.Contains(ds.ApiFormats, "openai_responses") {
+				pluginID = "openai2responses"
+				typeName = "OpenAI2Responses"
+			} else {
+				pluginID = "openai2anthropic"
+				typeName = "OpenAI2Anthropic"
+			}
+		case "anthropic":
+			if slices.Contains(ds.ApiFormats, "openai_responses") {
+				pluginID = "anthropic2responses"
+				typeName = "Anthropic2Responses"
+			} else {
+				pluginID = "anthropic2openai"
+				typeName = "Anthropic2OpenAI"
+			}
+		case "openai_responses":
+			if slices.Contains(ds.ApiFormats, "openai") {
+				pluginID = "responses2openai"
+				typeName = "Responses2OpenAI"
+			} else if slices.Contains(ds.ApiFormats, "anthropic") {
+				pluginID = "responses2anthropic"
+				typeName = "Responses2Anthropic"
+			}
 		}
 		transformer, err := e.registry.CreatePlugin(pluginID, nil)
 		if err != nil {
@@ -851,6 +873,8 @@ func detectInputFormat(path string) string {
 		return "openai"
 	case "/v1/messages":
 		return "anthropic"
+	case "/v1/responses":
+		return "openai_responses"
 	default:
 		return ""
 	}

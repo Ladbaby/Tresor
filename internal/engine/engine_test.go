@@ -26,8 +26,16 @@ func (m *mockRegistryImpl) CreatePlugin(pluginID string, config map[string]inter
 		return &mockOpenAI2Anthropic{}, nil
 	case "anthropic2openai":
 		return &mockAnthropic2OpenAI{}, nil
+	case "responses2openai":
+			return &mockResponses2OpenAI{}, nil
+	case "responses2anthropic":
+			return &mockResponses2Anthropic{}, nil
+	case "openai2responses":
+		return &mockOpenAI2Responses{}, nil
+	case "anthropic2responses":
+		return &mockAnthropic2Responses{}, nil
 	default:
-		return nil, fmt.Errorf("unknown plugin: %s", pluginID)
+			return nil, fmt.Errorf("unknown plugin: %s", pluginID)
 	}
 }
 
@@ -91,6 +99,71 @@ func (m *mockAnthropic2OpenAI) TransformResponse(resp *http.Response, body []byt
 }
 
 func (m *mockAnthropic2OpenAI) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+
+// mockResponses2OpenAI marks the request body as translated.
+type mockResponses2OpenAI struct{}
+
+func (m *mockResponses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "responses2openai")
+	return req, body, nil
+}
+
+func (m *mockResponses2OpenAI) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (m *mockResponses2OpenAI) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+// mockResponses2Anthropic marks the request body as translated.
+type mockResponses2Anthropic struct{}
+
+func (m *mockResponses2Anthropic) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "responses2anthropic")
+	return req, body, nil
+}
+
+func (m *mockResponses2Anthropic) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (m *mockResponses2Anthropic) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+// mockOpenAI2Responses marks the request body as translated from OpenAI to Responses API.
+type mockOpenAI2Responses struct{}
+
+func (m *mockOpenAI2Responses) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "openai2responses")
+	return req, body, nil
+}
+
+func (m *mockOpenAI2Responses) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (m *mockOpenAI2Responses) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+// mockAnthropic2Responses marks the request body as translated from Anthropic to Responses API.
+type mockAnthropic2Responses struct{}
+
+func (m *mockAnthropic2Responses) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "anthropic2responses")
+	return req, body, nil
+}
+
+func (m *mockAnthropic2Responses) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (m *mockAnthropic2Responses) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
 	return chunk, nil
 }
 
@@ -856,5 +929,212 @@ func TestEngine_HandleProxy_AutoTranslate_DoesNotDuplicateExistingTranslator(t *
 	}
 	if translatedHeader != "anthropic2openai" {
 		t.Fatalf("expected one Anthropic2OpenAI transform, got header %q", translatedHeader)
+	}
+}
+
+// TestEngine_HandleProxy_AutoTranslate_Responses2OpenAI verifies that a
+// Responses API request hitting an OpenAI downstream auto-inserts responses2openai.
+func TestEngine_HandleProxy_AutoTranslate_Responses2OpenAI(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	// OpenAI downstream (api_formats: ["openai"])
+	addDownstream(t, s, "oa-ds", "OADS", dsServer.URL, "key-1", "openai")
+	addOutputModelIDs(t, s, "oa-ds", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	// Send Responses API request to OpenAI downstream
+	body := `{"model":"gpt-4o","input":[{"role":"user","content":"hi"}],"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if translatedHeader != "responses2openai" {
+		t.Fatalf("expected X-Auto-Translated: responses2openai, got %q", translatedHeader)
+	}
+}
+
+// TestEngine_HandleProxy_AutoTranslate_Responses2Anthropic verifies that a
+// Responses API request hitting an Anthropic downstream auto-inserts responses2anthropic.
+func TestEngine_HandleProxy_AutoTranslate_Responses2Anthropic(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	// Anthropic downstream (api_formats: ["anthropic"])
+	addDownstream(t, s, "anth-ds", "AnthDS", dsServer.URL, "key-1", "anthropic")
+	addOutputModelIDs(t, s, "anth-ds", "claude-sonnet")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	// Send Responses API request to Anthropic downstream
+	body := `{"model":"claude-sonnet","input":[{"role":"user","content":"hi"}],"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if translatedHeader != "responses2anthropic" {
+		t.Fatalf("expected X-Auto-Translated: responses2anthropic, got %q", translatedHeader)
+	}
+}
+
+// TestEngine_HandleProxy_AutoTranslate_Responses_SameFormat verifies that a
+// Responses API request hitting a Responses-capable downstream does NOT trigger translation.
+func TestEngine_HandleProxy_AutoTranslate_Responses_SameFormat(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	// Responses-capable downstream (api_formats: ["openai_responses"])
+	addDownstream(t, s, "resp-ds", "RespDS", dsServer.URL, "key-1", "openai_responses")
+	addOutputModelIDs(t, s, "resp-ds", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"gpt-4o","input":[{"role":"user","content":"hi"}],"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if translatedHeader != "" {
+		t.Fatalf("expected no auto-translation for same format, got X-Auto-Translated: %q", translatedHeader)
+	}
+}
+
+// ----- OpenAI2Responses auto-translation tests -----
+
+func TestEngine_HandleProxy_AutoTranslate_OpenAI2Responses(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	// Responses-capable downstream (api_formats: ["openai_responses"])
+	addDownstream(t, s, "resp-ds", "RespDS", dsServer.URL, "key-1", "openai_responses")
+	addOutputModelIDs(t, s, "resp-ds", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	// Send OpenAI-format request to Responses-capable downstream
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if translatedHeader != "openai2responses" {
+		t.Fatalf("expected X-Auto-Translated: openai2responses, got %q", translatedHeader)
+	}
+}
+
+func TestEngine_HandleProxy_AutoTranslate_Anthropic2Responses(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	// Responses-capable downstream (api_formats: ["openai_responses"])
+	addDownstream(t, s, "resp-ds", "RespDS", dsServer.URL, "key-1", "openai_responses")
+	addOutputModelIDs(t, s, "resp-ds", "claude-sonnet-4-20250514")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	// Send Anthropic-format request to Responses-capable downstream
+	body := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if translatedHeader != "anthropic2responses" {
+		t.Fatalf("expected X-Auto-Translated: anthropic2responses, got %q", translatedHeader)
+	}
+}
+
+// TestEngine_HandleProxy_AutoTranslate_OpenAI2Anthropic_WhenResponsesNotAvailable verifies
+// that OpenAI requests fall back to openai2anthropic when the downstream does not support responses API.
+func TestEngine_HandleProxy_AutoTranslate_OpenAI2Anthropic_WhenResponsesNotAvailable(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	// Anthropic-only downstream (api_formats: ["anthropic"])
+	addDownstream(t, s, "anth-ds", "AnthDS", dsServer.URL, "key-1", "anthropic")
+	addOutputModelIDs(t, s, "anth-ds", "claude-sonnet")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	// Send OpenAI-format request to Anthropic downstream (no responses API)
+	body := `{"model":"claude-sonnet","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if translatedHeader != "openai2anthropic" {
+		t.Fatalf("expected X-Auto-Translated: openai2anthropic, got %q", translatedHeader)
 	}
 }
