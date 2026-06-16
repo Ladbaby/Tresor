@@ -82,8 +82,10 @@ type PipelineStep struct {
 // AliasGroupCfg defines an alias group: one input model mapped to a list of
 // output model options. The first option in the list is the active one.
 // "is_active" is no longer stored in YAML — it is managed by the DB.
+// If IsRegex is true, input_model_id is treated as a regular expression pattern.
 type AliasGroupCfg struct {
 	InputModelID  string             `yaml:"input_model_id"`
+	IsRegex       bool               `yaml:"is_regex,omitempty"`
 	Options       []AliasOptionCfg   `yaml:"options"`
 }
 
@@ -92,7 +94,6 @@ type AliasOptionCfg struct {
 	ID            string `yaml:"id"`
 	DownstreamID  string `yaml:"downstream_id"`
 	OutputModelID string `yaml:"output_model_id"`
-	IsRegex       bool   `yaml:"is_regex,omitempty"`
 }
 
 // Load reads the YAML config file. If configPath is empty, it auto-detects:

@@ -110,8 +110,8 @@ aliases:
 
 # Example: regex alias to match all Claude models
 #  - input_model_id: "^claude-.*"
+#    is_regex: true
 #    options:
 #      - id: alias-claude-wildcard
 #        downstream_id: anthropic
 #        output_model_id: claude-sonnet-4-20250514
-#        is_regex: true

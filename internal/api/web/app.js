@@ -1202,10 +1202,10 @@ function renderAliasGroup(container, group) {
 
     const title = document.createElement('div');
     title.className = 'alias-group-title';
-    // Check if any option in this group is regex
-    var hasRegex = group.options.some(function (o) { return o.is_regex; });
+    // Check if this group is regex
+    var isRegexGroup = group.is_regex;
     title.innerHTML = `<span class="group-icon">🎯</span> ${esc(group.input_model_id)}` +
-        (hasRegex ? '<span class="badge" style="background:#6e256d;color:#e879f9;margin-left:0.4rem;font-size:0.7rem;">regex</span>' : '');
+        (isRegexGroup ? '<span class="badge" style="background:#6e256d;color:#e879f9;margin-left:0.4rem;font-size:0.7rem;">regex</span>' : '');
 
     const actions = document.createElement('div');
     actions.className = 'alias-group-actions';
@@ -1531,9 +1531,6 @@ async function openAliasOptionModal(inputModelId) {
         populateOutputModelSelect(outputContainer, downstreamSelect.value);
     };
 
-    // Reset regex checkbox
-    document.getElementById('alias-is-regex').checked = false;
-
     document.getElementById('alias-modal').classList.remove('hidden');
 }
 
@@ -1553,7 +1550,7 @@ document.getElementById('alias-form').addEventListener('submit', async (e) => {
     }
 
     try {
-        const isRegex = document.getElementById('alias-is-regex').checked;
+        
         for (const model of models) {
             await api('/aliases', {
                 method: 'POST',
@@ -1562,7 +1559,7 @@ document.getElementById('alias-form').addEventListener('submit', async (e) => {
                     downstream_id: downstreamId,
                     output_model_id: model,
                     is_active: false,
-                    is_regex: isRegex,
+                    
                 }),
             });
         }
@@ -1623,7 +1620,7 @@ document.getElementById('new-group-form').addEventListener('submit', async (e) =
                     downstream_id: downstreamId,
                     output_model_id: models[i],
                     is_active: i === 0,
-                    is_regex: isRegex,
+                    
                 }),
             });
         }

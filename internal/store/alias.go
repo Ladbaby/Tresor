@@ -30,6 +30,7 @@ type Alias struct {
 // AliasGroup represents one alias group: an input model and its available options.
 type AliasGroup struct {
 	InputModelID string  `json:"input_model_id"`
+	IsRegex      bool    `json:"is_regex"`
 	ActiveID     *string `json:"active_id,omitempty"`
 	Options      []Alias `json:"options"`
 }
@@ -118,8 +119,13 @@ func (s *Store) CreateAlias(a *Alias) error {
 		var count int
 		err := tx.QueryRow("SELECT COUNT(*) FROM aliases WHERE input_model_id = ?", a.InputModelID).Scan(&count)
 		if err == nil && count > 0 {
-			// Group exists — reuse its existing order
+			// Group exists — reuse its existing order and inherit its is_regex status
 			err = tx.QueryRow("SELECT group_order FROM aliases WHERE input_model_id = ? LIMIT 1", a.InputModelID).Scan(&groupOrder)
+			// Inherit the group's is_regex (overrides whatever was passed in)
+			var groupIsRegex int
+			if err2 := tx.QueryRow("SELECT is_regex FROM aliases WHERE input_model_id = ? LIMIT 1", a.InputModelID).Scan(&groupIsRegex); err2 == nil {
+				isRegex = groupIsRegex
+			}
 		}
 		if groupOrder == 0 {
 			// New group — assign max order + 1
@@ -193,6 +199,11 @@ func (s *Store) UpdateAlias(a *Alias) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("alias %s not found", a.ID)
+	}
+
+	// Sync is_regex to all siblings in the group (group-level property)
+	if _, err := tx.Exec("UPDATE aliases SET is_regex = ? WHERE input_model_id = ?", isRegex, a.InputModelID); err != nil {
+		return fmt.Errorf("sync is_regex to siblings: %w", err)
 	}
 
 	return tx.Commit()
@@ -356,13 +367,23 @@ func findActiveAliasExact(db *sql.DB, inputModelID string) (*Alias, error) {
 }
 
 // findActiveAliasRegex looks for a regex-matching active alias.
-// Returns the first active regex alias whose pattern matches the model.
+// Returns the first active alias whose input_model_id pattern (treated as regex)
+// matches the model. Matches both directly-regex aliases and active aliases in
+// groups where any option has is_regex = 1 — this covers the case where a
+// non-regex alias was activated (e.g. via web UI) in a regex group.
 // Precompiled regex patterns are cached to avoid recompiling on every request.
 func findActiveAliasRegex(db *sql.DB, model string) (*Alias, error) {
 	rows, err := db.Query(
-		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at
-		 FROM aliases WHERE is_active = 1 AND is_regex = 1
-		 ORDER BY group_order, rowid`)
+		`SELECT a.id, a.input_model_id, a.downstream_id, a.output_model_id, a.is_active, a.is_regex, a.group_order, a.created_at
+		 FROM aliases a
+		 WHERE a.is_active = 1
+		   AND (a.is_regex = 1
+		     OR EXISTS (
+		       SELECT 1 FROM aliases a2
+		       WHERE a2.input_model_id = a.input_model_id
+		         AND a2.is_regex = 1
+		     ))
+		 ORDER BY a.group_order, a.rowid`)
 	if err != nil {
 		return nil, fmt.Errorf("query regex aliases: %w", err)
 	}
@@ -406,6 +427,9 @@ func (s *Store) ListGroups() ([]AliasGroup, error) {
 			g = &AliasGroup{InputModelID: a.InputModelID}
 			groupMap[a.InputModelID] = g
 			order = append(order, a.InputModelID)
+		}
+		if a.IsRegex {
+			g.IsRegex = true
 		}
 		g.Options = append(g.Options, a)
 		if a.IsActive {
@@ -483,16 +507,24 @@ func (s *Store) upsertAliases(groups []config.AliasGroupCfg) error {
 			}
 
 			if exists {
+				isRegex := 0
+				if g.IsRegex {
+					isRegex = 1
+				}
 				if _, err := tx.Exec(
 					`UPDATE aliases SET downstream_id = ?, output_model_id = ?, is_regex = ?, group_order = ? WHERE id = ?`,
-					o.DownstreamID, o.OutputModelID, o.IsRegex, groupOrder, o.ID); err != nil {
+					o.DownstreamID, o.OutputModelID, isRegex, groupOrder, o.ID); err != nil {
 					return fmt.Errorf("update alias %s: %w", o.ID, err)
 				}
 			} else {
+				isRegex := 0
+				if g.IsRegex {
+					isRegex = 1
+				}
 				if _, err := tx.Exec(
 					`INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order)
 					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-					o.ID, g.InputModelID, o.DownstreamID, o.OutputModelID, 0, o.IsRegex, groupOrder); err != nil {
+					o.ID, g.InputModelID, o.DownstreamID, o.OutputModelID, 0, isRegex, groupOrder); err != nil {
 					return fmt.Errorf("insert alias %s: %w", o.ID, err)
 				}
 			}

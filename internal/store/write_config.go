@@ -138,6 +138,9 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 		g, exists := groupMap[inputModelID]
 		if !exists {
 			g = &config.AliasGroupCfg{InputModelID: inputModelID}
+			if isRegex == 1 {
+				g.IsRegex = true
+			}
 			groupMap[inputModelID] = g
 			groupOrder = append(groupOrder, inputModelID)
 		}
@@ -145,7 +148,6 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 			ID:            id,
 			DownstreamID:  downstreamID,
 			OutputModelID: outputModelID,
-			IsRegex:       isRegex == 1,
 		})
 	}
 	rows.Close()
