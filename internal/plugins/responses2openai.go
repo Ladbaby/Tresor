@@ -214,6 +214,15 @@ func (t *Responses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 				}
 			}
 			flushToolCalls()
+		} else {
+			// Handle string input: the Responses API allows input to be a plain string
+			var inputStr string
+			if err := json.Unmarshal(respReq.Input, &inputStr); err == nil && inputStr != "" {
+				messages = append(messages, map[string]interface{}{
+					"role":    "user",
+					"content": inputStr,
+				})
+			}
 		}
 	}
 

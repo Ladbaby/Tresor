@@ -189,6 +189,15 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 				}
 			}
 			flushToolUses()
+		} else {
+			// Handle string input: the Responses API allows input to be a plain string
+			var inputStr string
+			if err := json.Unmarshal(respReq.Input, &inputStr); err == nil && inputStr != "" {
+				anthroMessages = append(anthroMessages, map[string]interface{}{
+					"role":    "user",
+					"content": inputStr,
+				})
+			}
 		}
 	}
 
