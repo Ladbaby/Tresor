@@ -160,45 +160,77 @@ func (t *OpenAI2Responses) TransformResponse(resp *http.Response, body []byte, c
 		return body, nil
 	}
 
-	var respResp responsesResponse
-	if err := json.Unmarshal(body, &respResp); err != nil {
+	var respMap map[string]any
+	if err := json.Unmarshal(body, &respMap); err != nil {
 		return nil, fmt.Errorf("openai2responses: failed to parse responses response: %w", err)
 	}
 
-	finishReason := mapOpenAIFinishReason(respResp.Status)
+	respID, _ := respMap["id"].(string)
+	model, _ := respMap["model"].(string)
+	status, _ := respMap["status"].(string)
+
+	finishReason := mapOpenAIFinishReason(status)
 	var content string
 	var toolCalls []openAIChatToolCall
 
-	for _, item := range respResp.Output {
-		switch item.Type {
-		case "output_text":
-			if content != "" {
-				content += "\n"
+	output, _ := respMap["output"].([]any)
+	for _, itemRaw := range output {
+		item, ok := itemRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		itemType, _ := item["type"].(string)
+		switch itemType {
+		case "message":
+			msgContent, _ := item["content"].([]any)
+			for _, partRaw := range msgContent {
+				part, ok := partRaw.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partType, _ := part["type"].(string); partType == "output_text" {
+					if text, _ := part["text"].(string); text != "" {
+						if content != "" {
+							content += "\n"
+						}
+						content += text
+					}
+				}
 			}
-			content += item.Text
+		case "output_text":
+			text, _ := item["text"].(string)
+			if text != "" {
+				if content != "" {
+					content += "\n"
+				}
+				content += text
+			}
 		case "function_call":
+			callID, _ := item["call_id"].(string)
+			name, _ := item["name"].(string)
+			arguments, _ := item["arguments"].(string)
 			toolCalls = append(toolCalls, openAIChatToolCall{
-				ID:   item.CallID,
+				ID:   callID,
 				Type: "function",
 				Function: struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
 				}{
-					Name:      item.Name,
-					Arguments: item.Arguments,
+					Name:      name,
+					Arguments: arguments,
 				},
 			})
 		}
 	}
 
-	response := map[string]interface{}{
-		"id":     respResp.ID,
+	response := map[string]any{
+		"id":     respID,
 		"object": "chat.completion",
-		"model":  respResp.Model,
-		"choices": []interface{}{
-			map[string]interface{}{
+		"model":  model,
+		"choices": []any{
+			map[string]any{
 				"index": 0,
-				"message": map[string]interface{}{
+				"message": map[string]any{
 					"role":    "assistant",
 					"content": content,
 				},
@@ -207,16 +239,19 @@ func (t *OpenAI2Responses) TransformResponse(resp *http.Response, body []byte, c
 		},
 	}
 
-	if respResp.Usage != nil {
-		response["usage"] = map[string]interface{}{
-			"prompt_tokens":     respResp.Usage.InputTokens,
-			"completion_tokens": respResp.Usage.OutputTokens,
-			"total_tokens":      respResp.Usage.TotalTokens,
+	if usage, ok := respMap["usage"].(map[string]any); ok {
+		inputTokens, _ := usage["input_tokens"].(float64)
+		outputTokens, _ := usage["output_tokens"].(float64)
+		totalTokens, _ := usage["total_tokens"].(float64)
+		response["usage"] = map[string]any{
+			"prompt_tokens":     int(inputTokens),
+			"completion_tokens": int(outputTokens),
+			"total_tokens":      int(totalTokens),
 		}
 	}
 
 	if len(toolCalls) > 0 {
-		msg := response["choices"].([]interface{})[0].(map[string]interface{})["message"].(map[string]interface{})
+		msg := response["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
 		msg["tool_calls"] = toolCalls
 	}
 

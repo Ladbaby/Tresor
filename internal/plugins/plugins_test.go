@@ -2005,27 +2005,38 @@ func TestResponses2OpenAI_TransformResponse_NonStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result responsesResponse
+	var result map[string]any
 	if err := json.Unmarshal(transformed, &result); err != nil {
 		t.Fatalf("failed to parse response: %v", err)
 	}
-	if result.Object != "response" {
-		t.Fatalf("expected object 'response', got %s", result.Object)
+	if result["object"] != "response" {
+		t.Fatalf("expected object 'response', got %s", result["object"])
 	}
-	if result.Status != "completed" {
-		t.Fatalf("expected status 'completed', got %s", result.Status)
+	if result["status"] != "completed" {
+		t.Fatalf("expected status 'completed', got %s", result["status"])
 	}
-	if len(result.Output) != 1 {
-		t.Fatalf("expected 1 output item, got %d", len(result.Output))
+	output, _ := result["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("expected 1 output item, got %d", len(output))
 	}
-	if result.Output[0].Type != "output_text" {
-		t.Fatalf("expected output_text type, got %s", result.Output[0].Type)
+	msgItem, ok := output[0].(map[string]any)
+	if !ok || msgItem["type"] != "message" {
+		t.Fatalf("expected message type, got %v", output[0])
 	}
-	if result.Output[0].Text != "Hello world" {
-		t.Fatalf("expected text 'Hello world', got %s", result.Output[0].Text)
+	msgContent, _ := msgItem["content"].([]any)
+	if len(msgContent) != 1 {
+		t.Fatalf("expected 1 content part, got %d", len(msgContent))
 	}
-	if result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 20 {
-		t.Fatalf("unexpected usage: %+v", result.Usage)
+	part, ok := msgContent[0].(map[string]any)
+	if !ok || part["type"] != "output_text" {
+		t.Fatalf("expected output_text content part, got %v", msgContent[0])
+	}
+	if part["text"] != "Hello world" {
+		t.Fatalf("expected text 'Hello world', got %s", part["text"])
+	}
+	usage, _ := result["usage"].(map[string]any)
+	if usage["input_tokens"].(float64) != 10 || usage["output_tokens"].(float64) != 20 {
+		t.Fatalf("unexpected usage: %+v", result["usage"])
 	}
 }
 
@@ -2222,24 +2233,35 @@ func TestResponses2Anthropic_TransformResponse_NonStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result responsesResponse
+	var result map[string]any
 	if err := json.Unmarshal(transformed, &result); err != nil {
 		t.Fatalf("failed to parse response: %v", err)
 	}
-	if result.Object != "response" {
-		t.Fatalf("expected object 'response', got %s", result.Object)
+	if result["object"] != "response" {
+		t.Fatalf("expected object 'response', got %s", result["object"])
 	}
-	if len(result.Output) != 1 {
-		t.Fatalf("expected 1 output item, got %d", len(result.Output))
+	output, _ := result["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("expected 1 output item, got %d", len(output))
 	}
-	if result.Output[0].Type != "output_text" {
-		t.Fatalf("expected output_text type, got %s", result.Output[0].Type)
+	msgItem, ok := output[0].(map[string]any)
+	if !ok || msgItem["type"] != "message" {
+		t.Fatalf("expected message type, got %v", output[0])
 	}
-	if result.Output[0].Text != "Hello there" {
-		t.Fatalf("expected text 'Hello there', got %s", result.Output[0].Text)
+	msgContent, _ := msgItem["content"].([]any)
+	if len(msgContent) != 1 {
+		t.Fatalf("expected 1 content part, got %d", len(msgContent))
 	}
-	if result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 20 {
-		t.Fatalf("unexpected usage: %+v", result.Usage)
+	part, ok := msgContent[0].(map[string]any)
+	if !ok || part["type"] != "output_text" {
+		t.Fatalf("expected output_text content part, got %v", msgContent[0])
+	}
+	if part["text"] != "Hello there" {
+		t.Fatalf("expected text 'Hello there', got %s", part["text"])
+	}
+	usage, _ := result["usage"].(map[string]any)
+	if usage["input_tokens"].(float64) != 10 || usage["output_tokens"].(float64) != 20 {
+		t.Fatalf("unexpected usage: %+v", result["usage"])
 	}
 }
 

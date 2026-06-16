@@ -218,61 +218,98 @@ func (t *Anthropic2Responses) TransformResponse(resp *http.Response, body []byte
 		return body, nil
 	}
 
-	var respResp responsesResponse
-	if err := json.Unmarshal(body, &respResp); err != nil {
+	var respMap map[string]any
+	if err := json.Unmarshal(body, &respMap); err != nil {
 		return nil, fmt.Errorf("anthropic2responses: failed to parse responses response: %w", err)
 	}
 
+	respID, _ := respMap["id"].(string)
+	model, _ := respMap["model"].(string)
+	status, _ := respMap["status"].(string)
+
 	var content []anthropicContent
-	for _, item := range respResp.Output {
-		switch item.Type {
+	output, _ := respMap["output"].([]any)
+	for _, itemRaw := range output {
+		item, ok := itemRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		itemType, _ := item["type"].(string)
+		switch itemType {
+		case "message":
+			msgContent, _ := item["content"].([]any)
+			for _, partRaw := range msgContent {
+				part, ok := partRaw.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partType, _ := part["type"].(string); partType == "output_text" {
+					if text, _ := part["text"].(string); text != "" {
+						content = append(content, anthropicContent{
+							Type: "text",
+							Text: text,
+						})
+					}
+				}
+			}
 		case "output_text":
-			content = append(content, anthropicContent{
-				Type: "text",
-				Text: item.Text,
-			})
+			text, _ := item["text"].(string)
+			if text != "" {
+				content = append(content, anthropicContent{
+					Type: "text",
+					Text: text,
+				})
+			}
 		case "function_call":
-			// Parse arguments JSON string into input
+			callID, _ := item["call_id"].(string)
+			name, _ := item["name"].(string)
+			arguments, _ := item["arguments"].(string)
 			var input json.RawMessage
-			if item.Arguments != "" {
-				// Try to parse as JSON object; fall back to raw string
-				if err := json.Unmarshal([]byte(item.Arguments), &input); err != nil {
-					input = json.RawMessage(item.Arguments)
+			if arguments != "" {
+				if err := json.Unmarshal([]byte(arguments), &input); err != nil {
+					input = json.RawMessage(arguments)
 				}
 			} else {
 				input = json.RawMessage("{}")
 			}
 			content = append(content, anthropicContent{
 				Type:  "tool_use",
-				ID:    item.CallID,
-				Name:  item.Name,
+				ID:    callID,
+				Name:  name,
 				Input: input,
 			})
 		}
 	}
 
-	stopReason := mapAnthropicStopReason(respResp.Status)
+	stopReason := mapAnthropicStopReason(status)
 
 	response := anthropicResponse{
-		ID:    respResp.ID,
-		Model: respResp.Model,
-		Content: content,
+		ID:         respID,
+		Model:      model,
+		Content:    content,
 		StopReason: stopReason,
 	}
-	if respResp.Usage != nil {
-		response.Usage.InputTokens = respResp.Usage.InputTokens
-		response.Usage.OutputTokens = respResp.Usage.OutputTokens
-	}
 
-	// Marshal with the type field for Anthropic compliance
-	out := map[string]interface{}{
+	var inputTokens, outputTokens int
+	if usage, ok := respMap["usage"].(map[string]any); ok {
+		if it, ok := usage["input_tokens"].(float64); ok {
+			inputTokens = int(it)
+		}
+		if ot, ok := usage["output_tokens"].(float64); ok {
+			outputTokens = int(ot)
+		}
+	}
+	response.Usage.InputTokens = inputTokens
+	response.Usage.OutputTokens = outputTokens
+
+	out := map[string]any{
 		"id":          response.ID,
 		"type":        "message",
 		"role":        "assistant",
 		"content":     response.Content,
 		"model":       response.Model,
 		"stop_reason": response.StopReason,
-		"usage": map[string]interface{}{
+		"usage": map[string]any{
 			"input_tokens":  response.Usage.InputTokens,
 			"output_tokens": response.Usage.OutputTokens,
 		},
@@ -280,7 +317,7 @@ func (t *Anthropic2Responses) TransformResponse(resp *http.Response, body []byte
 	if out["stop_reason"] == "" {
 		out["stop_reason"] = nil
 	}
-	if out["usage"].(map[string]interface{})["input_tokens"] == 0 && out["usage"].(map[string]interface{})["output_tokens"] == 0 {
+	if inputTokens == 0 && outputTokens == 0 {
 		delete(out, "usage")
 	}
 

@@ -289,47 +289,59 @@ func (t *Responses2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 		respID = fmt.Sprintf("resp_%d", time.Now().UnixMilli())
 	}
 
-	output := make([]responsesOutputItem, 0)
+	output := make([]map[string]any, 0)
+	msgContent := make([]map[string]any, 0)
 
 	for _, choice := range oaiResp.Choices {
-		// Text content → output_text item
 		if choice.Message.Content != "" {
-			output = append(output, responsesOutputItem{
-				Type:   "output_text",
-				ID:     respID + ".text",
-				Text:   choice.Message.Content,
-				Role:   "assistant",
-				Status: "completed",
+			msgContent = append(msgContent, map[string]any{
+				"type":        "output_text",
+				"text":        choice.Message.Content,
+				"annotations": []any{},
 			})
 		}
 
-		// Tool calls → function_call items
 		for _, tc := range choice.Message.ToolCalls {
-			output = append(output, responsesOutputItem{
-				Type:      "function_call",
-				ID:        tc.ID,
-				CallID:    tc.ID,
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
-				Status:    "completed",
+			output = append(output, map[string]any{
+				"type":      "function_call",
+				"id":        tc.ID,
+				"call_id":   tc.ID,
+				"name":      tc.Function.Name,
+				"arguments": tc.Function.Arguments,
+				"status":    "completed",
 			})
 		}
 	}
 
-	usage := &responsesUsage{}
-	if oaiResp.Usage != nil {
-		usage.InputTokens = oaiResp.Usage.PromptTokens
-		usage.OutputTokens = oaiResp.Usage.CompletionTokens
-		usage.TotalTokens = oaiResp.Usage.TotalTokens
+	if len(msgContent) > 0 {
+		msgItem := map[string]any{
+			"type":    "message",
+			"id":      respID + "_msg_0",
+			"status":  "completed",
+			"role":    "assistant",
+			"content": msgContent,
+		}
+		output = append([]map[string]any{msgItem}, output...)
 	}
 
-	out := responsesResponse{
-		ID:     respID,
-		Object: "response",
-		Status: "completed",
-		Model:  oaiResp.Model,
-		Output: output,
-		Usage:  usage,
+	usage := map[string]any{
+		"input_tokens":  0,
+		"output_tokens": 0,
+		"total_tokens":  0,
+	}
+	if oaiResp.Usage != nil {
+		usage["input_tokens"] = oaiResp.Usage.PromptTokens
+		usage["output_tokens"] = oaiResp.Usage.CompletionTokens
+		usage["total_tokens"] = oaiResp.Usage.TotalTokens
+	}
+
+	out := map[string]any{
+		"id":     respID,
+		"object": "response",
+		"status": "completed",
+		"model":  oaiResp.Model,
+		"output": output,
+		"usage":  usage,
 	}
 
 	return json.Marshal(out)
@@ -340,6 +352,8 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 	var out bytes.Buffer
 	var textContent string
 	var messageStarted bool
+	var msgItemSent bool
+	var contentPartSent bool
 
 	parseOpenAISSE(body, func(data []byte) bool {
 		if string(bytes.TrimSpace(data)) == "[DONE]" {
@@ -355,19 +369,17 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 			id = chunk.ID
 			messageStarted = true
 
-			// Emit response.created
-			writeResponsesSSE(&out, "response.created", map[string]interface{}{
+			writeResponsesSSE(&out, "response.created", map[string]any{
 				"type": "response.created",
-				"response": map[string]interface{}{
+				"response": map[string]any{
 					"id":     id,
 					"status": "in_progress",
 				},
 			})
 
-			// Emit response.in_progress
-			writeResponsesSSE(&out, "response.in_progress", map[string]interface{}{
+			writeResponsesSSE(&out, "response.in_progress", map[string]any{
 				"type": "response.in_progress",
-				"response": map[string]interface{}{
+				"response": map[string]any{
 					"id":     id,
 					"status": "in_progress",
 				},
@@ -375,23 +387,66 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 		}
 
 		for _, choice := range chunk.Choices {
-			// Content delta
 			if choice.Delta.Content != "" {
 				textContent += choice.Delta.Content
-				writeResponsesSSE(&out, "response.output_text.delta", map[string]interface{}{
+
+				if !msgItemSent {
+					msgItemSent = true
+					msgID := id + "_msg_0"
+					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+						"type":         "response.output_item.added",
+						"output_index": 0,
+						"item": map[string]any{
+							"id":      msgID,
+							"type":    "message",
+							"status":  "in_progress",
+							"role":    "assistant",
+							"content": []any{},
+						},
+					})
+				}
+				if !contentPartSent {
+					contentPartSent = true
+					writeResponsesSSE(&out, "response.content_part.added", map[string]any{
+						"type":          "response.content_part.added",
+						"output_index":  0,
+						"content_index": 0,
+						"item_id":       id + "_msg_0",
+						"part": map[string]any{
+							"type":        "output_text",
+							"text":        "",
+							"annotations": []any{},
+						},
+					})
+				}
+
+				writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
 					"type":  "response.output_text.delta",
 					"delta": choice.Delta.Content,
 				})
 			}
 
-			// Tool calls in streaming delta
 			for _, tc := range choice.Delta.ToolCalls {
 				if tc.ID != "" {
-					// New tool call — emit output_item.added
-					writeResponsesSSE(&out, "response.output_item.added", map[string]interface{}{
+					if !msgItemSent {
+						msgItemSent = true
+						msgID := id + "_msg_0"
+						writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+							"type":         "response.output_item.added",
+							"output_index": 0,
+							"item": map[string]any{
+								"id":      msgID,
+								"type":    "message",
+								"status":  "in_progress",
+								"role":    "assistant",
+								"content": []any{},
+							},
+						})
+					}
+					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 						"type":         "response.output_item.added",
-						"output_index": tc.Index,
-						"item": map[string]interface{}{
+						"output_index": tc.Index + 1,
+						"item": map[string]any{
 							"type":    "function_call",
 							"id":      tc.ID,
 							"call_id": tc.ID,
@@ -400,35 +455,63 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 					})
 				}
 				if tc.Function.Arguments != "" {
-					writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]interface{}{
-						"type":      "response.function_call_arguments.delta",
-						"delta":     tc.Function.Arguments,
-						"call_id":   tc.ID,
-						"output_index": tc.Index,
+					writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]any{
+						"type":         "response.function_call_arguments.delta",
+						"delta":        tc.Function.Arguments,
+						"call_id":      tc.ID,
+						"output_index": tc.Index + 1,
 					})
 				}
 			}
 
-			// Finish reason
 			if choice.FinishReason != nil {
 				if textContent != "" {
-					writeResponsesSSE(&out, "response.output_text.done", map[string]interface{}{
+					if contentPartSent {
+						writeResponsesSSE(&out, "response.content_part.done", map[string]any{
+							"type":          "response.content_part.done",
+							"output_index":  0,
+							"content_index": 0,
+							"item_id":       id + "_msg_0",
+							"part": map[string]any{
+								"type":        "output_text",
+								"text":        textContent,
+								"annotations": []any{},
+							},
+						})
+					}
+					writeResponsesSSE(&out, "response.output_text.done", map[string]any{
 						"type": "response.output_text.done",
 						"text": textContent,
 					})
 				}
+				if msgItemSent {
+					msgContent := []map[string]any{}
+					if textContent != "" {
+						msgContent = append(msgContent, map[string]any{
+							"type":        "output_text",
+							"text":        textContent,
+							"annotations": []any{},
+						})
+					}
+					writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+						"type":         "response.output_item.done",
+						"output_index": 0,
+						"item": map[string]any{
+							"type":    "message",
+							"id":      id + "_msg_0",
+							"status":  "completed",
+							"role":    "assistant",
+							"content": msgContent,
+						},
+					})
+				}
 
-				writeResponsesSSE(&out, "response.completed", map[string]interface{}{
+				writeResponsesSSE(&out, "response.completed", map[string]any{
 					"type": "response.completed",
-					"response": map[string]interface{}{
+					"response": map[string]any{
 						"id":     id,
 						"status": "completed",
-						"output": []interface{}{},
-						"usage": map[string]interface{}{
-							"input_tokens":  0,
-							"output_tokens": 0,
-							"total_tokens":  0,
-						},
+						"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
 					},
 				})
 			}
@@ -450,11 +533,13 @@ type r2oStreamToolCall struct {
 }
 
 type r2oStreamState struct {
-	ResponseID  string
-	Model       string
-	Created     bool
-	TextContent string
-	ToolCallAcc map[int]*r2oStreamToolCall
+	ResponseID      string
+	Model           string
+	Created         bool
+	TextContent     string
+	MessageItemSent bool
+	ContentPartSent bool
+	ToolCallAcc     map[int]*r2oStreamToolCall
 }
 
 func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.PipelineContext) (engine.SSEChunk, error) {
@@ -467,21 +552,53 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	// Handle [DONE] marker — no output, engine terminates stream
 	if string(bytes.TrimSpace(chunk.Data)) == "[DONE]" {
 		if state.Created {
-			// Emit final output_text.done + completed
 			var out bytes.Buffer
 			if state.TextContent != "" {
-				writeResponsesSSE(&out, "response.output_text.done", map[string]interface{}{
+				if state.ContentPartSent {
+					writeResponsesSSE(&out, "response.content_part.done", map[string]any{
+						"type":          "response.content_part.done",
+						"output_index":  0,
+						"content_index": 0,
+						"item_id":       state.ResponseID + "_msg_0",
+						"part": map[string]any{
+							"type":        "output_text",
+							"text":        state.TextContent,
+							"annotations": []any{},
+						},
+					})
+				}
+				writeResponsesSSE(&out, "response.output_text.done", map[string]any{
 					"type": "response.output_text.done",
 					"text": state.TextContent,
 				})
 			}
-			writeResponsesSSE(&out, "response.completed", map[string]interface{}{
+			if state.MessageItemSent {
+				msgContent := []map[string]any{}
+				if state.TextContent != "" {
+					msgContent = append(msgContent, map[string]any{
+						"type":        "output_text",
+						"text":        state.TextContent,
+						"annotations": []any{},
+					})
+				}
+				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": 0,
+					"item": map[string]any{
+						"type":    "message",
+						"id":      state.ResponseID + "_msg_0",
+						"status":  "completed",
+						"role":    "assistant",
+						"content": msgContent,
+					},
+				})
+			}
+			writeResponsesSSE(&out, "response.completed", map[string]any{
 				"type": "response.completed",
-				"response": map[string]interface{}{
+				"response": map[string]any{
 					"id":     state.ResponseID,
 					"status": "completed",
-					"output": []interface{}{},
-					"usage":  map[string]interface{}{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+					"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
 				},
 			})
 			return engine.SSEChunk{Data: out.Bytes()}, nil
@@ -506,17 +623,17 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		state.Created = true
 		state.ToolCallAcc = make(map[int]*r2oStreamToolCall)
 
-		writeResponsesSSE(&out, "response.created", map[string]interface{}{
+		writeResponsesSSE(&out, "response.created", map[string]any{
 			"type": "response.created",
-			"response": map[string]interface{}{
+			"response": map[string]any{
 				"id":     state.ResponseID,
 				"status": "in_progress",
 			},
 		})
 
-		writeResponsesSSE(&out, "response.in_progress", map[string]interface{}{
+		writeResponsesSSE(&out, "response.in_progress", map[string]any{
 			"type": "response.in_progress",
-			"response": map[string]interface{}{
+			"response": map[string]any{
 				"id":     state.ResponseID,
 				"status": "in_progress",
 			},
@@ -527,7 +644,38 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		// Content delta
 		if choice.Delta.Content != "" {
 			state.TextContent += choice.Delta.Content
-			writeResponsesSSE(&out, "response.output_text.delta", map[string]interface{}{
+
+			if !state.MessageItemSent {
+				state.MessageItemSent = true
+				msgID := state.ResponseID + "_msg_0"
+				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": 0,
+					"item": map[string]any{
+						"id":      msgID,
+						"type":    "message",
+						"status":  "in_progress",
+						"role":    "assistant",
+						"content": []any{},
+					},
+				})
+			}
+			if !state.ContentPartSent {
+				state.ContentPartSent = true
+				writeResponsesSSE(&out, "response.content_part.added", map[string]any{
+					"type":          "response.content_part.added",
+					"output_index":  0,
+					"content_index": 0,
+					"item_id":       state.ResponseID + "_msg_0",
+					"part": map[string]any{
+						"type":        "output_text",
+						"text":        "",
+						"annotations": []any{},
+					},
+				})
+			}
+
+			writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
 				"type":  "response.output_text.delta",
 				"delta": choice.Delta.Content,
 			})
@@ -546,10 +694,25 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			if tc.ID != "" && !acc.ItemSent {
 				acc.ItemSent = true
 				acc.Name = tc.Function.Name
-				writeResponsesSSE(&out, "response.output_item.added", map[string]interface{}{
+				if !state.MessageItemSent {
+					state.MessageItemSent = true
+					msgID := state.ResponseID + "_msg_0"
+					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+						"type":         "response.output_item.added",
+						"output_index": 0,
+						"item": map[string]any{
+							"id":      msgID,
+							"type":    "message",
+							"status":  "in_progress",
+							"role":    "assistant",
+							"content": []any{},
+						},
+					})
+				}
+				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 					"type":         "response.output_item.added",
-					"output_index": tc.Index,
-					"item": map[string]interface{}{
+					"output_index": tc.Index + 1,
+					"item": map[string]any{
 						"type":    "function_call",
 						"id":      tc.ID,
 						"call_id": tc.ID,
@@ -559,11 +722,11 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			}
 			if tc.Function.Arguments != "" {
 				acc.Arguments += tc.Function.Arguments
-				writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]interface{}{
-					"type":      "response.function_call_arguments.delta",
-					"delta":     tc.Function.Arguments,
-					"call_id":   acc.ID,
-					"output_index": tc.Index,
+				writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]any{
+					"type":         "response.function_call_arguments.delta",
+					"delta":        tc.Function.Arguments,
+					"call_id":      acc.ID,
+					"output_index": tc.Index + 1,
 				})
 			}
 		}
@@ -571,23 +734,36 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		// Finish reason
 		if choice.FinishReason != nil {
 			if state.TextContent != "" {
-				writeResponsesSSE(&out, "response.output_text.done", map[string]interface{}{
+				if state.ContentPartSent {
+					writeResponsesSSE(&out, "response.content_part.done", map[string]any{
+						"type":          "response.content_part.done",
+						"output_index":  0,
+						"content_index": 0,
+						"item_id":       state.ResponseID + "_msg_0",
+						"part": map[string]any{
+							"type":        "output_text",
+							"text":        state.TextContent,
+							"annotations": []any{},
+						},
+					})
+				}
+				writeResponsesSSE(&out, "response.output_text.done", map[string]any{
 					"type": "response.output_text.done",
 					"text": state.TextContent,
 				})
 			}
 			// Close tool call items
 			for _, acc := range state.ToolCallAcc {
-				writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]interface{}{
+				writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
 					"type":      "response.function_call_arguments.done",
 					"call_id":   acc.ID,
 					"name":      acc.Name,
 					"arguments": acc.Arguments,
 				})
-				writeResponsesSSE(&out, "response.output_item.done", map[string]interface{}{
+				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type":         "response.output_item.done",
 					"output_index": 0,
-					"item": map[string]interface{}{
+					"item": map[string]any{
 						"type":    "function_call",
 						"id":      acc.ID,
 						"call_id": acc.ID,
@@ -595,12 +771,33 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					},
 				})
 			}
-			writeResponsesSSE(&out, "response.completed", map[string]interface{}{
+			if state.MessageItemSent {
+				msgContent := []map[string]any{}
+				if state.TextContent != "" {
+					msgContent = append(msgContent, map[string]any{
+						"type":        "output_text",
+						"text":        state.TextContent,
+						"annotations": []any{},
+					})
+				}
+				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": 0,
+					"item": map[string]any{
+						"type":    "message",
+						"id":      state.ResponseID + "_msg_0",
+						"status":  "completed",
+						"role":    "assistant",
+						"content": msgContent,
+					},
+				})
+			}
+			writeResponsesSSE(&out, "response.completed", map[string]any{
 				"type": "response.completed",
-				"response": map[string]interface{}{
+				"response": map[string]any{
 					"id":     state.ResponseID,
 					"status": "completed",
-					"usage":  map[string]interface{}{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+					"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
 				},
 			})
 		}

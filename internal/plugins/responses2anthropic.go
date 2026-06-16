@@ -342,18 +342,17 @@ func (t *Responses2Anthropic) transformJSONResponse(body []byte) ([]byte, error)
 		respID = fmt.Sprintf("resp_%s", anthropicResp.ID)
 	}
 
-	output := make([]responsesOutputItem, 0)
+	output := make([]map[string]any, 0)
+	msgContent := make([]map[string]any, 0)
 
 	for _, c := range anthropicResp.Content {
 		switch c.Type {
 		case "text":
 			if c.Text != "" {
-				output = append(output, responsesOutputItem{
-					Type:   "output_text",
-					ID:     respID + ".text",
-					Text:   c.Text,
-					Role:   "assistant",
-					Status: "completed",
+				msgContent = append(msgContent, map[string]any{
+					"type":        "output_text",
+					"text":        c.Text,
+					"annotations": []any{},
 				})
 			}
 		case "tool_use":
@@ -361,30 +360,41 @@ func (t *Responses2Anthropic) transformJSONResponse(body []byte) ([]byte, error)
 			if c.Input != nil {
 				args = string(c.Input)
 			}
-			output = append(output, responsesOutputItem{
-				Type:      "function_call",
-				ID:        c.ID,
-				CallID:    c.ID,
-				Name:      c.Name,
-				Arguments: args,
-				Status:    "completed",
+			output = append(output, map[string]any{
+				"type":      "function_call",
+				"id":        c.ID,
+				"call_id":   c.ID,
+				"name":      c.Name,
+				"arguments": args,
+				"status":    "completed",
 			})
 		}
 	}
 
-	usage := &responsesUsage{
-		InputTokens:  anthropicResp.Usage.InputTokens,
-		OutputTokens: anthropicResp.Usage.OutputTokens,
-		TotalTokens:  anthropicResp.Usage.InputTokens + anthropicResp.Usage.OutputTokens,
+	if len(msgContent) > 0 {
+		msgItem := map[string]any{
+			"type":    "message",
+			"id":      respID + "_msg_0",
+			"status":  "completed",
+			"role":    "assistant",
+			"content": msgContent,
+		}
+		output = append([]map[string]any{msgItem}, output...)
 	}
 
-	out := responsesResponse{
-		ID:     respID,
-		Object: "response",
-		Status: "completed",
-		Model:  anthropicResp.Model,
-		Output: output,
-		Usage:  usage,
+	usage := map[string]any{
+		"input_tokens":  anthropicResp.Usage.InputTokens,
+		"output_tokens": anthropicResp.Usage.OutputTokens,
+		"total_tokens":  anthropicResp.Usage.InputTokens + anthropicResp.Usage.OutputTokens,
+	}
+
+	out := map[string]any{
+		"id":     respID,
+		"object": "response",
+		"status": "completed",
+		"model":  anthropicResp.Model,
+		"output": output,
+		"usage":  usage,
 	}
 
 	return json.Marshal(out)
@@ -394,6 +404,9 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 	var id string
 	var out bytes.Buffer
 	var textContent string
+	var msgItemSent bool
+	var contentPartSent bool
+	var toolOutputIdx int = 1
 	openToolCalls := make(map[string]*r2aStreamToolCall)
 
 	parseAnthropicSSE(body, func(eventType string, data []byte) bool {
@@ -410,16 +423,16 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 			}
 			id = msg.Message.ID
 
-			writeResponsesSSE(&out, "response.created", map[string]interface{}{
+			writeResponsesSSE(&out, "response.created", map[string]any{
 				"type": "response.created",
-				"response": map[string]interface{}{
+				"response": map[string]any{
 					"id":     id,
 					"status": "in_progress",
 				},
 			})
-			writeResponsesSSE(&out, "response.in_progress", map[string]interface{}{
+			writeResponsesSSE(&out, "response.in_progress", map[string]any{
 				"type": "response.in_progress",
-				"response": map[string]interface{}{
+				"response": map[string]any{
 					"id":     id,
 					"status": "in_progress",
 				},
@@ -440,15 +453,32 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 			}
 			switch block.ContentBlock.Type {
 			case "tool_use":
+				if !msgItemSent {
+					msgItemSent = true
+					msgID := id + "_msg_0"
+					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+						"type":         "response.output_item.added",
+						"output_index": 0,
+						"item": map[string]any{
+							"id":      msgID,
+							"type":    "message",
+							"status":  "in_progress",
+							"role":    "assistant",
+							"content": []any{},
+						},
+					})
+				}
+				oidx := toolOutputIdx
+				toolOutputIdx++
 				tc := &r2aStreamToolCall{
 					CallID: block.ContentBlock.ID,
 					Name:   block.ContentBlock.Name,
 				}
 				openToolCalls[block.ContentBlock.ID] = tc
-				writeResponsesSSE(&out, "response.output_item.added", map[string]interface{}{
+				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 					"type":         "response.output_item.added",
-					"output_index": block.Index,
-					"item": map[string]interface{}{
+					"output_index": oidx,
+					"item": map[string]any{
 						"type":    "function_call",
 						"id":      block.ContentBlock.ID,
 						"call_id": block.ContentBlock.ID,
@@ -473,21 +503,51 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 			case "text_delta":
 				if delta.Delta.Text != "" {
 					textContent += delta.Delta.Text
-					writeResponsesSSE(&out, "response.output_text.delta", map[string]interface{}{
+
+					if !msgItemSent {
+						msgItemSent = true
+						msgID := id + "_msg_0"
+						writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+							"type":         "response.output_item.added",
+							"output_index": 0,
+							"item": map[string]any{
+								"id":      msgID,
+								"type":    "message",
+								"status":  "in_progress",
+								"role":    "assistant",
+								"content": []any{},
+							},
+						})
+					}
+					if !contentPartSent {
+						contentPartSent = true
+						writeResponsesSSE(&out, "response.content_part.added", map[string]any{
+							"type":          "response.content_part.added",
+							"output_index":  0,
+							"content_index": 0,
+							"item_id":       id + "_msg_0",
+							"part": map[string]any{
+								"type":        "output_text",
+								"text":        "",
+								"annotations": []any{},
+							},
+						})
+					}
+
+					writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
 						"type":  "response.output_text.delta",
 						"delta": delta.Delta.Text,
 					})
 				}
 			case "input_json_delta":
 				if delta.Delta.PartialJSON != "" {
-					// Find the open tool call by matching the content block index
 					for _, tc := range openToolCalls {
 						tc.Arguments += delta.Delta.PartialJSON
-						writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]interface{}{
-							"type":      "response.function_call_arguments.delta",
-							"delta":     delta.Delta.PartialJSON,
-							"call_id":   tc.CallID,
-							"output_index": delta.Index,
+						writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]any{
+							"type":         "response.function_call_arguments.delta",
+							"delta":        delta.Delta.PartialJSON,
+							"call_id":      tc.CallID,
+							"output_index": delta.Index + 1,
 						})
 						break
 					}
@@ -495,17 +555,16 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 			}
 
 		case "content_block_stop":
-			// Close any open tool call
 			for _, tc := range openToolCalls {
-				writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]interface{}{
+				writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
 					"type":      "response.function_call_arguments.done",
 					"call_id":   tc.CallID,
 					"name":      tc.Name,
 					"arguments": tc.Arguments,
 				})
-				writeResponsesSSE(&out, "response.output_item.done", map[string]interface{}{
+				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type": "response.output_item.done",
-					"item": map[string]interface{}{
+					"item": map[string]any{
 						"type":    "function_call",
 						"id":      tc.CallID,
 						"call_id": tc.CallID,
@@ -516,21 +575,54 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 			openToolCalls = make(map[string]*r2aStreamToolCall)
 
 		case "message_delta":
-			// Extract usage info (will be used in message_stop)
 
 		case "message_stop":
 			if textContent != "" {
-				writeResponsesSSE(&out, "response.output_text.done", map[string]interface{}{
+				if contentPartSent {
+					writeResponsesSSE(&out, "response.content_part.done", map[string]any{
+						"type":          "response.content_part.done",
+						"output_index":  0,
+						"content_index": 0,
+						"item_id":       id + "_msg_0",
+						"part": map[string]any{
+							"type":        "output_text",
+							"text":        textContent,
+							"annotations": []any{},
+						},
+					})
+				}
+				writeResponsesSSE(&out, "response.output_text.done", map[string]any{
 					"type": "response.output_text.done",
 					"text": textContent,
 				})
 			}
-			writeResponsesSSE(&out, "response.completed", map[string]interface{}{
+			if msgItemSent {
+				msgContent := []map[string]any{}
+				if textContent != "" {
+					msgContent = append(msgContent, map[string]any{
+						"type":        "output_text",
+						"text":        textContent,
+						"annotations": []any{},
+					})
+				}
+				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": 0,
+					"item": map[string]any{
+						"type":    "message",
+						"id":      id + "_msg_0",
+						"status":  "completed",
+						"role":    "assistant",
+						"content": msgContent,
+					},
+				})
+			}
+			writeResponsesSSE(&out, "response.completed", map[string]any{
 				"type": "response.completed",
-				"response": map[string]interface{}{
+				"response": map[string]any{
 					"id":     id,
 					"status": "completed",
-					"usage":  map[string]interface{}{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+					"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
 				},
 			})
 		}
@@ -550,12 +642,15 @@ type r2aStreamToolCall struct {
 }
 
 type r2aStreamState struct {
-	ResponseID   string
-	Model        string
-	Created      bool
-	TextContent  string
-	TextBlockOpen bool
-	ToolCallAcc  map[string]*r2aStreamToolCall
+	ResponseID      string
+	Model           string
+	Created         bool
+	TextContent     string
+	TextBlockOpen   bool
+	MessageItemSent bool
+	ContentPartSent bool
+	ToolOutputIdx   int
+	ToolCallAcc     map[string]*r2aStreamToolCall
 }
 
 func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.PipelineContext) (engine.SSEChunk, error) {
@@ -582,17 +677,18 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 		state.Model = msg.Message.Model
 		state.Created = true
 		state.ToolCallAcc = make(map[string]*r2aStreamToolCall)
+		state.ToolOutputIdx = 1
 
-		writeResponsesSSE(&out, "response.created", map[string]interface{}{
+		writeResponsesSSE(&out, "response.created", map[string]any{
 			"type": "response.created",
-			"response": map[string]interface{}{
+			"response": map[string]any{
 				"id":     state.ResponseID,
 				"status": "in_progress",
 			},
 		})
-		writeResponsesSSE(&out, "response.in_progress", map[string]interface{}{
+		writeResponsesSSE(&out, "response.in_progress", map[string]any{
 			"type": "response.in_progress",
-			"response": map[string]interface{}{
+			"response": map[string]any{
 				"id":     state.ResponseID,
 				"status": "in_progress",
 			},
@@ -616,21 +712,67 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 			state.TextBlockOpen = true
 			if block.ContentBlock.Text != "" {
 				state.TextContent += block.ContentBlock.Text
-				writeResponsesSSE(&out, "response.output_text.delta", map[string]interface{}{
+				if !state.MessageItemSent {
+					state.MessageItemSent = true
+					msgID := state.ResponseID + "_msg_0"
+					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+						"type":         "response.output_item.added",
+						"output_index": 0,
+						"item": map[string]any{
+							"id":      msgID,
+							"type":    "message",
+							"status":  "in_progress",
+							"role":    "assistant",
+							"content": []any{},
+						},
+					})
+				}
+				if !state.ContentPartSent {
+					state.ContentPartSent = true
+					writeResponsesSSE(&out, "response.content_part.added", map[string]any{
+						"type":          "response.content_part.added",
+						"output_index":  0,
+						"content_index": 0,
+						"item_id":       state.ResponseID + "_msg_0",
+						"part": map[string]any{
+							"type":        "output_text",
+							"text":        "",
+							"annotations": []any{},
+						},
+					})
+				}
+				writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
 					"type":  "response.output_text.delta",
 					"delta": block.ContentBlock.Text,
 				})
 			}
 		case "tool_use":
+			if !state.MessageItemSent {
+				state.MessageItemSent = true
+				msgID := state.ResponseID + "_msg_0"
+				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": 0,
+					"item": map[string]any{
+						"id":      msgID,
+						"type":    "message",
+						"status":  "in_progress",
+						"role":    "assistant",
+						"content": []any{},
+					},
+				})
+			}
+			oidx := state.ToolOutputIdx
+			state.ToolOutputIdx++
 			tc := &r2aStreamToolCall{
 				CallID: block.ContentBlock.ID,
 				Name:   block.ContentBlock.Name,
 			}
 			state.ToolCallAcc[block.ContentBlock.ID] = tc
-			writeResponsesSSE(&out, "response.output_item.added", map[string]interface{}{
+			writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 				"type":         "response.output_item.added",
-				"output_index": block.Index,
-				"item": map[string]interface{}{
+				"output_index": oidx,
+				"item": map[string]any{
 					"type":    "function_call",
 					"id":      block.ContentBlock.ID,
 					"call_id": block.ContentBlock.ID,
@@ -655,7 +797,36 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 		case "text_delta":
 			if delta.Delta.Text != "" {
 				state.TextContent += delta.Delta.Text
-				writeResponsesSSE(&out, "response.output_text.delta", map[string]interface{}{
+				if !state.MessageItemSent {
+					state.MessageItemSent = true
+					msgID := state.ResponseID + "_msg_0"
+					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+						"type":         "response.output_item.added",
+						"output_index": 0,
+						"item": map[string]any{
+							"id":      msgID,
+							"type":    "message",
+							"status":  "in_progress",
+							"role":    "assistant",
+							"content": []any{},
+						},
+					})
+				}
+				if !state.ContentPartSent {
+					state.ContentPartSent = true
+					writeResponsesSSE(&out, "response.content_part.added", map[string]any{
+						"type":          "response.content_part.added",
+						"output_index":  0,
+						"content_index": 0,
+						"item_id":       state.ResponseID + "_msg_0",
+						"part": map[string]any{
+							"type":        "output_text",
+							"text":        "",
+							"annotations": []any{},
+						},
+					})
+				}
+				writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
 					"type":  "response.output_text.delta",
 					"delta": delta.Delta.Text,
 				})
@@ -664,11 +835,11 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 			if delta.Delta.PartialJSON != "" {
 				for _, tc := range state.ToolCallAcc {
 					tc.Arguments += delta.Delta.PartialJSON
-					writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]interface{}{
-						"type":      "response.function_call_arguments.delta",
-						"delta":     delta.Delta.PartialJSON,
-						"call_id":   tc.CallID,
-						"output_index": delta.Index,
+					writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]any{
+						"type":         "response.function_call_arguments.delta",
+						"delta":        delta.Delta.PartialJSON,
+						"call_id":      tc.CallID,
+						"output_index": delta.Index + 1,
 					})
 					break
 				}
@@ -676,17 +847,16 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 		}
 
 	case "content_block_stop":
-		// Close tool calls if we tracked any
 		for _, tc := range state.ToolCallAcc {
-			writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]interface{}{
+			writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
 				"type":      "response.function_call_arguments.done",
 				"call_id":   tc.CallID,
 				"name":      tc.Name,
 				"arguments": tc.Arguments,
 			})
-			writeResponsesSSE(&out, "response.output_item.done", map[string]interface{}{
+			writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 				"type": "response.output_item.done",
-				"item": map[string]interface{}{
+				"item": map[string]any{
 					"type":    "function_call",
 					"id":      tc.CallID,
 					"call_id": tc.CallID,
@@ -698,21 +868,54 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 		state.TextBlockOpen = false
 
 	case "message_delta":
-		// Extract usage info (used by message_stop)
 
 	case "message_stop":
 		if state.TextContent != "" {
-			writeResponsesSSE(&out, "response.output_text.done", map[string]interface{}{
+			if state.ContentPartSent {
+				writeResponsesSSE(&out, "response.content_part.done", map[string]any{
+					"type":          "response.content_part.done",
+					"output_index":  0,
+					"content_index": 0,
+					"item_id":       state.ResponseID + "_msg_0",
+					"part": map[string]any{
+						"type":        "output_text",
+						"text":        state.TextContent,
+						"annotations": []any{},
+					},
+				})
+			}
+			writeResponsesSSE(&out, "response.output_text.done", map[string]any{
 				"type": "response.output_text.done",
 				"text": state.TextContent,
 			})
 		}
-		writeResponsesSSE(&out, "response.completed", map[string]interface{}{
+		if state.MessageItemSent {
+			msgContent := []map[string]any{}
+			if state.TextContent != "" {
+				msgContent = append(msgContent, map[string]any{
+					"type":        "output_text",
+					"text":        state.TextContent,
+					"annotations": []any{},
+				})
+			}
+			writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+				"type":         "response.output_item.done",
+				"output_index": 0,
+				"item": map[string]any{
+					"type":    "message",
+					"id":      state.ResponseID + "_msg_0",
+					"status":  "completed",
+					"role":    "assistant",
+					"content": msgContent,
+				},
+			})
+		}
+		writeResponsesSSE(&out, "response.completed", map[string]any{
 			"type": "response.completed",
-			"response": map[string]interface{}{
+			"response": map[string]any{
 				"id":     state.ResponseID,
 				"status": "completed",
-				"usage":  map[string]interface{}{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+				"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
 			},
 		})
 
