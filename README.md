@@ -85,6 +85,12 @@ curl -fsSL https://raw.githubusercontent.com/Ladbaby/Tresor/main/setup.sh | bash
 
 This installs the binary to `~/.local/bin/tresor` and creates a config skeleton at `~/.config/tresor/config.yaml`.
 
+To include pre-releases, pass `--prerelease` or set `TRESOR_PRERELEASE=true`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ladbaby/Tresor/main/setup.sh | bash -s -- --prerelease
+```
+
 **Windows** — download a release binary manually from [GitHub Releases](https://github.com/Ladbaby/Tresor/releases).
 
 ### Configure
