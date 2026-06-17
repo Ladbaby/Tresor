@@ -1574,7 +1574,7 @@ document.getElementById('new-group-form').addEventListener('submit', async (e) =
                     downstream_id: downstreamId,
                     output_model_id: models[i],
                     is_active: i === 0,
-                    
+                    is_regex: isRegex,
                 }),
             });
         }
