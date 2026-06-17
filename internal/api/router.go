@@ -43,16 +43,12 @@ type Router struct {
 
 // NewRouter creates an admin API router with all API endpoints.
 func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger, cfg *config.AppConfig, version, buildTime string) *Router {
-	am := middleware.NewAuthMiddleware(cfg.AdminPassword)
-	if cfg.JWTSecret != nil {
-		am = middleware.NewAuthMiddlewareWithSecret(cfg.AdminPassword, cfg.JWTSecret)
-	}
 	return &Router{
 		store:     s,
 		engine:    eng,
 		logger:    logger,
 		cfg:       cfg,
-		authMW:    am,
+		authMW:    middleware.NewAuthMiddleware(cfg.AdminPassword),
 		version:   version,
 		buildTime: buildTime,
 	}
@@ -95,7 +91,6 @@ func (r *Router) Handler() http.Handler {
 	// Public endpoints — no auth required
 	mux.HandleFunc("/api/auth/status", r.handleAuthStatus)
 	mux.HandleFunc("/api/auth/login", r.handleAuthLogin)
-	mux.HandleFunc("/api/auth/refresh", r.handleAuthRefresh)
 	mux.HandleFunc("/api/auth/logout", r.handleAuthLogout)
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -178,21 +173,20 @@ func (r *Router) handleAuthStatus(w http.ResponseWriter, req *http.Request) {
 	})
 }
 
-// handleAuthLogin verifies the admin password and issues a JWT token.
-// Expects a JSON body: {"password": "..."}. Returns {"ok": true, "token": "<jwt>"} on success, 401 on failure.
-// Sets the auth cookie for SSE EventSource connections.
+// handleAuthLogin verifies the admin password and issues a session token.
+// Expects a JSON body: {"password": "..."}. Returns {"ok": true} on success, 401 on failure.
+// Sets the auth cookie (persistent, 365-day expiry) for all subsequent requests.
 func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if r.cfg.AdminPassword == "" {
-		token, _ := r.authMW.SignToken("admin")
+		token := r.authMW.GenerateToken()
 		setAuthCookie(w, token)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"ok":    true,
-			"token": token,
+			"ok": true,
 		})
 		return
 	}
@@ -215,65 +209,22 @@ func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	token, err := r.authMW.SignToken("admin")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate token")
-		return
-	}
-
+	token := r.authMW.GenerateToken()
 	setAuthCookie(w, token)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ok":    true,
-		"token": token,
+		"ok": true,
 	})
 }
 
-// handleAuthRefresh issues a new JWT token if the current token is valid.
-// Updates the auth cookie with the new token. Clears the cookie on failure.
-func (r *Router) handleAuthRefresh(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if r.cfg.AdminPassword == "" {
-		token, _ := r.authMW.SignToken("admin")
-		setAuthCookie(w, token)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"ok":    true,
-			"token": token,
-		})
-		return
-	}
-
-	// Accept token from Bearer header or auth cookie
-	if !r.authMW.Authenticate(req) {
-		clearAuthCookie(w)
-		writeError(w, http.StatusUnauthorized, "invalid or expired token")
-		return
-	}
-
-	token, err := r.authMW.SignToken("admin")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate token")
-		return
-	}
-
-	setAuthCookie(w, token)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ok":    true,
-		"token": token,
-	})
-}
-
-// handleAuthLogout clears the auth cookie. Always accessible (no auth required).
+// handleAuthLogout clears the auth cookie and invalidates the session token.
+// Always accessible (no auth required).
 func (r *Router) handleAuthLogout(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	r.authMW.ClearToken()
 	clearAuthCookie(w)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})

@@ -94,6 +94,99 @@ func TestAuthMiddleware_Protect_BadFormat_Rejects(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_SessionToken_BearerHeader(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	// Generate a session token (simulates login)
+	token := mw.GenerateToken()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 with valid session token, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_SessionToken_Cookie(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	// Generate a session token (simulates login)
+	token := mw.GenerateToken()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/stream", nil)
+	req.AddCookie(&http.Cookie{Name: AuthCookie, Value: token})
+	w := httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 with valid session token cookie, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_SessionToken_Invalid_Rejects(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	// Generate a token, then try with a different one
+	mw.GenerateToken()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer wrong_token_value")
+	w := httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with invalid session token, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_ClearToken_InvalidatesSession(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	token := mw.GenerateToken()
+	mw.ClearToken() // logout
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 after token cleared, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_SetPassword_ClearsToken(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	token := mw.GenerateToken()
+
+	// Change password
+	mw.SetPassword("new-password")
+
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	// Old token should no longer work
+	req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 after password change, got %d", w.Code)
+	}
+}
+
 func TestExtractClientIP_RemoteAddrNormalization(t *testing.T) {
 	// Non-localhost: strip port, ignore forwarded headers
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

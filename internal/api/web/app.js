@@ -46,12 +46,11 @@ document.querySelectorAll('.tab').forEach(tab => {
 
 // ---- Auth state ----
 let authEnabled = false;
-let authToken = sessionStorage.getItem('tresor_token') || null;
-let tokenRefreshTimer = null;
 
 /**
  * Check whether the server requires authentication, then decide
  * whether to show the login screen or the dashboard.
+ * Auth is cookie-based — the browser sends cookies automatically.
  */
 async function checkAuth() {
     try {
@@ -68,23 +67,20 @@ async function checkAuth() {
         return;
     }
 
-    // Auth is enabled: if we have a stored token, try using it
-    if (authToken) {
-        // Verify the token still works by hitting a protected endpoint
-        try {
-            await api('/rules');
-            // Set the auth cookie for SSE connections (token was restored from sessionStorage)
-            setAuthCookie();
+    // Auth is enabled: verify the cookie still works by hitting a protected endpoint
+    try {
+        const resp = await fetch(API_BASE + '/rules', {
+            credentials: 'same-origin',
+        });
+        if (resp.ok) {
             showDashboardWithDefaultTab();
             return;
-        } catch {
-            // Token expired or invalid — fall through to login
-            authToken = null;
-            sessionStorage.removeItem('tresor_token');
-            clearAuthCookie();
         }
+    } catch {
+        // Network error — show login anyway
     }
 
+    // Cookie invalid or missing — show login
     showLogin();
 }
 
@@ -96,8 +92,6 @@ function showLogin() {
 function showDashboard() {
     document.getElementById('login-view').classList.add('hidden');
     document.getElementById('dashboard-view').classList.remove('hidden');
-    // Start periodic token refresh
-    startTokenRefresh();
     // Load all tabs' data
     loadRules();
     loadDownstreams();
@@ -123,14 +117,10 @@ async function showDashboardWithDefaultTab() {
 }
 
 function logout() {
-    stopTokenRefresh();
-    authToken = null;
-    sessionStorage.removeItem('tresor_token');
-    clearAuthCookie();
     // Close SSE connection if active
     if (logSSE) { logSSE.close(); logSSE = null; }
-    // Notify the backend to clear the server-side cookie
-    fetch(API_BASE + '/auth/logout', { method: 'POST' }).catch(function () { });
+    // Notify the backend to invalidate the session (clears the cookie)
+    fetch(API_BASE + '/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(function () { });
     showLogin();
     // Clear the password field
     const pw = document.getElementById('login-password');
@@ -150,16 +140,13 @@ document.getElementById('login-form').addEventListener('submit', async function 
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password: password }),
+            credentials: 'same-origin',
         });
         if (!resp.ok) {
             const errData = await resp.json().catch(() => ({}));
             throw new Error(errData.error || 'Login failed');
         }
-        const data = await resp.json();
-        // Store the JWT token from the server response (not the raw password)
-        authToken = data.token || password;
-        sessionStorage.setItem('tresor_token', authToken);
-        setAuthCookie();
+        // Server sets the auth cookie via Set-Cookie header (no token in response body)
         showDashboardWithDefaultTab();
     } catch (err) {
         errorEl.textContent = err.message || 'Invalid password';
@@ -172,99 +159,38 @@ document.getElementById('btn-logout').addEventListener('click', logout);
 
 // ---- API helpers ----
 /**
- * Build authorization headers for fetch() calls.
+ * Build headers for fetch() calls. Auth is handled via cookies
+ * (sent automatically with credentials: 'same-origin').
  */
 function buildAuthHeaders() {
-    const headers = { 'Content-Type': 'application/json' };
-    if (authToken) {
-        headers['Authorization'] = 'Bearer ' + authToken;
-    }
-    return headers;
+    return { 'Content-Type': 'application/json' };
 }
 
-/**
- * Set the auth cookie for SSE EventSource connections (which cannot set custom headers).
- * The cookie value is the JWT token, scoped to /api/ path.
- */
-function setAuthCookie() {
-    if (!authToken) return;
-    document.cookie = 'tresor_token=' + encodeURIComponent(authToken) + '; Path=/api/; SameSite=Lax; Max-Age=86400';
-}
-
-/**
- * Clear the auth cookie on logout.
- */
-function clearAuthCookie() {
-    document.cookie = 'tresor_token=; Path=/api/; SameSite=Lax; Max-Age=0';
-}
-
-/**
- * Refresh the JWT token. Returns true on success, false on failure.
- */
-async function refreshAuthToken() {
-    if (!authToken) return false;
-    try {
-        const resp = await fetch(API_BASE + '/auth/refresh', {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + authToken },
-        });
-        if (!resp.ok) return false;
-        const data = await resp.json();
-        if (!data.token) return false;
-        authToken = data.token;
-        sessionStorage.setItem('tresor_token', authToken);
-        setAuthCookie();
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Start a periodic token refresh (every 3 minutes, JWT expires at 5 minutes).
- */
-function startTokenRefresh() {
-    stopTokenRefresh();
-    if (authToken && authEnabled) {
-        tokenRefreshTimer = setInterval(async function () {
-            if (!await refreshAuthToken()) logout();
-        }, 3 * 60 * 1000);
-    }
-}
-
-/**
- * Stop the periodic token refresh.
- */
-function stopTokenRefresh() {
-    if (tokenRefreshTimer) {
-        clearInterval(tokenRefreshTimer);
-        tokenRefreshTimer = null;
-    }
-}
 async function api(path, options = {}) {
     const url = API_BASE + path;
-    const headers = buildAuthHeaders();
+    const headers = { ...buildAuthHeaders(), ...options.headers };
     const resp = await fetch(url, {
-        headers: { ...headers, ...options.headers },
+        headers: headers,
+        credentials: 'same-origin',
         ...options,
     });
-    // If we get 401 and auth is enabled, try refreshing the token once
-    if (resp.status === 401 && authEnabled && authToken) {
-        const refreshed = await refreshAuthToken();
-        if (refreshed) {
-            const newHeaders = buildAuthHeaders();
-            const resp2 = await fetch(url, {
-                headers: { ...newHeaders, ...options.headers },
-                ...options,
-            });
-            if (!resp2.ok) {
-                const err = await resp2.json().catch(() => ({ error: resp2.statusText }));
-                throw new Error(err.error || resp2.statusText);
-            }
-            return resp2.json();
+    // If we get 401 and auth is enabled, the cookie may have been invalidated
+    // (e.g., password changed). Try once more; if it still fails, logout.
+    if (resp.status === 401 && authEnabled) {
+        const resp2 = await fetch(url, {
+            headers: headers,
+            credentials: 'same-origin',
+            ...options,
+        });
+        if (resp2.status === 401) {
+            logout();
+            return;
         }
-        // Refresh failed — logout
-        logout();
+        if (!resp2.ok) {
+            const err = await resp2.json().catch(() => ({ error: resp2.statusText }));
+            throw new Error(err.error || resp2.statusText);
+        }
+        return resp2.json();
     }
     if (!resp.ok) {
         const err = await resp.json().catch(() => ({ error: resp.statusText }));
