@@ -324,6 +324,259 @@ func findEvents(events []sseEvent, eventType string) []sseEvent {
 	return result
 }
 
+// TestOpenAIResponsesStreaming verifies that auto-translation from
+// OpenAI Responses API format to Chat Completions format works correctly
+// for streaming (SSE) responses, and that no duplicate termination events
+// are emitted (the "text part ... not found" bug).
+//
+// Scenario: Client sends Responses API streaming request to Tresor.
+// Tresor auto-translates to Chat Completions format, sends to downstream,
+// receives OpenAI Chat Completions SSE, transforms back to Responses API SSE.
+func TestOpenAIResponsesStreaming(t *testing.T) {
+	// --- Step 1: Start a mock OpenAI Chat Completions server ---
+	mockPort := 9290
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		respID := "chatcmpl-responses-test"
+		model := "gpt-4o"
+
+		// Emit content chunks
+		words := []string{"Hello", " ", "world", "!"}
+		for i, word := range words {
+			delta := map[string]string{"content": word}
+			if i == 0 {
+				delta = map[string]string{"role": "assistant", "content": word}
+			}
+			chunk := map[string]interface{}{
+				"id":      respID,
+				"object":  "chat.completion.chunk",
+				"model":   model,
+				"choices": []map[string]interface{}{
+					{"index": 0, "delta": delta},
+				},
+			}
+			writeMockSSE(w, chunk)
+			flusher.Flush()
+		}
+
+		// Emit finish chunk (this triggers termination events)
+		finishReason := "stop"
+		chunkLast := map[string]interface{}{
+			"id":      respID,
+			"object":  "chat.completion.chunk",
+			"model":   model,
+			"choices": []map[string]interface{}{
+				{"index": 0, "delta": map[string]string{}, "finish_reason": finishReason},
+			},
+		}
+		writeMockSSE(w, chunkLast)
+		flusher.Flush()
+
+		// Emit [DONE] marker (this used to cause duplicate termination)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+	server := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", mockPort), Handler: mux}
+	go server.ListenAndServe()
+	defer server.Close()
+	waitForPort(t, mockPort)
+
+	// --- Step 2: Configure Tresor ---
+	tmpDir, err := os.MkdirTemp("", "tresor-e2e-resp-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+
+	// Downstream with openai format (not openai_responses) → auto-translation
+	// should insert Responses2OpenAI plugin.
+	cfgContent := fmt.Sprintf(`
+bind_addr: 127.0.0.1:%d
+db_path: %s
+
+downstreams:
+  - id: mock-chat
+    name: Mock Chat
+    api_formats: [openai]
+    base_url: http://127.0.0.1:%d/v1
+    api_key: sk-mock-key
+    output_model_ids:
+      - gpt-4o
+`, tresorPort, dbPath, mockPort)
+
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// --- Step 3: Start Tresor daemon ---
+	binary, err := filepath.Abs("../tresor.exe")
+	if err != nil {
+		t.Fatalf("Failed to resolve binary path: %v", err)
+	}
+
+	cmd := exec.Command(binary, "run", "--config", cfgPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start daemon: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	time.Sleep(2 * time.Second)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/health", tresorPort))
+	if err != nil || resp.StatusCode != 200 {
+		cmd.Process.Kill()
+		t.Fatalf("Tresor not ready: err=%v, status=%d", err, safeStatus(resp))
+	}
+	resp.Body.Close()
+
+	// --- Step 4: Send Responses API streaming request ---
+	reqBody := map[string]interface{}{
+		"model":      "gpt-4o",
+		"input":      "Say hello briefly",
+		"stream":     true,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req, _ := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/v1/responses", tresorPort),
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	t.Logf("Response status: %d", resp.StatusCode)
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected 200, got %d: %s", resp.StatusCode, bodyBytes)
+	}
+
+	// --- Step 5: Parse SSE and verify Responses API format ---
+	scanner := bufio.NewScanner(resp.Body)
+	var events []sseEvent
+	var curEvent string
+	var curData strings.Builder
+
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if line == "" {
+			if curData.Len() > 0 {
+				events = append(events, sseEvent{Type: curEvent, Data: curData.String()})
+				curData.Reset()
+			}
+			curEvent = ""
+			continue
+		}
+		if strings.HasPrefix(line, "event: ") {
+			curEvent = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			curData.WriteString(strings.TrimPrefix(line, "data: "))
+		}
+	}
+	if curData.Len() > 0 {
+		events = append(events, sseEvent{Type: curEvent, Data: curData.String()})
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("Scanner error: %v", err)
+	}
+
+	t.Logf("Received %d SSE events", len(events))
+	for i, e := range events {
+		t.Logf("  Event %d: type=%q, data=%s", i, e.Type, truncate(e.Data, 80))
+	}
+
+	if len(events) == 0 {
+		t.Fatal("Expected at least 1 SSE event, got 0")
+	}
+
+	// Collect typed events (skip empty event: lines)
+	var typed []sseEvent
+	for _, e := range events {
+		if e.Type != "" {
+			typed = append(typed, e)
+		}
+	}
+
+	// Verify Responses API event sequence
+	eventTypes := make([]string, len(typed))
+	for i, e := range typed {
+		eventTypes[i] = e.Type
+	}
+	t.Logf("Typed events: %v", eventTypes)
+
+	// Must have required events
+	requireEvents := []string{
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.content_part.added",
+		"response.output_text.delta",
+		"response.output_text.done",
+		"response.output_item.done",
+		"response.completed",
+	}
+	for _, required := range requireEvents {
+		if findEvent(typed, required) == nil {
+			t.Errorf("Required event %q not found in stream", required)
+		}
+	}
+
+	// CRITICAL: Count duplicates — there must be exactly 1 of each
+	// termination event (output_item.done and completed).
+	// Duplicates cause the "text part ... not found" error in AI SDK.
+	for _, et := range []string{"response.output_item.done", "response.completed"} {
+		count := 0
+		for _, e := range typed {
+			if e.Type == et {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("Expected exactly 1 %q event, got %d (duplicate termination bug)", et, count)
+		}
+	}
+
+	t.Log("=== OpenAI Responses streaming auto-translation verified ===")
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+func waitForPort(t *testing.T, port int) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			conn.Close()
+			return
+		}
+		select {
+		case <-timeout:
+			t.Fatalf("Port :%d not ready", port)
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
 func safeStatus(resp *http.Response) int {
 	if resp == nil {
 		return 0

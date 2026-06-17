@@ -421,8 +421,11 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 				}
 
 				writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
-					"type":  "response.output_text.delta",
-					"delta": choice.Delta.Content,
+					"type":          "response.output_text.delta",
+					"delta":         choice.Delta.Content,
+					"item_id":       id + "_msg_0",
+					"output_index":  0,
+					"content_index": 0,
 				})
 			}
 
@@ -480,8 +483,11 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 						})
 					}
 					writeResponsesSSE(&out, "response.output_text.done", map[string]any{
-						"type": "response.output_text.done",
-						"text": textContent,
+						"type":          "response.output_text.done",
+						"text":          textContent,
+						"item_id":       id + "_msg_0",
+						"output_index":  0,
+						"content_index": 0,
 					})
 				}
 				if msgItemSent {
@@ -536,6 +542,7 @@ type r2oStreamState struct {
 	ResponseID      string
 	Model           string
 	Created         bool
+	Terminated      bool // set when finish-reason events have been emitted
 	TextContent     string
 	MessageItemSent bool
 	ContentPartSent bool
@@ -549,8 +556,11 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	}
 	defer func() { ctx.Variables["r2o_stream"] = state }()
 
-	// Handle [DONE] marker — no output, engine terminates stream
+	// Handle [DONE] marker — if already terminated by finish reason, skip.
 	if string(bytes.TrimSpace(chunk.Data)) == "[DONE]" {
+		if state.Terminated {
+			return engine.SSEChunk{}, nil
+		}
 		if state.Created {
 			var out bytes.Buffer
 			if state.TextContent != "" {
@@ -568,8 +578,11 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					})
 				}
 				writeResponsesSSE(&out, "response.output_text.done", map[string]any{
-					"type": "response.output_text.done",
-					"text": state.TextContent,
+					"type":          "response.output_text.done",
+					"text":          state.TextContent,
+					"item_id":       state.ResponseID + "_msg_0",
+					"output_index":  0,
+					"content_index": 0,
 				})
 			}
 			if state.MessageItemSent {
@@ -676,8 +689,11 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			}
 
 			writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
-				"type":  "response.output_text.delta",
-				"delta": choice.Delta.Content,
+				"type":          "response.output_text.delta",
+				"delta":         choice.Delta.Content,
+				"item_id":       state.ResponseID + "_msg_0",
+				"output_index":  0,
+				"content_index": 0,
 			})
 		}
 
@@ -748,8 +764,11 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					})
 				}
 				writeResponsesSSE(&out, "response.output_text.done", map[string]any{
-					"type": "response.output_text.done",
-					"text": state.TextContent,
+					"type":          "response.output_text.done",
+					"text":          state.TextContent,
+					"item_id":       state.ResponseID + "_msg_0",
+					"output_index":  0,
+					"content_index": 0,
 				})
 			}
 			// Close tool call items
@@ -800,6 +819,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
 				},
 			})
+			state.Terminated = true
 		}
 	}
 

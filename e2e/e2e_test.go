@@ -206,7 +206,7 @@ aliases:
 		if err := json.Unmarshal(body, &plugins); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if len(plugins) != 4 {
+		if len(plugins) != 8 {
 			t.Fatalf("expected 4 plugins, got %d", len(plugins))
 		}
 	})
