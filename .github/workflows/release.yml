@@ -15,6 +15,14 @@ on:
       version:
         description: "Release version tag (e.g. v0.1.0)"
         required: true
+      release_type:
+        description: "Release type"
+        required: true
+        type: choice
+        options:
+          - Latest
+          - Pre-release
+        default: Latest
 
 env:
   GO_VERSION: "1.26"
@@ -169,6 +177,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.version }}
+          prerelease: ${{ github.event.inputs.release_type == 'Pre-release' }}
           files: |
             dist/*
           body_path: release.md
