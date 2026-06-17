@@ -286,17 +286,18 @@ async function loadRules() {
                 const inputFmts = r.match_format || [];
                 const dsFmts = r.match_downstream_format || [];
                 const dsIds = r.match_downstreams || [];
+                const formatLabels = { openai: 'OpenAI', openai_responses: 'OpenAI Responses', anthropic: 'Anthropic' };
 
                 // Input format badges (blue for openai, amber for anthropic)
                 inputFmts.forEach(f => {
-                    const cls = f === 'openai' ? 'format-openai' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
-                    badges.push(`<span class="format-badge ${cls}">in:${esc(f)}</span>`);
+                    const cls = f === 'openai' ? 'format-openai' : f === 'openai_responses' ? 'format-openai_responses' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
+                    badges.push(`<span class="format-badge ${cls}">in:${esc(formatLabels[f] || f)}</span>`);
                 });
 
                 // Downstream format badges (prefixed to distinguish from input)
                 dsFmts.forEach(f => {
-                    const cls = f === 'openai' ? 'format-openai' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
-                    badges.push(`<span class="format-badge ${cls}">out:${esc(f)}</span>`);
+                    const cls = f === 'openai' ? 'format-openai' : f === 'openai_responses' ? 'format-openai_responses' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
+                    badges.push(`<span class="format-badge ${cls}">out:${esc(formatLabels[f] || f)}</span>`);
                 });
 
                 // Downstream ID badges (grey)
@@ -805,9 +806,10 @@ async function loadDownstreams() {
             : ds.map(d => {
                 const models = (d.output_model_ids || []).map(m => esc(m));
                 const formats = d.api_formats || [];
+                const formatLabels = { openai: 'OpenAI', openai_responses: 'OpenAI Responses', anthropic: 'Anthropic' };
                 const formatBadges = formats.map(f => {
-                    const fClass = f === 'openai' ? 'format-openai' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
-                    return `<span class="format-badge ${fClass}">${esc(f.charAt(0).toUpperCase() + f.slice(1))}</span>`;
+                    const fClass = f === 'openai' ? 'format-openai' : f === 'openai_responses' ? 'format-openai_responses' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
+                    return `<span class="format-badge ${fClass}">${esc(formatLabels[f] || f)}</span>`;
                 }).join(' ');
                 const formatCell = formatBadges || '<span class="format-badge format-unknown">—</span>';
                 return `

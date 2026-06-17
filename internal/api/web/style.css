@@ -954,10 +954,12 @@ select option:checked {
     text-transform: uppercase;
 }
 .format-openai { background: #1c3d7a; color: #58a6ff; }
+.format-openai_responses { background: #1c3d7a; color: #58a6ff; }
 .format-anthropic { background: #4a2d00; color: #d29922; }
 .format-unknown { background: var(--bg-tertiary); color: var(--text-secondary); }
 
 [data-theme="light"] .format-openai { background: #ddf0ff; color: #0969da; }
+[data-theme="light"] .format-openai_responses { background: #ddf0ff; color: #0969da; }
 [data-theme="light"] .format-anthropic { background: #fff8c2; color: #9e6a0c; }
 
 /* Format checkbox group */

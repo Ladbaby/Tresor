@@ -32,6 +32,14 @@ downstreams:
       - gpt-4o-mini
       - gpt-3.5-turbo
 
+  - id: openai-responses
+    name: OpenAI Responses
+    api_formats: [openai_responses]
+    base_url: https://api.openai.com/v1
+    api_key: ""                          # Set your API key here
+    output_model_ids:                    # Known output models for this provider
+      - gpt-4o-responses
+
   - id: anthropic
     name: Anthropic
     api_formats: [anthropic]
