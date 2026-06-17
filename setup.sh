@@ -8,8 +8,21 @@
 #   curl -fsSL https://raw.githubusercontent.com/Ladbaby/Tresor/main/setup.sh | bash
 #   # or
 #   ./setup.sh
+#   # include pre-releases:
+#   ./setup.sh --prerelease
 
 set -euo pipefail
+
+# ── Flags ──────────────────────────────────────────────────────────────
+INCLUDE_PRERELEASE=false
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --prerelease) INCLUDE_PRERELEASE=true; shift ;;
+        *) shift ;;
+    esac
+done
+# Allow env var override: TRESOR_PRERELEASE=true
+[ "${TRESOR_PRERELEASE:-false}" = "true" ] && INCLUDE_PRERELEASE=true
 
 # ── Constants ──────────────────────────────────────────────────────────
 REPO="Ladbaby/Tresor"
@@ -63,19 +76,28 @@ if [ -n "${TRESOR_VERSION:-}" ]; then
     ok "Using pinned version: $TRESOR_VERSION"
     VERSION="$TRESOR_VERSION"
 else
-    info "Detecting latest release..."
-
-    if command -v curl >/dev/null 2>&1; then
-        LATEST=$(curl -fsSL "$GITHUB_API") || fail "Cannot fetch release info from $GITHUB_API. Check your network connection, DNS, and TLS certificates (install ca-certificates if needed)."
+    # Use /releases endpoint (includes prereleases) when --prerelease flag is set
+    if [ "$INCLUDE_PRERELEASE" = "true" ]; then
+        RELEASE_API="https://api.github.com/repos/$REPO/releases"
+        info "Detecting latest release (including pre-releases)..."
     else
-        LATEST=$(wget -q -O - "$GITHUB_API") || fail "Cannot fetch release info from $GITHUB_API. Check your network connection."
+        RELEASE_API="$GITHUB_API"
+        info "Detecting latest release..."
     fi
 
-    # Extract tag_name (e.g. "v0.1.0")
+    if command -v curl >/dev/null 2>&1; then
+        LATEST=$(curl -fsSL "$RELEASE_API") || fail "Cannot fetch release info from $RELEASE_API. Check your network connection, DNS, and TLS certificates (install ca-certificates if needed)."
+    else
+        LATEST=$(wget -q -O - "$RELEASE_API") || fail "Cannot fetch release info from $RELEASE_API. Check your network connection."
+    fi
+
+    # /releases returns a JSON array — pick the first entry
+    # /releases/latest returns a single JSON object
+    # In both cases, extract tag_name from the first occurrence
     VERSION=$(printf '%s' "$LATEST" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
     [ -z "$VERSION" ] && fail "Could not determine latest release version."
 
-    ok "Latest release: $VERSION"
+    ok "Latest release: $VERSION${INCLUDE_PRERELEASE:+ (pre-release)}"
 fi
 
 # ── Download ───────────────────────────────────────────────────────────
