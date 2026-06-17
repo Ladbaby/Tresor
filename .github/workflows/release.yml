@@ -1,14 +1,13 @@
-# Tresor CI/CD
-#
-# - push to main / PR → run tests only (no cross-compile)
-# - workflow_dispatch with version → build binaries + publish GitHub Release
+# Tresor Release
+# Triggered manually via workflow_dispatch with a version tag.
+# Builds cross-platform binaries and publishes a GitHub Release.
 #
 # Targets:
 #   Windows amd64 (.exe + .zip)
 #   Linux   amd64, arm64 (.gz)
 #   macOS   amd64, arm64 (.gz)
 
-name: Build
+name: Release
 
 on:
   workflow_dispatch:
@@ -16,25 +15,11 @@ on:
       version:
         description: "Release version tag (e.g. v0.1.0)"
         required: true
-  push:
-    paths-ignore:
-      - "docs/**"
-      - "README.md"
-      - "*.md"
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
-
-concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
 
 env:
   GO_VERSION: "1.26"
 
-# ── Test (always on push / PR) ──────────────────────────────────────
+# ── Test (run before building) ──────────────────────────────────────
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -52,10 +37,9 @@ jobs:
           go clean -testcache
           go test ./...
 
-  # ── Build binaries (release only) ─────────────────────────────────
+  # ── Build binaries ────────────────────────────────────────────────
   build:
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
     needs: [test]
     strategy:
       matrix:
@@ -118,11 +102,10 @@ jobs:
             tresor-*.gz
           retention-days: 7
 
-  # ── Publish GitHub Release (release only) ─────────────────────────
+  # ── Publish GitHub Release ────────────────────────────────────────
   release:
     permissions:
       contents: write
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
     needs: [build, test]
     runs-on: ubuntu-latest
     steps:

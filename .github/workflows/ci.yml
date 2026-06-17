@@ -1,0 +1,40 @@
+# Tresor CI
+# Runs tests on every push to main and on pull requests.
+
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+      - "*.md"
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run tests
+        run: |
+          go clean -testcache
+          go test ./...
