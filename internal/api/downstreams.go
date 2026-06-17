@@ -52,7 +52,7 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = r.writeConfig()
+		r.requestConfigWrite()
 		ds.APIKey = "***"
 		writeJSONWithWarning(w, http.StatusCreated, ds, proxy.IsBareIP(ds.BaseURL))
 
@@ -157,7 +157,7 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = r.writeConfig()
+		r.requestConfigWrite()
 		ds.APIKey = "***"
 		writeJSONWithWarning(w, http.StatusOK, ds, proxy.IsBareIP(ds.BaseURL))
 
@@ -166,7 +166,7 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = r.writeConfig()
+		r.requestConfigWrite()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 
 	default:
@@ -217,7 +217,7 @@ func (r *Router) handleDownstreamModels(w http.ResponseWriter, req *http.Request
 	if ds.APIKey != "" {
 		ds.APIKey = "***"
 	}
-	_ = r.writeConfig()
+	r.requestConfigWrite()
 	writeJSON(w, http.StatusOK, ds)
 }
 
@@ -251,7 +251,7 @@ func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Re
 	if ds.APIKey != "" {
 		ds.APIKey = "***"
 	}
-	_ = r.writeConfig()
+	r.requestConfigWrite()
 	writeJSON(w, http.StatusOK, ds)
 }
 

@@ -1,15 +1,29 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"tresor/internal/config"
 	"tresor/internal/engine"
 	"tresor/internal/middleware"
 	"tresor/internal/store"
 )
+
+// setAuthCookie is a convenience wrapper for the middleware cookie function.
+func setAuthCookie(w http.ResponseWriter, token string) {
+	middleware.SetAuthCookie(w, token)
+}
+
+// clearAuthCookie is a convenience wrapper for the middleware cookie function.
+func clearAuthCookie(w http.ResponseWriter) {
+	middleware.ClearAuthCookie(w)
+}
 
 // Router holds dependencies for the admin API handlers.
 type Router struct {
@@ -20,13 +34,18 @@ type Router struct {
 	authMW    *middleware.AuthMiddleware
 	version   string
 	buildTime string
+
+	// Config write debounce: delays YAML write-back to avoid excessive disk I/O
+	// when multiple mutations occur in rapid succession.
+	configDebounceTimer *time.Timer
+	configDebounceMu    sync.Mutex
 }
 
 // NewRouter creates an admin API router with all API endpoints.
 func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger, cfg *config.AppConfig, version, buildTime string) *Router {
 	am := middleware.NewAuthMiddleware(cfg.AdminPassword)
 	if cfg.JWTSecret != nil {
-		am.SetSecret(cfg.JWTSecret)
+		am = middleware.NewAuthMiddlewareWithSecret(cfg.AdminPassword, cfg.JWTSecret)
 	}
 	return &Router{
 		store:     s,
@@ -39,6 +58,36 @@ func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger,
 	}
 }
 
+// Stop cleans up background goroutines (rate limiter, debounce timer).
+func (r *Router) Stop() {
+	if r.authMW != nil {
+		r.authMW.Stop()
+	}
+	r.configDebounceMu.Lock()
+	if r.configDebounceTimer != nil {
+		r.configDebounceTimer.Stop()
+	}
+	r.configDebounceMu.Unlock()
+}
+
+// requestConfigWrite schedules a debounced YAML write-back.
+// Subsequent calls within the debounce window reset the timer.
+func (r *Router) requestConfigWrite() {
+	r.configDebounceMu.Lock()
+	if r.configDebounceTimer != nil {
+		r.configDebounceTimer.Stop()
+	}
+	r.configDebounceTimer = time.AfterFunc(2*time.Second, func() {
+		if err := r.store.WriteConfig(r.cfg); err != nil {
+			log.Printf("warning: failed to write config YAML: %v", err)
+		}
+		r.configDebounceMu.Lock()
+		r.configDebounceTimer = nil
+		r.configDebounceMu.Unlock()
+	})
+	r.configDebounceMu.Unlock()
+}
+
 // Handler returns an http.Handler for the API routes only (under /api/).
 func (r *Router) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -47,6 +96,7 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("/api/auth/status", r.handleAuthStatus)
 	mux.HandleFunc("/api/auth/login", r.handleAuthLogin)
 	mux.HandleFunc("/api/auth/refresh", r.handleAuthRefresh)
+	mux.HandleFunc("/api/auth/logout", r.handleAuthLogout)
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
@@ -95,8 +145,6 @@ func (r *Router) Handler() http.Handler {
 			r.handleFetchModels(w, req)
 		case path == "config":
 			r.handleConfig(w, req)
-		case path == "log_level":
-			SetLogLevel(r.logger)(w, req)
 		case path == "logs/stream":
 			StreamLogs(r.logger)(w, req)
 		case path == "logs":
@@ -132,6 +180,7 @@ func (r *Router) handleAuthStatus(w http.ResponseWriter, req *http.Request) {
 
 // handleAuthLogin verifies the admin password and issues a JWT token.
 // Expects a JSON body: {"password": "..."}. Returns {"ok": true, "token": "<jwt>"} on success, 401 on failure.
+// Sets the auth cookie for SSE EventSource connections.
 func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -139,6 +188,7 @@ func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 	}
 	if r.cfg.AdminPassword == "" {
 		token, _ := r.authMW.SignToken("admin")
+		setAuthCookie(w, token)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"ok":    true,
@@ -155,7 +205,7 @@ func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if body.Password != r.cfg.AdminPassword {
+	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(r.cfg.AdminPassword)) != 1 {
 		// Record failed attempt; check if rate limited
 		if r.authMW.CheckRateLimit(middleware.ExtractClientIP(req)) {
 			writeError(w, http.StatusTooManyRequests, "too many login attempts, please wait")
@@ -171,6 +221,7 @@ func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	setAuthCookie(w, token)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"ok":    true,
@@ -179,7 +230,7 @@ func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 }
 
 // handleAuthRefresh issues a new JWT token if the current token is valid.
-// Only useful for SSE EventSource connections that can't set Authorization headers.
+// Updates the auth cookie with the new token. Clears the cookie on failure.
 func (r *Router) handleAuthRefresh(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -187,6 +238,7 @@ func (r *Router) handleAuthRefresh(w http.ResponseWriter, req *http.Request) {
 	}
 	if r.cfg.AdminPassword == "" {
 		token, _ := r.authMW.SignToken("admin")
+		setAuthCookie(w, token)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"ok":    true,
@@ -195,13 +247,9 @@ func (r *Router) handleAuthRefresh(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Require a valid token in the Authorization header to refresh
-	auth := req.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
-		writeError(w, http.StatusUnauthorized, "missing Bearer token")
-		return
-	}
+	// Accept token from Bearer header or auth cookie
 	if !r.authMW.Authenticate(req) {
+		clearAuthCookie(w)
 		writeError(w, http.StatusUnauthorized, "invalid or expired token")
 		return
 	}
@@ -212,11 +260,23 @@ func (r *Router) handleAuthRefresh(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	setAuthCookie(w, token)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"ok":    true,
 		"token": token,
 	})
+}
+
+// handleAuthLogout clears the auth cookie. Always accessible (no auth required).
+func (r *Router) handleAuthLogout(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	clearAuthCookie(w)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
 }
 
 // UDSHandler returns an http.Handler that serves both the API and Web UI (for Unix sockets).

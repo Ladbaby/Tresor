@@ -4,14 +4,14 @@ const API_BASE = '/api';
 
 // ---- Theme detection & toggle (session-only, no persistence) ----
 (function initTheme() {
-    var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
 
-    var toggle = document.getElementById('theme-toggle');
+    const toggle = document.getElementById('theme-toggle');
     if (toggle) {
         toggle.addEventListener('click', function () {
-            var current = document.documentElement.getAttribute('data-theme');
-            var next = current === 'dark' ? 'light' : 'dark';
+            const current = document.documentElement.getAttribute('data-theme');
+            const next = current === 'dark' ? 'light' : 'dark';
             document.documentElement.setAttribute('data-theme', next);
         });
     }
@@ -29,7 +29,7 @@ const API_BASE = '/api';
  */
 function activateTab(tabId) {
     tabId = tabId || 'downstreams';
-    var tabBtn = document.querySelector('.tab[data-tab="' + tabId + '"]');
+    let tabBtn = document.querySelector('.tab[data-tab="' + tabId + '"]');
     if (!tabBtn) tabId = 'downstreams';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
@@ -45,9 +45,9 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 // ---- Auth state ----
-var authEnabled = false;
-var authToken = sessionStorage.getItem('tresor_token') || null;
-var tokenRefreshTimer = null;
+let authEnabled = false;
+let authToken = sessionStorage.getItem('tresor_token') || null;
+let tokenRefreshTimer = null;
 
 /**
  * Check whether the server requires authentication, then decide
@@ -55,7 +55,7 @@ var tokenRefreshTimer = null;
  */
 async function checkAuth() {
     try {
-        var status = await fetch(API_BASE + '/auth/status').then(r => r.json());
+        const status = await fetch(API_BASE + '/auth/status').then(r => r.json());
         authEnabled = !!status.auth_enabled;
     } catch {
         // If the status endpoint fails, assume no auth (server might be old version)
@@ -73,12 +73,15 @@ async function checkAuth() {
         // Verify the token still works by hitting a protected endpoint
         try {
             await api('/rules');
+            // Set the auth cookie for SSE connections (token was restored from sessionStorage)
+            setAuthCookie();
             showDashboardWithDefaultTab();
             return;
         } catch {
             // Token expired or invalid — fall through to login
             authToken = null;
             sessionStorage.removeItem('tresor_token');
+            clearAuthCookie();
         }
     }
 
@@ -112,7 +115,7 @@ function showDashboard() {
 async function showDashboardWithDefaultTab() {
     showDashboard();
     try {
-        var cfg = await api('/config');
+        const cfg = await api('/config');
         activateTab(cfg.default_tab || 'downstreams');
     } catch {
         activateTab('downstreams');
@@ -123,34 +126,40 @@ function logout() {
     stopTokenRefresh();
     authToken = null;
     sessionStorage.removeItem('tresor_token');
+    clearAuthCookie();
+    // Close SSE connection if active
+    if (logSSE) { logSSE.close(); logSSE = null; }
+    // Notify the backend to clear the server-side cookie
+    fetch(API_BASE + '/auth/logout', { method: 'POST' }).catch(function () { });
     showLogin();
     // Clear the password field
-    var pw = document.getElementById('login-password');
+    const pw = document.getElementById('login-password');
     if (pw) pw.value = '';
 }
 
 // ---- Login form handler ----
 document.getElementById('login-form').addEventListener('submit', async function (e) {
     e.preventDefault();
-    var errorEl = document.getElementById('login-error');
+    const errorEl = document.getElementById('login-error');
     errorEl.classList.add('hidden');
     errorEl.textContent = '';
 
-    var password = document.getElementById('login-password').value;
+    const password = document.getElementById('login-password').value;
     try {
-        var resp = await fetch(API_BASE + '/auth/login', {
+        const resp = await fetch(API_BASE + '/auth/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password: password }),
         });
         if (!resp.ok) {
-            var errData = await resp.json().catch(() => ({}));
+            const errData = await resp.json().catch(() => ({}));
             throw new Error(errData.error || 'Login failed');
         }
-        var data = await resp.json();
+        const data = await resp.json();
         // Store the JWT token from the server response (not the raw password)
         authToken = data.token || password;
         sessionStorage.setItem('tresor_token', authToken);
+        setAuthCookie();
         showDashboardWithDefaultTab();
     } catch (err) {
         errorEl.textContent = err.message || 'Invalid password';
@@ -166,11 +175,27 @@ document.getElementById('btn-logout').addEventListener('click', logout);
  * Build authorization headers for fetch() calls.
  */
 function buildAuthHeaders() {
-    var headers = { 'Content-Type': 'application/json' };
+    const headers = { 'Content-Type': 'application/json' };
     if (authToken) {
         headers['Authorization'] = 'Bearer ' + authToken;
     }
     return headers;
+}
+
+/**
+ * Set the auth cookie for SSE EventSource connections (which cannot set custom headers).
+ * The cookie value is the JWT token, scoped to /api/ path.
+ */
+function setAuthCookie() {
+    if (!authToken) return;
+    document.cookie = 'tresor_token=' + encodeURIComponent(authToken) + '; Path=/api/; SameSite=Lax; Max-Age=86400';
+}
+
+/**
+ * Clear the auth cookie on logout.
+ */
+function clearAuthCookie() {
+    document.cookie = 'tresor_token=; Path=/api/; SameSite=Lax; Max-Age=0';
 }
 
 /**
@@ -179,15 +204,16 @@ function buildAuthHeaders() {
 async function refreshAuthToken() {
     if (!authToken) return false;
     try {
-        var resp = await fetch(API_BASE + '/auth/refresh', {
+        const resp = await fetch(API_BASE + '/auth/refresh', {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + authToken },
         });
         if (!resp.ok) return false;
-        var data = await resp.json();
+        const data = await resp.json();
         if (!data.token) return false;
         authToken = data.token;
         sessionStorage.setItem('tresor_token', authToken);
+        setAuthCookie();
         return true;
     } catch {
         return false;
@@ -201,7 +227,7 @@ function startTokenRefresh() {
     stopTokenRefresh();
     if (authToken && authEnabled) {
         tokenRefreshTimer = setInterval(async function () {
-            await refreshAuthToken();
+            if (!await refreshAuthToken()) logout();
         }, 3 * 60 * 1000);
     }
 }
@@ -844,7 +870,7 @@ function openDownstreamModal(ds) {
     document.getElementById('downstream-id').value = ds ? ds.id : '';
     document.getElementById('downstream-name').value = ds ? ds.name : '';
     document.getElementById('downstream-url').value = ds ? ds.base_url : '';
-    var keyInput = document.getElementById('downstream-key');
+    const keyInput = document.getElementById('downstream-key');
     keyInput.value = '';
 
     if (ds && ds.api_key && ds.api_key.length > 0) {
@@ -869,7 +895,7 @@ function openDownstreamModal(ds) {
 
     // Show fetch button for existing downstreams; for new downstreams,
     // show it once base_url and api_key are entered (via input handlers below).
-    var fetchBtn = document.getElementById('btn-fetch-models');
+    const fetchBtn = document.getElementById('btn-fetch-models');
     if (ds) {
         fetchBtn.style.display = '';
     } else {
@@ -881,10 +907,10 @@ function openDownstreamModal(ds) {
 
 	// For new downstreams, show/hide fetch button based on url + key fields
 	if (!ds) {
-		var urlInput = document.getElementById('downstream-url');
-		var keyInput = document.getElementById('downstream-key');
-		var fetchBtn = document.getElementById('btn-fetch-models');
-		var checkFetchReady = function () {
+		const urlInput = document.getElementById('downstream-url');
+		const keyInput = document.getElementById('downstream-key');
+		const fetchBtn = document.getElementById('btn-fetch-models');
+		const checkFetchReady = function () {
 			fetchBtn.style.display = (urlInput.value.trim() && keyInput.value.trim()) ? '' : 'none';
 		};
 		urlInput.addEventListener('input', checkFetchReady);
@@ -952,7 +978,7 @@ async function fetchDownstreamModels(id) {
             });
         }
     } catch (err) {
-        var msg = err.message || String(err);
+        let msg = err.message || String(err);
         // Strip the "fetch failed: " prefix from the server response for cleaner display
         if (msg.startsWith('fetch failed: ')) {
             msg = msg.substring('fetch failed: '.length);
@@ -1069,7 +1095,7 @@ function formatSchema(schema) {
 // ---- Modal close handlers ----
 document.querySelectorAll('.modal .close').forEach(btn => {
     btn.addEventListener('click', () => {
-        var modal = btn.closest('.modal');
+        const modal = btn.closest('.modal');
         cleanupModal(modal);
         modal.classList.add('hidden');
     });
@@ -1090,7 +1116,7 @@ document.querySelectorAll('.modal').forEach(m => {
  */
 function cleanupModal(modal) {
     if (modal._fetchListeners) {
-        var l = modal._fetchListeners;
+        const l = modal._fetchListeners;
         if (l.url && l.handler) l.url.removeEventListener('input', l.handler);
         if (l.key && l.handler) l.key.removeEventListener('input', l.handler);
         delete modal._fetchListeners;
@@ -1100,17 +1126,17 @@ function cleanupModal(modal) {
 // ---- Utility ----
 function esc(s) {
     if (s == null) return '';
-    const div = document.createElement('div');
-    div.textContent = String(s);
-    return div.innerHTML;
+    return String(s).replace(/[&<>"']/g, function(c) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
 }
 
 // Event delegation for rule table buttons (replaces inline onclick)
 document.getElementById('rules-body').addEventListener('click', function (e) {
-    var btn = e.target.closest('.rule-edit-btn, .rule-toggle-btn, .rule-delete-btn');
+    const btn = e.target.closest('.rule-edit-btn, .rule-toggle-btn, .rule-delete-btn');
     if (!btn) return;
-    var action = btn.dataset.action;
-    var id = btn.dataset.id;
+    const action = btn.dataset.action;
+    const id = btn.dataset.id;
     if (action === 'edit-rule') editRule(id);
     else if (action === 'toggle-rule') toggleRule(id, btn.dataset.enabled === '1');
     else if (action === 'delete-rule') deleteRule(id);
@@ -1118,10 +1144,10 @@ document.getElementById('rules-body').addEventListener('click', function (e) {
 
 // Event delegation for downstream table buttons (replaces inline onclick)
 document.getElementById('downstreams-body').addEventListener('click', function (e) {
-    var btn = e.target.closest('.downstream-edit-btn, .downstream-delete-btn');
+    const btn = e.target.closest('.downstream-edit-btn, .downstream-delete-btn');
     if (!btn) return;
-    var action = btn.dataset.action;
-    var id = btn.dataset.id;
+    const action = btn.dataset.action;
+    const id = btn.dataset.id;
     if (action === 'edit-downstream') editDownstream(id);
     else if (action === 'delete-downstream') deleteDownstream(id);
 });
@@ -1180,7 +1206,7 @@ async function loadAliasGroups() {
         groups.forEach(g => renderAliasGroup(container, g));
 
         // Attach drag-and-drop handlers to all rendered cards
-        var cards = container.querySelectorAll('.alias-group-card');
+        const cards = container.querySelectorAll('.alias-group-card');
         cards.forEach(function (card) {
             setupDraggable(card, container);
         });
@@ -1205,7 +1231,7 @@ function renderAliasGroup(container, group) {
     const title = document.createElement('div');
     title.className = 'alias-group-title';
     // Check if this group is regex
-    var isRegexGroup = group.is_regex;
+    const isRegexGroup = group.is_regex;
     title.innerHTML = `<span class="group-icon">🎯</span> ${esc(group.input_model_id)}` +
         (isRegexGroup ? '<span class="badge" style="background:#6e256d;color:#e879f9;margin-left:0.4rem;font-size:0.7rem;">regex</span>' : '');
 
@@ -1338,7 +1364,7 @@ async function deleteAliasGroup(inputModelId) {
  * Drag handle is the header area (avoids conflicts with buttons and option buttons).
  */
 function setupDraggable(card, container) {
-    var header = card.querySelector('.alias-group-header');
+    const header = card.querySelector('.alias-group-header');
     if (!header) return;
 
     header.addEventListener('dragstart', function (e) {
@@ -1372,17 +1398,17 @@ function setupDraggable(card, container) {
         e.preventDefault();
         card.classList.remove('drag-over');
 
-        var draggedId = e.dataTransfer.getData('text/plain');
+        const draggedId = e.dataTransfer.getData('text/plain');
         if (draggedId === card.dataset.inputModel) return;
 
         // Determine new order from DOM
-        var draggedCard = container.querySelector('.alias-group-card[data-input-model="' + escapedAttr(draggedId) + '"]');
+        const draggedCard = container.querySelector('.alias-group-card[data-input-model="' + escapedAttr(draggedId) + '"]');
         if (!draggedCard) return;
 
         // Dragged card takes drop target's position; drop target shifts toward dragged's original position.
-        var cards = Array.from(container.querySelectorAll('.alias-group-card'));
-        var draggedIdx = cards.indexOf(draggedCard);
-        var dropIdx = cards.indexOf(card);
+        const cards = Array.from(container.querySelectorAll('.alias-group-card'));
+        const draggedIdx = cards.indexOf(draggedCard);
+        const dropIdx = cards.indexOf(card);
 
         if (draggedIdx < 0 || dropIdx < 0) return;
 
@@ -1408,8 +1434,8 @@ function setupDraggable(card, container) {
         }
 
         // Collect new order from DOM and send to server
-        var newCards = Array.from(container.querySelectorAll('.alias-group-card'));
-        var order = newCards.map(function (c) { return c.dataset.inputModel; });
+        const newCards = Array.from(container.querySelectorAll('.alias-group-card'));
+        const order = newCards.map(function (c) { return c.dataset.inputModel; });
         reorderAliasGroups(order);
     });
 }
@@ -1665,12 +1691,12 @@ async function loadSettings() {
         document.getElementById('clear-password').checked = false;
 
         // Populate default tab selector
-        var defaultTabEl = document.getElementById('default-tab');
+        const defaultTabEl = document.getElementById('default-tab');
         if (defaultTabEl) {
             defaultTabEl.value = cfg.default_tab || 'downstreams';
         }
         // Populate log level selector
-        var logLevelEl = document.getElementById('setting-log-level');
+        const logLevelEl = document.getElementById('setting-log-level');
         if (logLevelEl) {
             logLevelEl.value = cfg.log_level || 'info';
         }
@@ -1684,7 +1710,7 @@ async function loadSettings() {
  * Render the proxy API keys editor in the Settings tab.
  */
 function renderProxyAPIKeys(keys) {
-    var container = document.getElementById('proxy-api-keys-container');
+    const container = document.getElementById('proxy-api-keys-container');
     container.innerHTML = '';
     if (keys.length === 0) {
         container.innerHTML = '<div class="api-key-empty">No API keys configured — all traffic is allowed.</div>';
@@ -1699,16 +1725,16 @@ function renderProxyAPIKeys(keys) {
  * Add a single API key input row with a remove button.
  */
 function addProxyKeyRow(container, value) {
-    var row = document.createElement('div');
+    const row = document.createElement('div');
     row.className = 'api-key-row';
 
-    var input = document.createElement('input');
+    const input = document.createElement('input');
     input.type = 'text';
     input.className = 'api-key-input';
     input.placeholder = 'API key';
     input.value = value;
 
-    var removeBtn = document.createElement('button');
+    const removeBtn = document.createElement('button');
     removeBtn.className = 'api-key-remove';
     removeBtn.textContent = '×';
     removeBtn.title = 'Remove key';
@@ -1721,9 +1747,9 @@ function addProxyKeyRow(container, value) {
 
 // "Add API Key" button
 document.getElementById('btn-add-proxy-key').addEventListener('click', function () {
-    var container = document.getElementById('proxy-api-keys-container');
+    const container = document.getElementById('proxy-api-keys-container');
     // Remove empty-state message if present
-    var empty = container.querySelector('.api-key-empty');
+    const empty = container.querySelector('.api-key-empty');
     if (empty) empty.remove();
     addProxyKeyRow(container, '');
     container.querySelector('.api-key-input:last-of-type').focus();
@@ -1741,17 +1767,17 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
     statusEl.className = 'settings-status';
 
     // Collect proxy API keys from the editor
-    var keyInputs = document.querySelectorAll('#proxy-api-keys-container .api-key-input');
-    var proxyAPIKeys = [];
+    const keyInputs = document.querySelectorAll('#proxy-api-keys-container .api-key-input');
+    const proxyAPIKeys = [];
     keyInputs.forEach(function (input) {
-        var v = input.value.trim();
+        const v = input.value.trim();
         if (v) proxyAPIKeys.push(v);
     });
 
     // Collect admin password
-    var newPassword = document.getElementById('admin-password').value;
-    var confirmPassword = document.getElementById('admin-password-confirm').value;
-    var clearPassword = document.getElementById('clear-password').checked;
+    const newPassword = document.getElementById('admin-password').value;
+    const confirmPassword = document.getElementById('admin-password-confirm').value;
+    const clearPassword = document.getElementById('clear-password').checked;
 
     // Validate password inputs
     if (clearPassword) {
@@ -1763,13 +1789,13 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
     }
 
     try {
-        var body = {
+        const body = {
             proxy_mode: document.getElementById('proxy-mode').value,
             proxy_api_keys: proxyAPIKeys,
             default_tab: document.getElementById('default-tab').value,
         };
         // Include log level if the selector exists
-        var logLevelEl = document.getElementById('setting-log-level');
+        const logLevelEl = document.getElementById('setting-log-level');
         if (logLevelEl) {
             body.log_level = logLevelEl.value;
         }
@@ -1777,7 +1803,7 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
         if (newPassword || clearPassword) {
             body.admin_password = newPassword;
         }
-        var resp = await api('/config', {
+        const resp = await api('/config', {
             method: 'PUT',
             body: JSON.stringify(body),
         });
@@ -1806,10 +1832,10 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
 
 // ---- Logs ----
 
-var logSSE = null;          // current EventSource connection
-var logEntries = [];        // in-memory log entries (mirrors server buffer)
-var logActive = false;      // whether the Logs tab is currently visible
-var logPaused = false;      // whether log rendering is paused
+let logSSE = null;          // current EventSource connection
+let logEntries = [];        // in-memory log entries (mirrors server buffer)
+let logActive = false;      // whether the Logs tab is currently visible
+let logPaused = false;      // whether log rendering is paused
 
 /**
  * Initialize the Logs tab. Called once on dashboard load.
@@ -1825,15 +1851,10 @@ function initLogs() {
  */
 async function fetchLogs() {
     try {
-        var url = API_BASE + '/logs';
-        if (authToken) {
-            url += '?token=' + encodeURIComponent(authToken);
-        }
-        var data = await fetch(url).then(function (r) { return r.json(); });
-        logEntries = data || [];
+        logEntries = await api('/logs');
         renderLogTable(logEntries);
     } catch (err) {
-        // If the endpoint doesn't exist (old server), skip logs
+        // If the endpoint doesn't exist (old server) or auth fails, skip logs
     }
 }
 
@@ -1843,14 +1864,11 @@ async function fetchLogs() {
 function connectLogStream() {
     if (logSSE) return; // already connected
 
-    var indicator = document.getElementById('log-level-indicator');
-    var badge = document.getElementById('log-status-badge');
+    const indicator = document.getElementById('log-level-indicator');
+    const badge = document.getElementById('log-status-badge');
 
-    // EventSource doesn't support custom headers, so pass auth as query param
-    var url = API_BASE + '/logs/stream';
-    if (authToken) {
-        url += '?token=' + encodeURIComponent(authToken);
-    }
+    // SSE connections automatically send cookies, so auth is handled via the auth cookie
+    const url = API_BASE + '/logs/stream';
 
     try {
         logSSE = new EventSource(url);
@@ -1863,11 +1881,11 @@ function connectLogStream() {
 
     // Reset pause state on reconnect
     logPaused = false;
-    var pauseBtn = document.getElementById('btn-pause-logs');
+    const pauseBtn = document.getElementById('btn-pause-logs');
     if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
 
     logSSE.addEventListener('log', function (e) {
-        var entry;
+        let entry;
         try { entry = JSON.parse(e.data); } catch { return; }
         // Skip if already in memory (e.g. from REST fetch)
         if (logEntries.some(function (e2) { return e2.id === entry.id; })) return;
@@ -1879,12 +1897,12 @@ function connectLogStream() {
     });
 
     logSSE.addEventListener('config', function (e) {
-        var cfg;
+        let cfg;
         try { cfg = JSON.parse(e.data); } catch { return; }
         if (cfg.level && indicator) {
             indicator.textContent = 'Level: ' + cfg.level.charAt(0).toUpperCase() + cfg.level.slice(1);
             // Color-code the indicator by level
-            var colors = { debug: '#4a5568', info: '#1a5ab8', warn: '#d49e00', error: '#c53030' };
+            const colors = { debug: '#4a5568', info: '#1a5ab8', warn: '#d49e00', error: '#c53030' };
             indicator.style.background = colors[cfg.level] || colors.info;
             indicator.style.display = '';
         }
@@ -1895,7 +1913,7 @@ function connectLogStream() {
     });
 
     // When tab becomes inactive, close SSE to save resources
-    var section = document.getElementById('tab-logs');
+    const section = document.getElementById('tab-logs');
     if (section) {
         section.addEventListener('inactive', function () {
             disconnectLogStream();
@@ -1912,9 +1930,9 @@ function disconnectLogStream() {
         logSSE = null;
     }
     logPaused = false;
-    var badge = document.getElementById('log-status-badge');
+    const badge = document.getElementById('log-status-badge');
     if (badge) { badge.textContent = '◝ Disconnected'; badge.style.background = '#6c757d'; }
-    var pauseBtn = document.getElementById('btn-pause-logs');
+    const pauseBtn = document.getElementById('btn-pause-logs');
     if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
 }
 
@@ -1923,11 +1941,11 @@ function disconnectLogStream() {
  * Entries are appended in order since the API returns newest-first.
  */
 function renderLogTable(entries) {
-    var tbody = document.getElementById('logs-table-body');
+    const tbody = document.getElementById('logs-table-body');
     if (!tbody) return;
     tbody.innerHTML = '';
     entries.forEach(function (entry) {
-        var tr = buildLogRow(entry, false);
+        const tr = buildLogRow(entry, false);
         tbody.appendChild(tr);
     });
 }
@@ -1936,7 +1954,7 @@ function renderLogTable(entries) {
  * Create a table row for a log entry. Returns the built <tr> element.
  */
 function buildLogRow(entry, isNew) {
-    var tr = document.createElement('tr');
+    const tr = document.createElement('tr');
     tr.className = 'log-entry';
     tr.dataset.id = entry.id;
     if (isNew) tr.classList.add('new');
@@ -1944,7 +1962,7 @@ function buildLogRow(entry, isNew) {
     else if (entry.status >= 400) tr.classList.add('log-warn');
 
     // Time
-    var td = document.createElement('td');
+    let td = document.createElement('td');
     td.textContent = formatTime(entry.timestamp);
     tr.appendChild(td);
 
@@ -1979,7 +1997,7 @@ function buildLogRow(entry, isNew) {
 
     // Status
     td = document.createElement('td');
-    var statusClass = 'status-ok';
+    let statusClass = 'status-ok';
     if (entry.status >= 500) statusClass = 'status-error';
     else if (entry.status >= 400) statusClass = 'status-warn';
     td.innerHTML = '<span class="' + statusClass + '">' + entry.status + '</span>';
@@ -2006,10 +2024,10 @@ function buildLogRow(entry, isNew) {
  * Prepend a log entry row (newest at top).
  */
 function prependLogRow(entry, isNew) {
-    var tbody = document.getElementById('logs-table-body');
+    const tbody = document.getElementById('logs-table-body');
     if (!tbody) return;
 
-    var tr = buildLogRow(entry, isNew);
+    const tr = buildLogRow(entry, isNew);
     if (tbody.firstChild) {
         tbody.insertBefore(tr, tbody.firstChild);
     } else {
@@ -2038,7 +2056,7 @@ function appendLogRow(entry, isNew) {
  * Clear all log entries from the table and memory.
  */
 window.clearLogEntries = function () {
-    var tbody = document.getElementById('logs-table-body');
+    const tbody = document.getElementById('logs-table-body');
     if (tbody) tbody.innerHTML = '';
     logEntries = [];
 };
@@ -2048,16 +2066,16 @@ window.clearLogEntries = function () {
  * status, error, alias_group, and method. Rows that don't match are hidden.
  */
 function applyLogFilter(query) {
-    var tbody = document.getElementById('logs-table-body');
+    const tbody = document.getElementById('logs-table-body');
     if (!tbody) return;
-    var q = query.toLowerCase();
+    const q = query.toLowerCase();
 
     tbody.querySelectorAll('tr.log-entry').forEach(function (tr) {
-        var id = parseInt(tr.dataset.id, 10);
-        var entry = logEntries.find(function (e) { return e.id === id; });
+        const id = parseInt(tr.dataset.id, 10);
+        const entry = logEntries.find(function (e) { return e.id === id; });
         if (!entry) { tr.style.display = 'none'; return; }
 
-        var text = [entry.model, entry.resolved_model, entry.path, entry.downstream_name,
+        const text = [entry.model, entry.resolved_model, entry.path, entry.downstream_name,
             entry.downstream_id, entry.error, entry.alias_group, entry.method,
             String(entry.status)].join(' ').toLowerCase();
         tr.style.display = (q === '' || text.indexOf(q) !== -1) ? '' : 'none';
@@ -2077,8 +2095,8 @@ document.getElementById('log-filter-input').addEventListener('input', function (
  */
 window.toggleLogPause = function () {
     logPaused = !logPaused;
-    var btn = document.getElementById('btn-pause-logs');
-    var badge = document.getElementById('log-status-badge');
+    const btn = document.getElementById('btn-pause-logs');
+    const badge = document.getElementById('log-status-badge');
     if (btn) {
         btn.textContent = logPaused ? '▶ Resume' : '⏸ Pause';
     }
@@ -2107,7 +2125,7 @@ window.toggleLogPause = function () {
  */
 function formatTime(ts) {
     if (!ts) return '—';
-    var d;
+    let d;
     if (typeof ts === 'number') {
         d = new Date(ts);
     } else {
@@ -2124,14 +2142,14 @@ function formatDuration(ms) {
     if (ms == null || ms === 0) return '—';
     if (ms < 1000) return Math.round(ms) + 'ms';
     if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
-    var mins = Math.floor(ms / 60000);
-    var secs = ((ms % 60000) / 1000).toFixed(1);
+    const mins = Math.floor(ms / 60000);
+    const secs = ((ms % 60000) / 1000).toFixed(1);
     return mins + 'm' + secs + 's';
 }
 
 // Intercept tab switching to manage SSE connection lifecycle.
 (function () {
-    var originalActivateTab = window.activateTab;
+    const originalActivateTab = window.activateTab;
     window.activateTab = function (tabId) {
         // If leaving the Logs tab, disconnect SSE
         if (!logActive && tabId !== 'logs') {
@@ -2154,7 +2172,7 @@ function formatDuration(ms) {
 
 async function loadAbout() {
     try {
-        var data = await fetch(API_BASE + '/version').then(r => r.json());
+        const data = await fetch(API_BASE + '/version').then(r => r.json());
         document.getElementById('about-version').textContent = data.version || 'unknown';
         document.getElementById('about-build-time').textContent = data.build_time || '—';
     } catch {

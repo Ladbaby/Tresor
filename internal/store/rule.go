@@ -26,67 +26,42 @@ type Rule struct {
 	CreatedAt           time.Time `json:"created_at"`
 }
 
-// scanRule populates a Rule from a DB row scan. The vals slice should contain
-// values in order: ID, Name, PatternPath, PatternModel, PipelineConfig, Enabled, CreatedAt,
-// MatchFormat, MatchDownstreamFmt, MatchDownstreams.
-func scanRule(vals *[]interface{}) *Rule {
+// scanRule populates a Rule from scanned DB columns.
+func scanRule(id, name, patternPath, patternModel, pipelineConfig string, enabled int64, createdAt time.Time, matchFormat, matchDownstreamFmt, matchDownstreams []byte) *Rule {
 	r := &Rule{
-		ID:             toString((*vals)[0]),
-		Name:           toString((*vals)[1]),
-		PatternPath:    toString((*vals)[2]),
-		PatternModel:   toString((*vals)[3]),
-		PipelineConfig: toString((*vals)[5]),
-		CreatedAt:      (*vals)[7].(time.Time),
+		ID:             id,
+		Name:           name,
+		PatternPath:    patternPath,
+		PatternModel:   patternModel,
+		PipelineConfig: pipelineConfig,
+		IsEnabled:      enabled == 1,
+		CreatedAt:      createdAt,
 	}
-	enabled := int((*vals)[6].(int64))
-	r.IsEnabled = enabled == 1
 
-	// Parse JSON array columns
-	for i, col := range []string{toString((*vals)[8]), toString((*vals)[9]), toString((*vals)[10])} {
-		if col == "" || col == "[]" {
-			switch i {
-			case 0:
-				r.MatchFormat = []string{}
-			case 1:
-				r.MatchDownstreamFmt = []string{}
-			case 2:
-				r.MatchDownstreams = []string{}
-			}
-		} else {
-			var arr []string
-			if err := json.Unmarshal([]byte(col), &arr); err != nil {
-				switch i {
-				case 0:
-					r.MatchFormat = []string{}
-				case 1:
-					r.MatchDownstreamFmt = []string{}
-				case 2:
-					r.MatchDownstreams = []string{}
-				}
-			} else {
-				switch i {
-				case 0:
-					r.MatchFormat = arr
-				case 1:
-					r.MatchDownstreamFmt = arr
-				case 2:
-					r.MatchDownstreams = arr
-				}
-			}
+	// Parse JSON array columns using index-based assignment
+	cols := [][]byte{matchFormat, matchDownstreamFmt, matchDownstreams}
+	fields := [3]*[]string{&r.MatchFormat, &r.MatchDownstreamFmt, &r.MatchDownstreams}
+	for i, col := range cols {
+		if len(col) == 0 || string(col) == "[]" {
+			continue
 		}
+		var arr []string
+		if err := json.Unmarshal(col, &arr); err != nil {
+			continue
+		}
+		*fields[i] = arr
+	}
+
+	if r.MatchFormat == nil {
+		r.MatchFormat = []string{}
+	}
+	if r.MatchDownstreamFmt == nil {
+		r.MatchDownstreamFmt = []string{}
+	}
+	if r.MatchDownstreams == nil {
+		r.MatchDownstreams = []string{}
 	}
 	return r
-}
-
-func toString(v interface{}) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	case []byte:
-		return string(t)
-	default:
-		return fmt.Sprintf("%v", v)
-	}
 }
 
 // ListRules returns all rules.
@@ -104,29 +79,35 @@ func (s *Store) ListRules() ([]Rule, error) {
 
 	var rules []Rule
 	for rows.Next() {
-		vals := make([]interface{}, 11)
-		if err := rows.Scan(&vals[0], &vals[1], &vals[2], &vals[3], &vals[5], &vals[6], &vals[7], &vals[8], &vals[9], &vals[10]); err != nil {
+		var id, name, patternPath, patternModel, pipelineConfig string
+		var enabled int64
+		var createdAt time.Time
+		var matchFormat, matchDownstreamFmt, matchDownstreams []byte
+		if err := rows.Scan(&id, &name, &patternPath, &patternModel, &pipelineConfig, &enabled, &createdAt, &matchFormat, &matchDownstreamFmt, &matchDownstreams); err != nil {
 			return nil, err
 		}
-		rules = append(rules, *scanRule(&vals))
+		rules = append(rules, *scanRule(id, name, patternPath, patternModel, pipelineConfig, enabled, createdAt, matchFormat, matchDownstreamFmt, matchDownstreams))
 	}
 	return rules, rows.Err()
 }
 
 // GetRule returns a single rule by ID.
 func (s *Store) GetRule(id string) (*Rule, error) {
-	vals := make([]interface{}, 11)
+	var rowId, name, patternPath, patternModel, pipelineConfig string
+	var enabled int64
+	var createdAt time.Time
+	var matchFormat, matchDownstreamFmt, matchDownstreams []byte
 	err := s.db.QueryRow(
 		`SELECT id, name, pattern_path, COALESCE(pattern_model,''),
 			pipeline_config, is_enabled, created_at,
 			COALESCE(match_format,'[]'), COALESCE(match_downstream_format,'[]'),
 			COALESCE(match_downstreams,'[]')
 		 FROM rules WHERE id = ?`, id).
-		Scan(&vals[0], &vals[1], &vals[2], &vals[3], &vals[5], &vals[6], &vals[7], &vals[8], &vals[9], &vals[10])
+		Scan(&rowId, &name, &patternPath, &patternModel, &pipelineConfig, &enabled, &createdAt, &matchFormat, &matchDownstreamFmt, &matchDownstreams)
 	if err != nil {
 		return nil, fmt.Errorf("get rule %s: %w", id, err)
 	}
-	return scanRule(&vals), nil
+	return scanRule(rowId, name, patternPath, patternModel, pipelineConfig, enabled, createdAt, matchFormat, matchDownstreamFmt, matchDownstreams), nil
 }
 
 // CreateRule inserts a new rule.
@@ -306,11 +287,14 @@ func (s *Store) FindMatchingRules(path, model, inputFormat string, dsID string, 
 
 	var matches []Rule
 	for rows.Next() {
-		var vals = make([]interface{}, 11)
-		if err := rows.Scan(&vals[0], &vals[1], &vals[2], &vals[3], &vals[5], &vals[6], &vals[7], &vals[8], &vals[9], &vals[10]); err != nil {
+		var id, name, patternPath, patternModel, pipelineConfig string
+		var enabled int64
+		var createdAt time.Time
+		var matchFormat, matchDownstreamFmt, matchDownstreams []byte
+		if err := rows.Scan(&id, &name, &patternPath, &patternModel, &pipelineConfig, &enabled, &createdAt, &matchFormat, &matchDownstreamFmt, &matchDownstreams); err != nil {
 			return nil, err
 		}
-		r := scanRule(&vals)
+		r := scanRule(id, name, patternPath, patternModel, pipelineConfig, enabled, createdAt, matchFormat, matchDownstreamFmt, matchDownstreams)
 		if r.MatchRule(inputFormat, dsID, dsFormats) {
 			matches = append(matches, *r)
 		}

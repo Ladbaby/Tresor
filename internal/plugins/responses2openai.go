@@ -106,6 +106,9 @@ type chatCompletionResponse struct {
 	Usage   *chatCompletionUsage   `json:"usage,omitempty"`
 }
 
+// PluginName returns the stable type name for deduplication.
+func (t *Responses2OpenAI) PluginName() string { return "Responses2OpenAI" }
+
 // --- TransformRequest: Responses API → Chat Completions ---
 
 func (t *Responses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx *engine.PipelineContext) (*http.Request, []byte, error) {

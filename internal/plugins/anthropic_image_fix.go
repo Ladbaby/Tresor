@@ -21,6 +21,9 @@ import (
 // Reference: https://github.com/ggml-org/llama.cpp/pull/22536
 type FixAnthropicImages struct{}
 
+// PluginName returns the stable type name for deduplication.
+func (t *FixAnthropicImages) PluginName() string { return "FixAnthropicImages" }
+
 // TransformRequest rewrites tool_result image content into top-level user
 // image parts before forwarding the request.
 func (t *FixAnthropicImages) TransformRequest(req *http.Request, body []byte, ctx *engine.PipelineContext) (*http.Request, []byte, error) {

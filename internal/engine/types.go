@@ -2,6 +2,8 @@ package engine
 
 import (
 	"net/http"
+
+	"tresor/internal/store"
 )
 
 // Downstream is a resolved target endpoint.
@@ -43,5 +45,31 @@ type StreamResponseTransformer interface {
 	TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error)
 }
 
+// PluginNamer is implemented by plugins that want to provide an explicit,
+// stable type name for deduplication without relying on reflection.
+type PluginNamer interface {
+	PluginName() string
+}
+
 // PluginFactory creates a plugin instance from a configuration map.
 type PluginFactory func(config map[string]interface{}) (interface{}, error)
+
+// gatewayError carries structured error information for consistent logging and
+// client-facing error responses across the proxy handler.
+type gatewayError struct {
+	status  int    // HTTP status code
+	logMsg  string // detailed message for server logs
+	httpMsg string // client-facing error message
+	errLabel string // short label for log entry
+	cause   error  // underlying error (nil if none)
+}
+
+// modelResult holds the output of model resolution: which downstream to forward
+// to, any alias that matched, and the body to use for the pipeline.
+type modelResult struct {
+	ds            *store.Downstream
+	alias         *store.Alias
+	model         string // input model name
+	resolvedModel string // model name after alias rewrite
+	body          []byte // body to use for pipeline
+}

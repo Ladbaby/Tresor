@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 
@@ -44,7 +43,7 @@ func (r *Router) handleAliases(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = r.writeConfig()
+		r.requestConfigWrite()
 		writeJSON(w, http.StatusCreated, alias)
 
 	default:
@@ -96,7 +95,7 @@ func (r *Router) handleAliasByID(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		_ = r.writeConfig()
+		r.requestConfigWrite()
 
 		alias, err := r.store.GetAlias(id)
 		if err != nil {
@@ -110,7 +109,7 @@ func (r *Router) handleAliasByID(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = r.writeConfig()
+		r.requestConfigWrite()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 
 	default:
@@ -142,7 +141,7 @@ func (r *Router) handleAliasGroup(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	_ = r.writeConfig()
+	r.requestConfigWrite()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "deleted", "count": n})
 }
 
@@ -153,7 +152,7 @@ func (r *Router) handleActivateAlias(w http.ResponseWriter, req *http.Request, i
 		return
 	}
 
-	_ = r.writeConfig()
+	r.requestConfigWrite()
 
 	alias, err := r.store.GetAlias(id)
 	if err != nil {
@@ -188,7 +187,7 @@ func (r *Router) handleReorderGroups(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	_ = r.writeConfig()
+	r.requestConfigWrite()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reordered"})
 }
 
@@ -209,14 +208,4 @@ func enrichAliasGroups(s *store.Store, groups []store.AliasGroup) {
 			groups[i].Options[j].DownstreamName = dsMap[groups[i].Options[j].DownstreamID]
 		}
 	}
-}
-
-// writeConfig triggers a synchronous YAML write-back after mutating the DB.
-// Errors are returned so callers can surface a warning in the API response.
-func (r *Router) writeConfig() error {
-	if err := r.store.WriteConfig(r.cfg); err != nil {
-		log.Printf("warning: failed to write config YAML: %v", err)
-		return err
-	}
-	return nil
 }

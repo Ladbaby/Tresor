@@ -94,8 +94,8 @@ aliases:
 	if cfg.AdminPassword != "secret123" {
 		t.Fatalf("expected admin password secret123, got %q", cfg.AdminPassword)
 	}
-	if string(cfg.JWTSecret) != "secret123" {
-		t.Fatalf("expected JWT secret to match admin password")
+	if len(cfg.JWTSecret) == 0 {
+		t.Fatal("expected JWT secret to be derived from admin password")
 	}
 
 	if len(cfg.Downstreams) != 1 {

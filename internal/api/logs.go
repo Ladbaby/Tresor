@@ -18,7 +18,7 @@ func GetRecentLogs(logger *engine.RequestLogger) http.HandlerFunc {
 }
 
 // StreamLogs serves an SSE stream of gateway request logs.
-// Auth is handled by the middleware (router.go) via token query param.
+// Auth is handled by the middleware (router.go) via auth cookie.
 func StreamLogs(logger *engine.RequestLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.StreamLogs(w, r)
@@ -38,7 +38,7 @@ func GetLogLevel(logger *engine.RequestLogger) http.HandlerFunc {
 	}
 }
 
-// SetLogLevel updates the log level for the request logger.
+// SetLogLevel updates the log level for the request logger and syncs the global runtime config.
 func SetLogLevel(logger *engine.RequestLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut && r.Method != http.MethodPost {
@@ -62,24 +62,12 @@ func SetLogLevel(logger *engine.RequestLogger) http.HandlerFunc {
 
 		logger.SetLevel(level)
 
-		// Also update the runtime config if available (for settings tab sync)
-		if cfg := getRuntimeConfig(); cfg != nil {
-			cfg.LogLevel = req.Level
-		}
+		// Sync the global runtime config (shared with handleConfig)
+		runtimeCfgMu.Lock()
+		runtimeCfg.LogLevel = req.Level
+		runtimeCfgMu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"level": logger.Level().String()})
 	}
-}
-
-// Helper to access runtime config from log handlers for settings sync.
-var runtimeConfigHolder *RuntimeConfig
-
-// SetRuntimeConfig wires the runtime config pointer so log handlers can sync changes.
-func SetRuntimeConfig(cfg *RuntimeConfig) {
-	runtimeConfigHolder = cfg
-}
-
-func getRuntimeConfig() *RuntimeConfig {
-	return runtimeConfigHolder
 }

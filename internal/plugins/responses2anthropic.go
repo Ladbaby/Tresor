@@ -21,6 +21,9 @@ var reasoningEffortBudget = map[string]int{
 	"high":   16000,
 }
 
+// PluginName returns the stable type name for deduplication.
+func (t *Responses2Anthropic) PluginName() string { return "Responses2Anthropic" }
+
 // --- TransformRequest: Responses API → Anthropic Messages ---
 
 func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, ctx *engine.PipelineContext) (*http.Request, []byte, error) {

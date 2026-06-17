@@ -42,6 +42,9 @@ type anthropicContentBlock2 struct {
     ImageSrc  json.RawMessage `json:"source,omitempty"`
 }
 
+// PluginName returns the stable type name for deduplication.
+func (t *Anthropic2OpenAI) PluginName() string { return "Anthropic2OpenAI" }
+
 // TransformRequest converts an Anthropic Messages request into an OpenAI Chat Completion request.
 func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx *engine.PipelineContext) (*http.Request, []byte, error) {
     var anthropicReq anthropicRequest2

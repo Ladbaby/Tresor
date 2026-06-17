@@ -2,8 +2,11 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -96,6 +99,10 @@ func (s *Store) CreateAlias(a *Alias) error {
 		if _, err := compileRegex(a.InputModelID); err != nil {
 			return fmt.Errorf("invalid regex pattern %q: %w", a.InputModelID, err)
 		}
+		// Warn only when pattern is completely unanchored (missing both ^ and $)
+		if !strings.HasPrefix(a.InputModelID, "^") && !strings.HasSuffix(a.InputModelID, "$") {
+			log.Printf("warning: regex alias %q has unanchored pattern %q — consider adding ^ and $ for precise matching", a.ID, a.InputModelID)
+		}
 	}
 
 	active := 0
@@ -153,6 +160,7 @@ func (s *Store) CreateAlias(a *Alias) error {
 		return fmt.Errorf("create alias: %w", err)
 	}
 
+	s.invalidateRegexCache()
 	return tx.Commit()
 }
 
@@ -172,6 +180,10 @@ func (s *Store) UpdateAlias(a *Alias) error {
 	if a.IsRegex {
 		if _, err := compileRegex(a.InputModelID); err != nil {
 			return fmt.Errorf("invalid regex pattern %q: %w", a.InputModelID, err)
+		}
+		// Warn only when pattern is completely unanchored (missing both ^ and $)
+		if !strings.HasPrefix(a.InputModelID, "^") && !strings.HasSuffix(a.InputModelID, "$") {
+			log.Printf("warning: regex alias %q has unanchored pattern %q — consider adding ^ and $ for precise matching", a.ID, a.InputModelID)
 		}
 	}
 
@@ -206,6 +218,7 @@ func (s *Store) UpdateAlias(a *Alias) error {
 		return fmt.Errorf("sync is_regex to siblings: %w", err)
 	}
 
+	s.invalidateRegexCache()
 	return tx.Commit()
 }
 
@@ -252,6 +265,7 @@ func (s *Store) DeleteAlias(id string) error {
 		// If no sibling exists (err == sql: no rows), the group simply has no active mapping.
 	}
 
+	s.invalidateRegexCache()
 	return tx.Commit()
 }
 
@@ -286,6 +300,7 @@ func (s *Store) ActivateAlias(id string) error {
 		return fmt.Errorf("alias %s not found", id)
 	}
 
+	s.invalidateRegexCache()
 	return tx.Commit()
 }
 
@@ -324,6 +339,7 @@ func (s *Store) DeleteGroup(inputModelID string) (int, error) {
 		return 0, fmt.Errorf("compact group_order: %w", err)
 	}
 
+	s.invalidateRegexCache()
 	return int(n), tx.Commit()
 }
 
@@ -341,8 +357,8 @@ func (s *Store) FindActiveAlias(inputModelID string) (*Alias, error) {
 		return a, nil
 	}
 
-	// Try regex match
-	return findActiveAliasRegex(s.db, inputModelID)
+	// Try regex match (uses cached active regex aliases)
+	return s.findActiveAliasRegexCached(inputModelID)
 }
 
 // findActiveAliasExact looks for an exact input_model_id match among active aliases.
@@ -355,7 +371,7 @@ func findActiveAliasExact(db *sql.DB, inputModelID string) (*Alias, error) {
 		 LIMIT 1`, inputModelID).
 		Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt)
 	if err != nil {
-		if err.Error() == "sql: no rows in result set" {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("find active alias %s: %w", inputModelID, err)
@@ -364,51 +380,6 @@ func findActiveAliasExact(db *sql.DB, inputModelID string) (*Alias, error) {
 	a.IsRegex = isRegex == 1
 	a.GroupOrder = groupOrder
 	return &a, nil
-}
-
-// findActiveAliasRegex looks for a regex-matching active alias.
-// Returns the first active alias whose input_model_id pattern (treated as regex)
-// matches the model. Matches both directly-regex aliases and active aliases in
-// groups where any option has is_regex = 1 — this covers the case where a
-// non-regex alias was activated (e.g. via web UI) in a regex group.
-// Precompiled regex patterns are cached to avoid recompiling on every request.
-func findActiveAliasRegex(db *sql.DB, model string) (*Alias, error) {
-	rows, err := db.Query(
-		`SELECT a.id, a.input_model_id, a.downstream_id, a.output_model_id, a.is_active, a.is_regex, a.group_order, a.created_at
-		 FROM aliases a
-		 WHERE a.is_active = 1
-		   AND (a.is_regex = 1
-		     OR EXISTS (
-		       SELECT 1 FROM aliases a2
-		       WHERE a2.input_model_id = a.input_model_id
-		         AND a2.is_regex = 1
-		     ))
-		 ORDER BY a.group_order, a.rowid`)
-	if err != nil {
-		return nil, fmt.Errorf("query regex aliases: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var a Alias
-		var active, isRegex, groupOrder int
-		if err := rows.Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt); err != nil {
-			return nil, err
-		}
-		a.IsActive = active == 1
-		a.IsRegex = isRegex == 1
-		a.GroupOrder = groupOrder
-
-		re, err := compileRegex(a.InputModelID)
-		if err != nil {
-			// Skip aliases with invalid regex patterns
-			continue
-		}
-		if re.MatchString(model) {
-			return &a, nil
-		}
-	}
-	return nil, rows.Err()
 }
 
 // ListGroups returns aliases grouped by InputModelID.
@@ -470,6 +441,16 @@ func (s *Store) upsertAliases(groups []config.AliasGroupCfg) error {
 	for i, g := range groups {
 		if len(g.Options) == 0 {
 			continue
+		}
+
+		// Validate regex patterns and warn about unanchored ones
+		if g.IsRegex {
+			if _, err := compileRegex(g.InputModelID); err != nil {
+				return fmt.Errorf("invalid regex pattern %q: %w", g.InputModelID, err)
+			}
+			if !strings.HasPrefix(g.InputModelID, "^") && !strings.HasSuffix(g.InputModelID, "$") {
+				log.Printf("warning: alias group %q has unanchored regex pattern %q — consider adding ^ and $ for precise matching", g.InputModelID, g.InputModelID)
+			}
 		}
 
 		// YAML array position determines group_order (1-based)
@@ -566,6 +547,7 @@ func (s *Store) upsertAliases(groups []config.AliasGroupCfg) error {
 		}
 	}
 
+	s.invalidateRegexCache()
 	return tx.Commit()
 }
 
@@ -596,13 +578,18 @@ func (s *Store) ReorderGroups(inputModelIDs []string) error {
 		}
 	}
 
+	s.invalidateRegexCache()
 	return tx.Commit()
 }
 
 // regexCache caches compiled regex patterns to avoid recompiling on every request.
+// capped at maxRegexCacheSize entries; oldest entries are evicted when full.
+const maxRegexCacheSize = 100
+
 var regexCache = struct {
 	sync.Mutex
-	m map[string]*regexp.Regexp
+	m   map[string]*regexp.Regexp
+	ord []string // insertion order for eviction
 }{m: make(map[string]*regexp.Regexp)}
 
 // compileRegex compiles a regex pattern and caches the result.
@@ -618,6 +605,15 @@ func compileRegex(pattern string) (*regexp.Regexp, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Evict oldest entry if cache is full
+	if len(regexCache.m) >= maxRegexCacheSize && len(regexCache.ord) > 0 {
+		oldest := regexCache.ord[0]
+		delete(regexCache.m, oldest)
+		regexCache.ord = append([]string{}, regexCache.ord[1:]...)
+	}
+
 	regexCache.m[pattern] = re
+	regexCache.ord = append(regexCache.ord, pattern)
 	return re, nil
 }

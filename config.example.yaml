@@ -1,5 +1,11 @@
 # Tresor Configuration
 # Copy this to config.yaml and customize for your setup.
+#
+# NOTE: Comments in this file are NOT preserved when the admin UI or CLI
+# performs mutations (create/update/delete). The YAML write-back generates
+# a clean file. If you add comments, they will be removed on the first
+# mutation. To preserve them, re-add comments after mutations or avoid
+# editing the config via the admin interface.
 
 # Server settings
 bind_addr: "127.0.0.1:11510"

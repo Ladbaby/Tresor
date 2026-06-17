@@ -1,12 +1,17 @@
 package config
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
+
+// JWTSalt is the salt used to derive the JWT signing secret from the admin password.
+// Exported so the middleware package can derive the same secret without duplicating the value.
+const JWTSalt = "tresor-jwt-salt"
 
 // AppConfig is the complete YAML configuration for Tresor.
 // It covers server settings and all routing data (downstreams, rules, aliases).
@@ -132,9 +137,10 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.DBPath = expandTilde(cfg.DBPath)
 	}
 
-	// Derive JWT secret from admin password
+	// Derive JWT secret from admin password (SHA256 with salt)
 	if cfg.AdminPassword != "" {
-		cfg.JWTSecret = []byte(cfg.AdminPassword)
+		secret := sha256.Sum256([]byte(cfg.AdminPassword + JWTSalt))
+		cfg.JWTSecret = secret[:]
 	}
 
 	// Expand tildes in paths

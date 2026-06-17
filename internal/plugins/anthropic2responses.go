@@ -33,6 +33,9 @@ type a2rToolCallBlock struct {
 	startSent bool
 }
 
+// PluginName returns the stable type name for deduplication.
+func (t *Anthropic2Responses) PluginName() string { return "Anthropic2Responses" }
+
 // --- TransformRequest: Anthropic Messages → Responses API ---
 
 func (t *Anthropic2Responses) TransformRequest(req *http.Request, body []byte, ctx *engine.PipelineContext) (*http.Request, []byte, error) {

@@ -395,16 +395,22 @@ func TestAddRemoveOutputModelID(t *testing.T) {
 		t.Fatalf("expected 0 models after remove, got %d", len(updated.OutputModelIDs))
 	}
 
-	// Remove nonexistent model should error
+	// Remove nonexistent model should succeed (idempotent)
 	err = s.RemoveOutputModelID("ds-models", "nonexistent")
-	if err == nil {
-		t.Fatal("expected error removing nonexistent model")
+	if err != nil {
+		t.Fatal("expected no error removing nonexistent model (idempotent)")
 	}
 
 	// Add to nonexistent downstream should error
 	err = s.AddOutputModelID("nonexistent-ds", "model-x")
 	if err == nil {
 		t.Fatal("expected error adding model to nonexistent downstream")
+	}
+
+	// Remove from nonexistent downstream should error
+	err = s.RemoveOutputModelID("nonexistent-ds", "model-x")
+	if err == nil {
+		t.Fatal("expected error removing model from nonexistent downstream")
 	}
 }
 

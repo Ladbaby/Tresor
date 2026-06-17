@@ -45,7 +45,7 @@ func (r *Router) handleRules(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = r.writeConfig()
+		r.requestConfigWrite()
 		writeJSON(w, http.StatusCreated, rule)
 
 	default:
@@ -148,7 +148,7 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		_ = r.writeConfig()
+		r.requestConfigWrite()
 		rule, err := r.store.GetRule(id)
 		if err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
@@ -161,7 +161,7 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_ = r.writeConfig()
+		r.requestConfigWrite()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 
 	default:

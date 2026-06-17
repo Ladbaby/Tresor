@@ -147,33 +147,47 @@ func (l *RequestLogger) Record(entry RequestLogEntry) {
 		l.entries = l.entries[len(l.entries)-maxLogEntries:]
 	}
 
-	// Notify SSE subscribers
+	// Snapshot writers under lock to avoid race with Subscribe/Unsubscribe
 	writers := make([]logWriter, len(l.writers))
 	copy(writers, l.writers)
 	l.mu.Unlock()
 
+	// Iterate the snapshot without holding the lock
+	var failed []logWriter
 	for _, w := range writers {
 		if err := sendSSEEvent(w.writer, w.flusher, "log", entry); err != nil {
-			// Subscriber disconnected — clean it up
-			l.removeWriter(w)
+			failed = append(failed, w)
 		}
+	}
+
+	// Batch-remove failed writers under lock
+	if len(failed) > 0 {
+		l.mu.Lock()
+		for _, f := range failed {
+			for i, sw := range l.writers {
+				if sw.writer == f.writer {
+					l.writers = append(l.writers[:i], l.writers[i+1:]...)
+					break
+				}
+			}
+		}
+		l.mu.Unlock()
 	}
 }
 
-// RecentEntries returns the last n entries that pass the level filter, newest first.
+// RecentEntries returns the last n entries, newest first.
+// Entries are already filtered by level at insertion time in Record().
 func (l *RequestLogger) RecentEntries(n int) []RequestLogEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	filtered := make([]RequestLogEntry, 0, n)
 	start := len(l.entries) - n
 	if start < 0 {
 		start = 0
 	}
+	filtered := make([]RequestLogEntry, 0, len(l.entries)-start)
 	for i := start; i < len(l.entries); i++ {
-		if l.entries[i].logSeverity() >= l.level {
-			filtered = append(filtered, l.entries[i])
-		}
+		filtered = append(filtered, l.entries[i])
 	}
 	// Return newest first (reverse chronological order)
 	for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
@@ -194,18 +208,6 @@ func (l *RequestLogger)Unsubscribe(w http.ResponseWriter) {
 	l.mu.Lock()
 	for i, sw := range l.writers {
 		if sw.writer == w {
-			l.writers = append(l.writers[:i], l.writers[i+1:]...)
-			break
-		}
-	}
-	l.mu.Unlock()
-}
-
-// removeWriter removes a writer (called internally when write fails).
-func (l *RequestLogger) removeWriter(w logWriter) {
-	l.mu.Lock()
-	for i, sw := range l.writers {
-		if sw.writer == w.writer {
 			l.writers = append(l.writers[:i], l.writers[i+1:]...)
 			break
 		}

@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -190,18 +191,15 @@ func (s *Store) AddOutputModelID(downstreamID, modelID string) error {
 }
 
 // RemoveOutputModelID removes a model ID from a downstream's known models.
+// Idempotent: returns nil if the model does not exist.
 func (s *Store) RemoveOutputModelID(downstreamID, modelID string) error {
 	if _, err := s.GetDownstream(downstreamID); err != nil {
 		return fmt.Errorf("downstream %s not found: %w", downstreamID, err)
 	}
-	res, err := s.db.Exec("DELETE FROM output_model_ids WHERE downstream_id = ? AND model_id = ?",
+	_, err := s.db.Exec("DELETE FROM output_model_ids WHERE downstream_id = ? AND model_id = ?",
 		downstreamID, modelID)
 	if err != nil {
 		return fmt.Errorf("remove output model: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("model %s not found for downstream %s", modelID, downstreamID)
 	}
 	return nil
 }
@@ -260,7 +258,7 @@ func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 		 LIMIT 1`, model).
 		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &d.CreatedAt)
 	if err != nil {
-		if err.Error() == "sql: no rows in result set" {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("find downstream by output model %s: %w", model, err)

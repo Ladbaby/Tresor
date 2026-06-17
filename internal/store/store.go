@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
 
 	"tresor/internal/config"
 
@@ -15,6 +19,26 @@ import (
 // Store wraps the SQLite database connection and provides access to rules and downstreams.
 type Store struct {
 	db *sql.DB
+
+	// regexAliasCache caches the list of active regex aliases for fast lookup.
+	// Invalidated on any alias mutation (CreateAlias, UpdateAlias, DeleteAlias,
+	// DeleteGroup, ReorderGroups, upsertAliases).
+	regexAliasCache struct {
+		sync.RWMutex
+		entries []cachedRegexAlias
+	}
+}
+
+// cachedRegexAlias holds a single cached active regex alias.
+type cachedRegexAlias struct {
+	ID             string
+	InputModelID   string
+	DownstreamID   string
+	OutputModelID  string
+	IsRegex        bool
+	GroupOrder     int
+	CreatedAt      time.Time
+	CompiledPattern *regexp.Regexp
 }
 
 // Open opens (or creates) the SQLite database and runs migrations.
@@ -49,6 +73,100 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
+// invalidateRegexCache clears the regex alias cache.
+// Call this after any alias mutation (Create, Update, Delete, Reorder, Upsert).
+func (s *Store) invalidateRegexCache() {
+	s.regexAliasCache.Lock()
+	s.regexAliasCache.entries = nil
+	s.regexAliasCache.Unlock()
+}
+
+// populateRegexCache loads active regex aliases from the database into the cache.
+// Returns the populated cache entries.
+func (s *Store) populateRegexCache() ([]cachedRegexAlias, error) {
+	rows, err := s.db.Query(
+		`SELECT a.id, a.input_model_id, a.downstream_id, a.output_model_id, a.is_active, a.is_regex, a.group_order, a.created_at
+		 FROM aliases a
+		 WHERE a.is_active = 1
+		   AND (a.is_regex = 1
+		     OR EXISTS (
+		       SELECT 1 FROM aliases a2
+		       WHERE a2.input_model_id = a.input_model_id
+		         AND a2.is_regex = 1
+		     ))
+		 ORDER BY a.group_order, a.rowid`)
+	if err != nil {
+		return nil, fmt.Errorf("query regex aliases: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []cachedRegexAlias
+	for rows.Next() {
+		var id, inputModelID, downstreamID, outputModelID string
+		var active, isRegex, groupOrder int
+		var createdAt time.Time
+		if err := rows.Scan(&id, &inputModelID, &downstreamID, &outputModelID, &active, &isRegex, &groupOrder, &createdAt); err != nil {
+			return nil, err
+		}
+		re, err := compileRegex(inputModelID)
+		if err != nil {
+			// Skip aliases with invalid regex patterns
+			continue
+		}
+		entries = append(entries, cachedRegexAlias{
+			ID:             id,
+			InputModelID:   inputModelID,
+			DownstreamID:   downstreamID,
+			OutputModelID:  outputModelID,
+			IsRegex:        isRegex == 1,
+			GroupOrder:     groupOrder,
+			CreatedAt:      createdAt,
+			CompiledPattern: re,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	s.regexAliasCache.Lock()
+	s.regexAliasCache.entries = entries
+	s.regexAliasCache.Unlock()
+	return entries, nil
+}
+
+// findActiveAliasRegexCached looks for a regex-matching active alias from the cache.
+// Returns nil if no match is found. Populates the cache on first use.
+func (s *Store) findActiveAliasRegexCached(model string) (*Alias, error) {
+	s.regexAliasCache.RLock()
+	entries := s.regexAliasCache.entries
+	s.regexAliasCache.RUnlock()
+
+	// Populate cache if empty
+	if entries == nil {
+		var err error
+		entries, err = s.populateRegexCache()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for _, e := range entries {
+		if e.CompiledPattern.MatchString(model) {
+			return &Alias{
+				ID:           e.ID,
+				InputModelID: e.InputModelID,
+				DownstreamID: e.DownstreamID,
+				OutputModelID: e.OutputModelID,
+				IsActive:     true,
+				IsRegex:      e.IsRegex,
+				GroupOrder:   e.GroupOrder,
+				CreatedAt:    e.CreatedAt,
+			}, nil
+		}
+	}
+	return nil, nil
+}
+
 func (s *Store) migrate() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS downstreams (
@@ -60,7 +178,7 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE TABLE IF NOT EXISTS rules (
 			id                TEXT PRIMARY KEY,
-			name              TEXT NOT NULL UNIQUE,
+			name              TEXT NOT NULL,
 			pattern_path      TEXT NOT NULL,
 			pattern_model     TEXT,
 			active_downstream TEXT REFERENCES downstreams(id),
@@ -89,6 +207,13 @@ func (s *Store) migrate() error {
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("migrate query %q: %w", q[:40], err)
+		}
+	}
+
+	// Remove UNIQUE constraint from rules.name (allows duplicate rule names)
+	if s.hasUniqueIndex("rules", "name") {
+		if err := s.migrateRemoveRulesUnique(); err != nil {
+			return fmt.Errorf("migrate remove rules UNIQUE: %w", err)
 		}
 	}
 
@@ -418,6 +543,134 @@ func (s *Store) columnExists(table, column string) bool {
 		}
 	}
 	return false
+}
+
+// hasUniqueIndex checks if a UNIQUE auto-index exists for a column on a table.
+func (s *Store) hasUniqueIndex(table, column string) bool {
+	pattern := "sqlite_autoindex_" + table + "%"
+	rows, err := s.db.Query("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE ?", pattern)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var indexName string
+		if err := rows.Scan(&indexName); err != nil {
+			continue
+		}
+		var colName string
+		if err := s.db.QueryRow("SELECT name FROM pragma_index_info(?) ORDER BY seqno", indexName).Scan(&colName); err != nil {
+			continue
+		}
+		if colName == column {
+			return true
+		}
+	}
+	return false
+}
+
+// migrateRemoveRulesUnique recreates the rules table without the UNIQUE constraint on name.
+func (s *Store) migrateRemoveRulesUnique() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Determine which columns exist on the current table
+	cols := s.listColumns("rules")
+
+	// Build SELECT list: use existing columns or literal defaults
+	selectCols := []string{"id", "name", "pattern_path"}
+	if containsStr(cols, "pattern_model") {
+		selectCols = append(selectCols, "pattern_model")
+	} else {
+		selectCols = append(selectCols, "''")
+	}
+	if containsStr(cols, "active_downstream") {
+		selectCols = append(selectCols, "active_downstream")
+	} else {
+		selectCols = append(selectCols, "''")
+	}
+	selectCols = append(selectCols, "pipeline_config", "is_enabled", "created_at")
+	if containsStr(cols, "match_format") {
+		selectCols = append(selectCols, "match_format")
+	} else {
+		selectCols = append(selectCols, "'[]'")
+	}
+	if containsStr(cols, "match_downstream_format") {
+		selectCols = append(selectCols, "match_downstream_format")
+	} else {
+		selectCols = append(selectCols, "'[]'")
+	}
+	if containsStr(cols, "match_downstreams") {
+		selectCols = append(selectCols, "match_downstreams")
+	} else {
+		selectCols = append(selectCols, "'[]'")
+	}
+
+	// Target column names for INSERT (all columns the new table has)
+	insertCols := []string{"id", "name", "pattern_path", "pattern_model", "active_downstream", "pipeline_config", "is_enabled", "created_at", "match_format", "match_downstream_format", "match_downstreams"}
+
+	selectQuery := "SELECT " + strings.Join(selectCols, ", ") + " FROM rules"
+
+	// Create new table without UNIQUE constraint (includes all columns)
+	if _, err := tx.Exec(`CREATE TABLE rules_new (
+		id                TEXT PRIMARY KEY,
+		name              TEXT NOT NULL,
+		pattern_path      TEXT NOT NULL,
+		pattern_model     TEXT,
+		active_downstream TEXT REFERENCES downstreams(id),
+		pipeline_config   TEXT NOT NULL DEFAULT '[]',
+		is_enabled        INTEGER DEFAULT 1,
+		created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+		match_format      TEXT DEFAULT '[]',
+		match_downstream_format TEXT DEFAULT '[]',
+		match_downstreams TEXT DEFAULT '[]'
+	)`); err != nil {
+		return err
+	}
+
+	// Copy data
+	if _, err := tx.Exec("INSERT INTO rules_new (" + strings.Join(insertCols, ", ") + ") " + selectQuery); err != nil {
+		return err
+	}
+
+	// Drop old table and rename
+	if _, err := tx.Exec("DROP TABLE rules"); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("ALTER TABLE rules_new RENAME TO rules"); err != nil {
+		return err
+	}
+
+	// Recreate index
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_rules_enabled ON rules(is_enabled)`); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (s *Store) listColumns(table string) []string {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var dk string
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &dk); err != nil {
+			return nil
+		}
+		cols = append(cols, name)
+	}
+	return cols
 }
 
 // upsertDownstreams creates or updates downstreams from YAML config.

@@ -27,6 +27,9 @@ type o2rStreamState struct {
 	ToolName   string // current tool call name
 }
 
+// PluginName returns the stable type name for deduplication.
+func (t *OpenAI2Responses) PluginName() string { return "OpenAI2Responses" }
+
 // --- TransformRequest: Chat Completions → Responses API ---
 
 func (t *OpenAI2Responses) TransformRequest(req *http.Request, body []byte, ctx *engine.PipelineContext) (*http.Request, []byte, error) {

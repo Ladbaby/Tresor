@@ -41,6 +41,9 @@ type openAIChatRequest struct {
 	Stop        []string            `json:"stop,omitempty"`
 }
 
+// PluginName returns the stable type name for deduplication.
+func (t *OpenAI2Anthropic) PluginName() string { return "OpenAI2Anthropic" }
+
 // TransformRequest converts an OpenAI Chat Completion request into an Anthropic Messages request.
 func (t *OpenAI2Anthropic) TransformRequest(req *http.Request, body []byte, ctx *engine.PipelineContext) (*http.Request, []byte, error) {
 	var openAIReq openAIChatRequest

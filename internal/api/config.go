@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -147,11 +146,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		// are runtime-only and not written back to YAML.
 		if passwordProvided {
 			r.cfg.AdminPassword = incoming.AdminPassword
-			go func() {
-				if err := r.store.WriteConfig(r.cfg); err != nil {
-					log.Printf("warning: failed to write config YAML: %v", err)
-				}
-			}()
+			r.requestConfigWrite()
 		}
 
 		writeJSON(w, http.StatusOK, RuntimeConfigResponse{

@@ -44,6 +44,9 @@ func NewCustomHeaderPlugin(config map[string]interface{}) (*CustomHeaderPlugin, 
 	return p, nil
 }
 
+// PluginName returns the stable type name for deduplication.
+func (p *CustomHeaderPlugin) PluginName() string { return "CustomHeader" }
+
 // TransformRequest adds configured headers to the request.
 func (p *CustomHeaderPlugin) TransformRequest(req *http.Request, body []byte, ctx *engine.PipelineContext) (*http.Request, []byte, error) {
 	for k, v := range p.headers {

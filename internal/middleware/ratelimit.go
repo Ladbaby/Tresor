@@ -12,6 +12,8 @@ type rateLimiter struct {
 	entries map[string]*rateEntry
 	max    int
 	window time.Duration
+	done   chan struct{}
+	wg     sync.WaitGroup
 }
 
 type rateEntry struct {
@@ -24,10 +26,21 @@ func newRateLimiter(max int, window time.Duration) *rateLimiter {
 		entries: make(map[string]*rateEntry),
 		max:     max,
 		window:  window,
+		done:    make(chan struct{}),
 	}
 	// Clean stale entries every 5 minutes
-	go rl.cleanupLoop()
+	rl.wg.Add(1)
+	go func() {
+		defer rl.wg.Done()
+		rl.cleanupLoop()
+	}()
 	return rl
+}
+
+// Stop signals the cleanup goroutine to exit and waits for it to finish.
+func (rl *rateLimiter) Stop() {
+	close(rl.done)
+	rl.wg.Wait()
 }
 
 // record records a failed attempt for the given key. Returns true if the key is now blocked.
@@ -57,25 +70,31 @@ func (rl *rateLimiter) record(key string) bool {
 	return len(e.Attempts) > rl.max
 }
 
-// cleanupLoop removes stale entries periodically.
+// cleanupLoop removes stale entries periodically. Exits when rl.done is closed.
 func (rl *rateLimiter) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
-	for range ticker.C {
-		rl.mu.Lock()
-		cutoff := time.Now().Add(-rl.window)
-		for k, e := range rl.entries {
-			valid := make([]time.Time, 0, len(e.Attempts))
-			for _, t := range e.Attempts {
-				if t.After(cutoff) {
-					valid = append(valid, t)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			rl.mu.Lock()
+			cutoff := time.Now().Add(-rl.window)
+			for k, e := range rl.entries {
+				valid := make([]time.Time, 0, len(e.Attempts))
+				for _, t := range e.Attempts {
+					if t.After(cutoff) {
+						valid = append(valid, t)
+					}
+				}
+				if len(valid) == 0 {
+					delete(rl.entries, k)
+				} else {
+					e.Attempts = valid
 				}
 			}
-			if len(valid) == 0 {
-				delete(rl.entries, k)
-			} else {
-				e.Attempts = valid
-			}
+			rl.mu.Unlock()
+		case <-rl.done:
+			return
 		}
-		rl.mu.Unlock()
 	}
 }

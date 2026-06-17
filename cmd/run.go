@@ -85,12 +85,6 @@ func runDaemon(cfg *config.AppConfig) error {
 	// Initialize runtime config state in the API layer
 	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel)
 
-	// Wire runtime config to log handlers for settings sync
-	api.SetRuntimeConfig(&api.RuntimeConfig{
-		ProxyMode:  cfg.ProxyMode,
-		LogLevel:   cfg.LogLevel,
-	})
-
 	// Build admin API router
 	adminRouter := api.NewRouter(s, eng, logger, cfg, Version, BuildTime)
 	webHandler := api.WebHandler()
@@ -146,8 +140,10 @@ func runDaemon(cfg *config.AppConfig) error {
 		log.Printf("Received signal %v, shutting down", sig)
 	case err := <-errCh:
 		log.Printf("Server error: %v", err)
+		adminRouter.Stop()
 		return err
 	}
 
+	adminRouter.Stop()
 	return nil
 }

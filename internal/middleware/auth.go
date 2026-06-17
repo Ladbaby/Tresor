@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 	"net"
 	"net/http"
@@ -8,8 +10,23 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"tresor/internal/config"
 )
 
+// AuthCookie is the name of the cookie used for admin API authentication.
+// Tokens are stored in this cookie instead of URL query parameters to avoid
+// token leakage via access logs, browser history, and referrer headers.
+const AuthCookie = "tresor_token"
+
+// SetAuthCookie sets the auth cookie on the response with secure attributes.
+func SetAuthCookie(w http.ResponseWriter, token string) {
+	w.Header().Set("Set-Cookie", fmt.Sprintf("%s=%s; Path=/api/; SameSite=Lax; Max-Age=86400", AuthCookie, token))
+}
+
+// ClearAuthCookie clears the auth cookie by expiring it immediately.
+func ClearAuthCookie(w http.ResponseWriter) {
+	w.Header().Set("Set-Cookie", fmt.Sprintf("%s=; Path=/api/; SameSite=Lax; Max-Age=0", AuthCookie))
+}
 // SecurityHeaders wraps an http.Handler and injects security headers on every
 // response, while stripping the Server header.
 func SecurityHeaders(next http.Handler) http.Handler {
@@ -28,8 +45,8 @@ func SecurityHeaders(next http.Handler) http.Handler {
 // AuthMiddleware provides authentication for admin API endpoints.
 // It supports three authentication methods:
 //   - Raw password as Bearer token (backwards compat for CLI)
-//   - JWT token as Bearer header (for web UI)
-//   - JWT token as query parameter (for SSE EventSource)
+//   - JWT token as Bearer header (for web UI fetch requests)
+//   - JWT token as cookie (for SSE EventSource, which cannot set custom headers)
 type AuthMiddleware struct {
 	password string
 	secret   []byte
@@ -40,9 +57,21 @@ type AuthMiddleware struct {
 // The secret is derived from the password and used for JWT signing/verification.
 // A rate limiter is set up: max 5 failed login attempts per 60-second window per IP.
 func NewAuthMiddleware(password string) *AuthMiddleware {
+	am := &AuthMiddleware{password: password}
+	if password != "" {
+		secret := sha256.Sum256([]byte(password + config.JWTSalt))
+		am.secret = secret[:]
+	}
+	am.limiter = newRateLimiter(5, 60*time.Second)
+	return am
+}
+
+// NewAuthMiddlewareWithSecret creates an auth middleware with a pre-derived secret.
+// Use this when the secret is already available (e.g., from config) to avoid redundant derivation.
+func NewAuthMiddlewareWithSecret(password string, secret []byte) *AuthMiddleware {
 	am := &AuthMiddleware{
 		password: password,
-		secret:   []byte(password),
+		secret:   secret,
 	}
 	am.limiter = newRateLimiter(5, 60*time.Second)
 	return am
@@ -51,12 +80,22 @@ func NewAuthMiddleware(password string) *AuthMiddleware {
 // SetPassword updates the password and JWT secret at runtime.
 func (am *AuthMiddleware) SetPassword(password string) {
 	am.password = password
-	am.secret = []byte(password)
+	if password != "" {
+		secret := sha256.Sum256([]byte(password + config.JWTSalt))
+		am.secret = secret[:]
+	}
 }
 
 // SetSecret updates the JWT secret independently (used during initialization).
 func (am *AuthMiddleware) SetSecret(secret []byte) {
 	am.secret = secret
+}
+
+// Stop cleans up the rate limiter's background goroutine.
+func (am *AuthMiddleware) Stop() {
+	if am.limiter != nil {
+		am.limiter.Stop()
+	}
 }
 
 // CheckRateLimit checks if the given IP has exceeded the login rate limit.
@@ -101,9 +140,12 @@ func (am *AuthMiddleware) Protect(next http.Handler) http.Handler {
 	})
 }
 
-// Authenticate checks all three auth methods: raw password, JWT header, JWT query param.
+// Authenticate checks auth methods: raw password, JWT header, JWT cookie.
+// Cookie-based auth is used for SSE EventSource connections (which cannot set
+// custom headers). Query parameter auth is not supported — tokens in URLs are
+// logged by proxies, load balancers, and browser history.
 func (am *AuthMiddleware) Authenticate(r *http.Request) bool {
-	// Collect all candidate tokens: Authorization header + query param
+	// Collect all candidate tokens: Authorization header + cookie
 	var tokens []string
 
 	auth := r.Header.Get("Authorization")
@@ -111,25 +153,20 @@ func (am *AuthMiddleware) Authenticate(r *http.Request) bool {
 		tokens = append(tokens, strings.TrimPrefix(auth, "Bearer "))
 	}
 
-	// SSE EventSource can't set headers, so support token query param
-	queryToken := r.URL.Query().Get("token")
-	if queryToken != "" {
-		tokens = append(tokens, queryToken)
+	// Cookie-based auth for SSE EventSource (cookies are sent automatically)
+	if cookie, err := r.Cookie(AuthCookie); err == nil && cookie.Value != "" {
+		tokens = append(tokens, cookie.Value)
 	}
 
 	for _, token := range tokens {
 		// Check 1: Raw password match (backwards compat for CLI)
-		if token == am.password {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(am.password)) == 1 {
 			return true
 		}
 
 		// Check 2: JWT validation
 		if am.secret != nil && len(am.secret) > 0 {
 			if parsed, err := jwt.Parse(token, func(*jwt.Token) (interface{}, error) {
-				// Also accept the raw password as secret for backwards compat
-				if am.password != "" {
-					return []byte(am.password), nil
-				}
 				return am.secret, nil
 			}, jwt.WithValidMethods([]string{"HS256"})); err == nil {
 				if claims, ok := parsed.Claims.(jwt.MapClaims); ok && parsed.Valid {

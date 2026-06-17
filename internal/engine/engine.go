@@ -239,37 +239,149 @@ func corsHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-dangerous-direct-browser-access, x-stainless-arch, x-stainless-helper-method, x-stainless-lang, x-stainless-os, x-stainless-package-version, x-stainless-retry-count, x-stainless-runtime, x-stainless-runtime-version, x-stainless-timeout")
 }
 
+// logAndReturnError handles the repeated pattern of logging an error,
+// writing an HTTP error response, updating the log entry, and recording it.
+func (e *Engine) logAndReturnError(w *statusCaptureWriter, entry *RequestLogEntry, start time.Time, ge *gatewayError) {
+	if ge.cause != nil {
+		log.Printf("%s: %v", ge.logMsg, ge.cause)
+	} else {
+		log.Println(ge.logMsg)
+	}
+	http.Error(w, ge.httpMsg, ge.status)
+	entry.Status = ge.status
+	entry.Error = ge.errLabel
+	entry.Duration = DurationMs(time.Since(start))
+	e.logger.Record(*entry)
+}
+
+// resolveModel reads the request body, extracts the model name, and resolves
+// the target downstream via alias lookup or direct output_model_id matching.
+// Always returns a modelResult (may be partial on error) for entry population.
+func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
+	body, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		return &modelResult{body: body}, &gatewayError{http.StatusInternalServerError, "failed to read body", "failed to read body", "failed to read body", err}
+	}
+
+	model := extractModel(body)
+	if model == "" {
+		return &modelResult{body: body}, &gatewayError{http.StatusBadRequest, "request body missing model", "request body missing model", "missing model", nil}
+	}
+
+	// Step 1: Try active alias
+	alias, err := e.store.FindActiveAlias(model)
+	if err != nil {
+		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up alias for model %s", model), "internal error", "alias lookup error", err}
+	}
+
+	if alias != nil {
+		ds, err := e.store.GetDownstream(alias.DownstreamID)
+		if err != nil {
+			return &modelResult{model: model, body: body}, &gatewayError{http.StatusBadGateway, fmt.Sprintf("error getting downstream %s for alias %s", alias.DownstreamID, alias.ID),
+				fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), "alias downstream missing", err}
+		}
+		return &modelResult{ds: ds, alias: alias, model: model, resolvedModel: alias.OutputModelID, body: rewriteModelInBody(body, alias.OutputModelID)}, nil
+	}
+
+	// Step 2: No alias — try direct downstream by output_model_ids
+	ds, err := e.store.FindDownstreamByOutputModel(model)
+	if err != nil {
+		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up downstream for model %s", model), "internal error", "downstream lookup error", err}
+	}
+	if ds == nil {
+		msg := fmt.Sprintf("unknown model %q", model)
+		return &modelResult{model: model, body: body}, &gatewayError{http.StatusNotFound, msg, msg, "unknown model", nil}
+	}
+
+	return &modelResult{ds: ds, model: model, resolvedModel: model, body: body}, nil
+}
+
+// buildPipeline constructs the transformation pipeline from matching rules and
+// adds auto-translation transformers when input format differs from downstream format.
+// Returns the pipeline and the list of matching rules (for logging).
+func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store.Downstream) (Pipeline, []store.Rule, *gatewayError) {
+	// Find all matching rules (path+model+format filters)
+	rules, err := e.store.FindMatchingRules(path, model, inputFormat, ds.ID, ds.ApiFormats)
+	if err != nil {
+		return Pipeline{}, nil, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error finding rules: %v", err), "internal error", "rule lookup error", err}
+	}
+
+	// Concatenate all matching rules' pipelines (in priority order)
+	var pipeline Pipeline
+	for _, rule := range rules {
+		p, err := ParsePipelineConfig(rule.PipelineConfig, e.registry)
+		if err != nil {
+			return Pipeline{}, nil, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error building pipeline for rule %s: %v", rule.ID, err), "pipeline error", "pipeline error", err}
+		}
+		pipeline.RequestSteps = append(pipeline.RequestSteps, p.RequestSteps...)
+		pipeline.ResponseSteps = append(pipeline.ResponseSteps, p.ResponseSteps...)
+		pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, p.StreamResponseSteps...)
+	}
+
+	// Auto-translation: compare input format with downstream formats
+	if inputFormat != "" && len(ds.ApiFormats) > 0 && !slices.Contains(ds.ApiFormats, inputFormat) {
+		var pluginID string
+		switch inputFormat {
+		case "openai":
+			if slices.Contains(ds.ApiFormats, "openai_responses") {
+				pluginID = "openai2responses"
+			} else {
+				pluginID = "openai2anthropic"
+			}
+		case "anthropic":
+			if slices.Contains(ds.ApiFormats, "openai_responses") {
+				pluginID = "anthropic2responses"
+			} else {
+				pluginID = "anthropic2openai"
+			}
+		case "openai_responses":
+			if slices.Contains(ds.ApiFormats, "openai") {
+				pluginID = "responses2openai"
+			} else if slices.Contains(ds.ApiFormats, "anthropic") {
+				pluginID = "responses2anthropic"
+			}
+		}
+		if pluginID != "" {
+			transformer, err := e.registry.CreatePlugin(pluginID, nil)
+			if err != nil {
+				log.Printf("Error creating auto-translation plugin %s: %v", pluginID, err)
+			} else {
+				name := transformerTypeName(transformer)
+				if reqT, ok := transformer.(RequestTransformer); ok && !pluginInList[RequestTransformer](pipeline.RequestSteps, name) {
+					pipeline.RequestSteps = append([]RequestTransformer{reqT}, pipeline.RequestSteps...)
+				}
+				if respT, ok := transformer.(ResponseTransformer); ok && !pluginInList[ResponseTransformer](pipeline.ResponseSteps, name) {
+					pipeline.ResponseSteps = append(pipeline.ResponseSteps, respT)
+				}
+				if streamT, ok := transformer.(StreamResponseTransformer); ok && !pluginInList[StreamResponseTransformer](pipeline.StreamResponseSteps, name) {
+					pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, streamT)
+				}
+				log.Printf("Auto-translating %s → downstream %s (formats: %v)", inputFormat, ds.ID, ds.ApiFormats)
+			}
+		}
+	}
+
+	return pipeline, rules, nil
+}
+
 // HandleProxy is the main proxy handler for LLM requests.
 func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
-	// Handle CORS preflight (OPTIONS) before any auth check.
-	// Browsers never send Authorization headers on preflight requests, so
-	// authenticating the OPTIONS request would always fail.
 	corsHeaders(w)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	// Reject non-LLM paths immediately (browser noise like /favicon.ico).
-	// These don't need logging — they're not gateway requests.
 	if strings.HasPrefix(r.URL.Path, "/api/") || isLLMPath(r.URL.Path) == false {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
 	start := time.Now()
-
-	// Wrap the response writer to capture status code
 	cw := newStatusCaptureWriter(w)
+	entry := RequestLogEntry{Timestamp: start, Method: r.Method, Path: r.URL.Path}
 
-	// Collect metadata for logging
-	entry := RequestLogEntry{
-		Timestamp: start,
-		Method:    r.Method,
-		Path:      r.URL.Path,
-	}
-
-	// Validate incoming proxy API key (if configured)
 	if !e.validateProxyAuth(r, cw) {
 		entry.Status = http.StatusUnauthorized
 		entry.Error = "unauthorized"
@@ -278,7 +390,6 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle model list requests — aggregate models from all downstreams
 	if r.URL.Path == "/v1/models" || r.URL.Path == "/models" {
 		e.handleModels(cw)
 		entry.Status = cw.status
@@ -287,104 +398,24 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the full body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(cw, "failed to read body", http.StatusInternalServerError)
-		entry.Status = http.StatusInternalServerError
-		entry.Error = "failed to read body"
-		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
+	// Resolve model → downstream (reads body, extracts model, tries alias then direct lookup)
+	result, ge := e.resolveModel(r)
+	if ge != nil {
+		entry.Model = result.model
+		e.logAndReturnError(cw, &entry, start, ge)
 		return
 	}
-	r.Body.Close()
-
-	// Extract model name from body (if present)
-	model := extractModel(body)
-	entry.Model = model
-
-	// Model must be specified for forwarding
-	if model == "" {
-		http.Error(cw, "request body missing model", http.StatusBadRequest)
-		entry.Status = http.StatusBadRequest
-		entry.Error = "missing model"
-		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
-		return
+	entry.Model = result.model
+	entry.ResolvedModel = result.resolvedModel
+	if result.alias != nil {
+		entry.AliasGroup = result.alias.InputModelID
 	}
 
-	// --- Model Resolution (downstream selection) ---
-	// This is the forwarding gate: a valid downstream must be resolved.
-	// Rules are optional policy layers for transforms only.
-
-	var ds *store.Downstream
-	currentBody := body
-
-	// Step 1: Try active alias first
-	alias, err := e.store.FindActiveAlias(model)
-	if err != nil {
-		log.Printf("Error looking up alias for model %s: %v", model, err)
-		http.Error(cw, "internal error", http.StatusInternalServerError)
-		entry.Status = http.StatusInternalServerError
-		entry.Error = "alias lookup error"
-		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
-		return
-	}
-
-	if alias != nil {
-		entry.AliasGroup = alias.InputModelID
-		// Alias resolves the downstream and rewrites the model name
-		ds, err = e.store.GetDownstream(alias.DownstreamID)
-		if err != nil {
-			log.Printf("Error getting downstream %s for alias %s: %v", alias.DownstreamID, alias.ID, err)
-			http.Error(cw, fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), http.StatusBadGateway)
-			entry.Status = http.StatusBadGateway
-			entry.Error = "alias downstream missing"
-			entry.Duration = DurationMs(time.Since(start))
-			e.logger.Record(entry)
-			return
-		}
-		currentBody = rewriteModelInBody(body, alias.OutputModelID)
-		entry.ResolvedModel = alias.OutputModelID
-	} else {
-		// Step 2: No alias — try direct downstream by output_model_ids
-		ds, err = e.store.FindDownstreamByOutputModel(model)
-		if err != nil {
-			log.Printf("Error looking up downstream for model %s: %v", model, err)
-			http.Error(cw, "internal error", http.StatusInternalServerError)
-			entry.Status = http.StatusInternalServerError
-			entry.Error = "downstream lookup error"
-			entry.Duration = DurationMs(time.Since(start))
-			e.logger.Record(entry)
-			return
-		}
-
-		if ds == nil {
-			http.Error(cw, fmt.Sprintf("unknown model %q", model), http.StatusNotFound)
-			entry.Status = http.StatusNotFound
-			entry.Error = "unknown model"
-			entry.Duration = DurationMs(time.Since(start))
-			e.logger.Record(entry)
-			return
-		}
-		// No alias: keep original model in the body
-		entry.ResolvedModel = model
-	}
-
-	// Step 3: Format-aware rule matching
-	// Detect input format from request path.
+	// Build transformation pipeline (rule matching + auto-translation)
 	inputFormat := detectInputFormat(r.URL.Path)
-	// Find all matching rules (path+model+format filters). Rules only contribute
-	// pipeline transformers; they never override the target downstream.
-	rules, err := e.store.FindMatchingRules(r.URL.Path, model, inputFormat, ds.ID, ds.ApiFormats)
-	if err != nil {
-		log.Printf("Error finding rules: %v", err)
-		http.Error(cw, "internal error", http.StatusInternalServerError)
-		entry.Status = http.StatusInternalServerError
-		entry.Error = "rule lookup error"
-		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
+	pipeline, rules, ge := e.buildPipeline(r.URL.Path, result.model, inputFormat, result.ds)
+	if ge != nil {
+		e.logAndReturnError(cw, &entry, start, ge)
 		return
 	}
 
@@ -396,122 +427,40 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Populate downstream info
-	entry.DownstreamID = ds.ID
-	entry.DownstreamName = ds.Name
-
-	// Build pipeline context
+	// Populate downstream info and build pipeline context
+	entry.DownstreamID = result.ds.ID
+	entry.DownstreamName = result.ds.Name
 	ctx := &PipelineContext{
 		TargetDownstream: &Downstream{
-			ID:         ds.ID,
-			Name:       ds.Name,
-			BaseURL:    ds.BaseURL,
-			APIKey:     ds.APIKey,
-			ApiFormats: ds.ApiFormats,
+			ID:         result.ds.ID,
+			Name:       result.ds.Name,
+			BaseURL:    result.ds.BaseURL,
+			APIKey:     result.ds.APIKey,
+			ApiFormats: result.ds.ApiFormats,
 		},
 		Variables: make(map[string]interface{}),
 	}
 
-	// Build pipeline by concatenating all matching rules' pipelines (in priority order).
-	var pipeline Pipeline
-	for _, rule := range rules {
-		p, err := ParsePipelineConfig(rule.PipelineConfig, e.registry)
-		if err != nil {
-			log.Printf("Error building pipeline for rule %s: %v", rule.ID, err)
-			http.Error(cw, "pipeline error", http.StatusInternalServerError)
-			entry.Status = http.StatusInternalServerError
-			entry.Error = "pipeline error"
-			entry.Duration = DurationMs(time.Since(start))
-			e.logger.Record(entry)
-			return
-		}
-		pipeline.RequestSteps = append(pipeline.RequestSteps, p.RequestSteps...)
-		pipeline.ResponseSteps = append(pipeline.ResponseSteps, p.ResponseSteps...)
-		pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, p.StreamResponseSteps...)
-	}
-
-	// Auto-translation: compare input format with downstream formats
-	if inputFormat != "" && len(ds.ApiFormats) > 0 && !slices.Contains(ds.ApiFormats, inputFormat) {
-		pluginID := "openai2anthropic"
-		typeName := "OpenAI2Anthropic"
-		switch inputFormat {
-		case "openai":
-			if slices.Contains(ds.ApiFormats, "openai_responses") {
-				pluginID = "openai2responses"
-				typeName = "OpenAI2Responses"
-			} else {
-				pluginID = "openai2anthropic"
-				typeName = "OpenAI2Anthropic"
-			}
-		case "anthropic":
-			if slices.Contains(ds.ApiFormats, "openai_responses") {
-				pluginID = "anthropic2responses"
-				typeName = "Anthropic2Responses"
-			} else {
-				pluginID = "anthropic2openai"
-				typeName = "Anthropic2OpenAI"
-			}
-		case "openai_responses":
-			if slices.Contains(ds.ApiFormats, "openai") {
-				pluginID = "responses2openai"
-				typeName = "Responses2OpenAI"
-			} else if slices.Contains(ds.ApiFormats, "anthropic") {
-				pluginID = "responses2anthropic"
-				typeName = "Responses2Anthropic"
-			}
-		}
-		transformer, err := e.registry.CreatePlugin(pluginID, nil)
-		if err != nil {
-			log.Printf("Error creating auto-translation plugin %s: %v", pluginID, err)
-		} else {
-			// Prepend request transformer (convert first), append response/stream transformers (convert last)
-			if reqT, ok := transformer.(RequestTransformer); ok && !pluginInList(pipeline.RequestSteps, typeName) {
-				pipeline.RequestSteps = append([]RequestTransformer{reqT}, pipeline.RequestSteps...)
-			}
-			if respT, ok := transformer.(ResponseTransformer); ok && !pluginInListResp(pipeline.ResponseSteps, typeName) {
-				pipeline.ResponseSteps = append(pipeline.ResponseSteps, respT)
-			}
-			if streamT, ok := transformer.(StreamResponseTransformer); ok && !pluginInListStream(pipeline.StreamResponseSteps, typeName) {
-				pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, streamT)
-			}
-			log.Printf("Auto-translating %s → downstream %s (formats: %v)", inputFormat, ds.ID, ds.ApiFormats)
-		}
-	}
-
-	// Execute request transformers (use currentBody which may have been rewritten by alias)
-	currentReq, currentBody, err := ExecuteRequestPipeline(r, currentBody, ctx, pipeline.RequestSteps)
+	// Execute request transformers
+	currentReq, currentBody, err := ExecuteRequestPipeline(r, result.body, ctx, pipeline.RequestSteps)
 	if err != nil {
-		log.Printf("Request pipeline error: %v", err)
-		http.Error(cw, fmt.Sprintf("request pipeline error: %v", err), http.StatusBadGateway)
-		entry.Status = http.StatusBadGateway
-		entry.Error = "request pipeline error"
-		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
+		e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "request pipeline error", fmt.Sprintf("request pipeline error: %v", err), "request pipeline error", err})
 		return
 	}
 
-	// Forward the request to the downstream
+	// Forward request to downstream
 	resp, cancel, err := e.forwardRequest(currentReq, currentBody, ctx)
 	if err != nil {
 		cancel()
-		log.Printf("Forward error: %v", err)
-		http.Error(cw, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
-		entry.Status = http.StatusBadGateway
-		entry.Error = "upstream error"
-		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
+		e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "forward error", fmt.Sprintf("upstream error: %v", err), "upstream error", err})
 		return
 	}
 
-	// Check if this is a streaming (SSE) response
-	isStream := isEventStream(resp.Header.Get("Content-Type"))
-
-	if isStream {
-		// Record latency immediately (time-to-first-response, not full stream duration).
+	// Handle streaming response
+	if isEventStream(resp.Header.Get("Content-Type")) {
 		entry.Status = resp.StatusCode
 		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
-
 		e.handleStreamingResponse(cw, resp, ctx, &pipeline, cancel, r.Context())
 		return
 	}
@@ -525,30 +474,17 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		if len(respBody) > 0 {
 			errMsg += ": " + truncateString(string(respBody), 500)
 		}
-		http.Error(cw, errMsg, http.StatusBadGateway)
-		entry.Status = http.StatusBadGateway
-		entry.Error = "failed to read response"
-		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
+		e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, errMsg, errMsg, "failed to read response", err})
 		return
 	}
 
-	// Execute response transformers
 	transformedBody, err := ExecuteResponsePipeline(resp, respBody, ctx, pipeline.ResponseSteps)
 	if err != nil {
-		log.Printf("Response pipeline error: %v", err)
-		http.Error(cw, fmt.Sprintf("response pipeline error: %v", err), http.StatusBadGateway)
-		entry.Status = http.StatusBadGateway
-		entry.Error = "response pipeline error"
-		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
+		e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "response pipeline error", fmt.Sprintf("response pipeline error: %v", err), "response pipeline error", err})
 		return
 	}
 
-	// Copy response headers, but strip framing headers that are now stale
-	// after response transformation. The transformed body is always different
-	// from the upstream body, so Content-Length and Transfer-Encoding from the
-	// upstream response are invalid.
+	// Copy response headers, stripping stale framing headers
 	for k, v := range resp.Header {
 		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") {
 			continue
@@ -723,6 +659,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 		if strings.HasPrefix(line, "data: ") {
 			dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
+			// Guard against unbounded accumulation from malformed downstreams
+			if cap(dataLines) > 64*1024 {
+				log.Printf("SSE data buffer exceeded 64KB limit, truncating event")
+				eventLine = ""
+				dataLines = nil
+			}
 			continue
 		}
 
@@ -896,28 +838,8 @@ func truncateString(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// pluginInList checks if a transformer with the given type name is already in the request pipeline.
-func pluginInList(transformers []RequestTransformer, typeName string) bool {
-	for _, t := range transformers {
-		if transformerTypeName(t) == typeName {
-			return true
-		}
-	}
-	return false
-}
-
-// pluginInListResp checks if a transformer with the given type name is already in the response pipeline.
-func pluginInListResp(transformers []ResponseTransformer, typeName string) bool {
-	for _, t := range transformers {
-		if transformerTypeName(t) == typeName {
-			return true
-		}
-	}
-	return false
-}
-
-// pluginInListStream checks if a transformer with the given type name is already in the stream pipeline.
-func pluginInListStream(transformers []StreamResponseTransformer, typeName string) bool {
+// pluginInList checks if a transformer with the given type name is already in the pipeline.
+func pluginInList[T any](transformers []T, typeName string) bool {
 	for _, t := range transformers {
 		if transformerTypeName(t) == typeName {
 			return true
@@ -927,6 +849,9 @@ func pluginInListStream(transformers []StreamResponseTransformer, typeName strin
 }
 
 func transformerTypeName(t interface{}) string {
+	if namer, ok := t.(PluginNamer); ok {
+		return namer.PluginName()
+	}
 	typ := reflect.TypeOf(t)
 	if typ == nil {
 		return ""
