@@ -754,7 +754,7 @@ async function loadDownstreams() {
         const ds = await api('/downstreams');
         cachedDownstreams = ds;
         tbody.innerHTML = ds.length === 0
-            ? '<tr><td colspan="6" class="loading">No downstreams configured</td></tr>'
+            ? '<tr><td colspan="5" class="loading">No downstreams configured</td></tr>'
             : ds.map(d => {
                 const models = (d.output_model_ids || []).map(m => esc(m));
                 const formats = d.api_formats || [];
@@ -769,10 +769,19 @@ async function loadDownstreams() {
                     <td><strong>${esc(d.name)}</strong></td>
                     <td>${formatCell}</td>
                     <td><code>${esc(d.base_url)}</code></td>
-                    <td><code>${esc(maskKey(d.api_key))}</code></td>
                     <td>
                         <span class="model-badge">${(d.output_model_ids || []).length}</span>
-                        ${models.length > 0 ? '<ul class="model-list">' + models.map(m => '<li>' + m + '</li>').join('') + '</ul>' : '<em class="text-muted">none</em>'}
+                        ${models.length > 0 ? (function(){
+                            const visible = models.slice(0, 3);
+                            const extra = models.length - 3;
+                            const id = esc(d.id);
+                            const lis = visible.map(m => '<li>' + m + '</li>').join('');
+                            if (extra > 0) {
+                                return '<ul class="model-list">' + lis + '</ul>'
+                                    + '<span class="model-extra" data-id="' + id + '">+ ' + extra + ' more</span>';
+                            }
+                            return '<ul class="model-list">' + lis + '</ul>';
+                        })() : '<em class="text-muted">none</em>'}
                     </td>
                     <td>
                         <button class="btn-small downstream-edit-btn" data-action="edit-downstream" data-id="${esc(d.id)}">Edit</button>
@@ -781,14 +790,8 @@ async function loadDownstreams() {
                 </tr>`;
             }).join('');
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="6" class="loading">Error: ${esc(err.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" class="loading">Error: ${esc(err.message)}</td></tr>`;
     }
-}
-
-function maskKey(key) {
-    if (!key || key.length === 0) return '';
-    if (key.length <= 4) return '****';
-    return key.substring(0, 2) + '*'.repeat(key.length - 4) + key.substring(key.length - 2);
 }
 
 function openDownstreamModal(ds) {
@@ -880,16 +883,8 @@ async function fetchDownstreamModels(id) {
     try {
         let resp;
         if (id) {
-            // Existing downstream: use the ID-based endpoint
             resp = await api('/downstreams/' + id + '/fetch-models', { method: 'POST' });
-            const modelIds = resp.output_model_ids || [];
-            const container = document.getElementById('model-ids-container');
-            container.innerHTML = '';
-            modelIds.forEach(m => {
-                addModelIdRow(container, m);
-            });
         } else {
-            // New downstream: use the standalone fetch endpoint with form values
             resp = await api('/fetch-models', {
                 method: 'POST',
                 body: JSON.stringify({
@@ -897,15 +892,13 @@ async function fetchDownstreamModels(id) {
                     api_key:  document.getElementById('downstream-key').value,
                 }),
             });
-            const container = document.getElementById('model-ids-container');
-            container.innerHTML = '';
-            (resp.model_ids || []).forEach(m => {
-                addModelIdRow(container, m);
-            });
         }
+        const modelIds = resp.model_ids || resp.output_model_ids || [];
+
+        // Show the fetch models popup
+        showFetchModelsPopup(modelIds);
     } catch (err) {
         let msg = err.message || String(err);
-        // Strip the "fetch failed: " prefix from the server response for cleaner display
         if (msg.startsWith('fetch failed: ')) {
             msg = msg.substring('fetch failed: '.length);
         }
@@ -914,6 +907,83 @@ async function fetchDownstreamModels(id) {
     btn.textContent = origText;
     btn.disabled = false;
 }
+
+/**
+ * Show the fetch models popup with a list of available models.
+ * Already-added models show as "Added" (disabled). Other models
+ * can be toggled with "+ Add" / "Added". Selections are committed
+ * to #model-ids-container only when "Done" is clicked.
+ */
+function showFetchModelsPopup(modelIds) {
+    const list = document.getElementById('fetch-models-list');
+    list.innerHTML = '';
+
+    // Collect existing model IDs from the downstream modal
+    const existingIds = new Set();
+    document.getElementById('model-ids-container').querySelectorAll('.model-id-input').forEach(function (input) {
+        const v = input.value.trim();
+        if (v) existingIds.add(v);
+    });
+
+    if (modelIds.length === 0) {
+        list.innerHTML = '<div style="padding:1rem;text-align:center;color:var(--text-muted);">No models returned by the provider.</div>';
+        document.getElementById('fetch-models-modal').classList.remove('hidden');
+        return;
+    }
+
+    // Track models selected for addition (not already in existingIds)
+    const pendingAdd = new Set();
+
+    modelIds.forEach(function (m) {
+        const row = document.createElement('div');
+        row.className = 'fetch-model-row';
+
+        const name = document.createElement('span');
+        name.className = 'fetch-model-name';
+        name.textContent = m;
+        row.appendChild(name);
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'fetch-model-add';
+
+        if (existingIds.has(m)) {
+            // Already in the downstream list — show as Added, non-interactive
+            addBtn.textContent = 'Added';
+            addBtn.classList.add('added');
+            addBtn.disabled = true;
+        } else {
+            addBtn.textContent = '+ Add';
+            addBtn.onclick = function () {
+                if (pendingAdd.has(m)) {
+                    pendingAdd.delete(m);
+                    addBtn.textContent = '+ Add';
+                    addBtn.classList.remove('added');
+                } else {
+                    pendingAdd.add(m);
+                    addBtn.textContent = 'Added';
+                    addBtn.classList.add('added');
+                }
+            };
+        }
+
+        row.appendChild(addBtn);
+        list.appendChild(row);
+    });
+
+    // Replace the "Done" button handler to commit pending selections, then close
+    document.getElementById('btn-fetch-models-close').onclick = function commitFetch() {
+        const container = document.getElementById('model-ids-container');
+        pendingAdd.forEach(function (modelId) {
+            addModelIdRow(container, modelId);
+        });
+        pendingAdd.clear();
+        document.getElementById('fetch-models-modal').classList.add('hidden');
+    };
+
+    document.getElementById('fetch-models-modal').classList.remove('hidden');
+}
+
+// Also close the fetch popup when clicking outside it (handled by .modal background click)
 
 function editDownstream(id) {
     api('/downstreams/' + id).then(ds => openDownstreamModal(ds)).catch(err => alert(err.message));
@@ -1071,11 +1141,24 @@ document.getElementById('rules-body').addEventListener('click', function (e) {
 // Event delegation for downstream table buttons (replaces inline onclick)
 document.getElementById('downstreams-body').addEventListener('click', function (e) {
     const btn = e.target.closest('.downstream-edit-btn, .downstream-delete-btn');
-    if (!btn) return;
-    const action = btn.dataset.action;
-    const id = btn.dataset.id;
-    if (action === 'edit-downstream') editDownstream(id);
-    else if (action === 'delete-downstream') deleteDownstream(id);
+    if (btn) {
+        const action = btn.dataset.action;
+        const id = btn.dataset.id;
+        if (action === 'edit-downstream') editDownstream(id);
+        else if (action === 'delete-downstream') deleteDownstream(id);
+        return;
+    }
+
+    // Expand "+ N more" model list
+    const extra = e.target.closest('.model-extra');
+    if (extra) {
+        const id = extra.dataset.id;
+        const ds = (cachedDownstreams || []).find(d => d.id === id);
+        if (ds) {
+            const models = (ds.output_model_ids || []).map(m => esc(m));
+            extra.outerHTML = '<ul class="model-list">' + models.map(m => '<li>' + m + '</li>').join('') + '</ul>';
+        }
+    }
 });
 
 function shortPipeline(config) {
@@ -1394,10 +1477,16 @@ async function reorderAliasGroups(order) {
  * Populated from the given downstream's known output_model_ids.
  * If no models are known, shows a hint and reveals the custom text input.
  */
-function populateOutputModelSelect(containerEl, downstreamId) {
+function populateOutputModelSelect(containerEl, downstreamId, excludeModels) {
     containerEl.innerHTML = '';
     const ds = (cachedDownstreams || []).find(d => d.id === downstreamId);
-    const models = ds ? (ds.output_model_ids || []) : [];
+    let models = ds ? (ds.output_model_ids || []) : [];
+
+    // Filter out models already in the alias group
+    if (excludeModels && excludeModels.length > 0) {
+        const ex = excludeModels.map(m => m.toLowerCase());
+        models = models.filter(m => !ex.includes(m.toLowerCase()));
+    }
 
     // Hide custom input by default
     const customInput = containerEl.closest('label').querySelector('.custom-model-input');
@@ -1479,11 +1568,28 @@ async function openAliasOptionModal(inputModelId) {
     customInput.value = '';
     customInput.style.display = 'none';
 
+    // Fetch alias groups to determine which models are already in this group
+    let excludeModels = [];
+    try {
+        const groups = await api('/aliases');
+        const group = groups.find(function (g) { return g.input_model_id === inputModelId; });
+        if (group) {
+            excludeModels = group.options.map(function (o) { return o.output_model_id; });
+        }
+    } catch {
+        // If fetch fails, show all models (no exclusions)
+    }
+
     // Wire up downstream change handler to populate models
     const downstreamSelect = document.getElementById('alias-downstream');
     downstreamSelect.onchange = () => {
-        populateOutputModelSelect(outputContainer, downstreamSelect.value);
+        populateOutputModelSelect(outputContainer, downstreamSelect.value, excludeModels);
     };
+
+    // If a downstream is already selected (pre-populated), populate immediately
+    if (downstreamSelect.value) {
+        populateOutputModelSelect(outputContainer, downstreamSelect.value, excludeModels);
+    }
 
     document.getElementById('alias-modal').classList.remove('hidden');
 }
@@ -1887,6 +1993,16 @@ function buildLogRow(entry, isNew) {
     if (entry.error || (entry.status >= 500)) tr.classList.add('log-error');
     else if (entry.status >= 400) tr.classList.add('log-warn');
 
+    // Debug entries render as system messages spanning all columns
+    if (entry.level === 'debug') {
+        tr.classList.add('log-debug');
+        const td = document.createElement('td');
+        td.setAttribute('colspan', '9');
+        td.innerHTML = '<span class="debug-bullet">◆</span> <span class="debug-msg">' + esc(entry.message || '') + '</span>';
+        tr.appendChild(td);
+        return tr;
+    }
+
     // Time
     let td = document.createElement('td');
     td.textContent = formatTime(entry.timestamp);
@@ -2003,7 +2119,7 @@ function applyLogFilter(query) {
 
         const text = [entry.model, entry.resolved_model, entry.path, entry.downstream_name,
             entry.downstream_id, entry.error, entry.alias_group, entry.method,
-            String(entry.status)].join(' ').toLowerCase();
+            String(entry.status), entry.message, entry.level].join(' ').toLowerCase();
         tr.style.display = (q === '' || text.indexOf(q) !== -1) ? '' : 'none';
     });
 }

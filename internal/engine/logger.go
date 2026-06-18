@@ -72,10 +72,15 @@ type RequestLogEntry struct {
 	Status         int       `json:"status"`
 	Duration       DurationMs `json:"duration"`
 	Error          string    `json:"error,omitempty"`
+	Level          string    `json:"level,omitempty"`
+	Message        string    `json:"message,omitempty"`
 }
 
-// logSeverity returns the severity level of a log entry based on status code.
+// logSeverity returns the severity level of a log entry based on status code and type.
 func (e RequestLogEntry) logSeverity() LogLevel {
+	if e.Level == "debug" {
+		return LogLevelDebug
+	}
 	if e.Error != "" {
 		return LogLevelError
 	}
@@ -125,6 +130,20 @@ func (l *RequestLogger) Level() LogLevel {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.level
+}
+
+// Debug records a debug-level system message. These entries are filtered
+// out when the log level is above LogLevelDebug, and display as system
+// messages in the web UI rather than traffic entries.
+func (l *RequestLogger) Debug(format string, args ...interface{}) {
+	if l == nil {
+		return
+	}
+	l.Record(RequestLogEntry{
+		Timestamp: time.Now(),
+		Level:     "debug",
+		Message:   fmt.Sprintf(format, args...),
+	})
 }
 
 // Record adds a new log entry and notifies SSE subscribers.

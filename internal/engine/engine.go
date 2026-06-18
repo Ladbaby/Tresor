@@ -281,6 +281,7 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 			return &modelResult{model: model, body: body}, &gatewayError{http.StatusBadGateway, fmt.Sprintf("error getting downstream %s for alias %s", alias.DownstreamID, alias.ID),
 				fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), "alias downstream missing", err}
 		}
+		e.logger.Debug("alias match: model %q → alias %q → downstream %q (%s)", model, alias.ID, ds.ID, alias.OutputModelID)
 		return &modelResult{ds: ds, alias: alias, model: model, resolvedModel: alias.OutputModelID, body: rewriteModelInBody(body, alias.OutputModelID)}, nil
 	}
 
@@ -291,9 +292,11 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 	}
 	if ds == nil {
 		msg := fmt.Sprintf("unknown model %q", model)
+		e.logger.Debug("model %q did not match any alias or downstream output_model_ids", model)
 		return &modelResult{model: model, body: body}, &gatewayError{http.StatusNotFound, msg, msg, "unknown model", nil}
 	}
 
+	e.logger.Debug("direct resolution: model %q → downstream %q (%s)", model, ds.ID, ds.Name)
 	return &modelResult{ds: ds, model: model, resolvedModel: model, body: body}, nil
 }
 
@@ -317,6 +320,12 @@ func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store
 		pipeline.RequestSteps = append(pipeline.RequestSteps, p.RequestSteps...)
 		pipeline.ResponseSteps = append(pipeline.ResponseSteps, p.ResponseSteps...)
 		pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, p.StreamResponseSteps...)
+	}
+
+	if len(rules) > 0 {
+		e.logger.Debug("matched %d rule(s) for %s %s: %v", len(rules), path, model, func() []string { ids := make([]string, len(rules)); for i, r := range rules { ids[i] = r.ID }; return ids }())
+	} else {
+		e.logger.Debug("no rules matched for %s %s", path, model)
 	}
 
 	// Auto-translation: compare input format with downstream formats
@@ -357,7 +366,7 @@ func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store
 				if streamT, ok := transformer.(StreamResponseTransformer); ok && !pluginInList[StreamResponseTransformer](pipeline.StreamResponseSteps, name) {
 					pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, streamT)
 				}
-				log.Printf("Auto-translating %s → downstream %s (formats: %v)", inputFormat, ds.ID, ds.ApiFormats)
+				e.logger.Debug("auto-translating %s → downstream %s (formats: %v)", inputFormat, ds.ID, ds.ApiFormats)
 			}
 		}
 	}
@@ -430,6 +439,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// Populate downstream info and build pipeline context
 	entry.DownstreamID = result.ds.ID
 	entry.DownstreamName = result.ds.Name
+	e.logger.Debug("forwarding %s %s → downstream %q (%s) with model %q", r.Method, r.URL.Path, result.ds.ID, result.ds.Name, result.resolvedModel)
 	ctx := &PipelineContext{
 		TargetDownstream: &Downstream{
 			ID:         result.ds.ID,

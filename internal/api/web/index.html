@@ -36,7 +36,6 @@
                 <button class="tab" data-tab="downstreams">⚡ Downstreams</button>
                 <button class="tab" data-tab="aliases">🔀 Aliases</button>
                 <button class="tab" data-tab="rules">📋 Rules</button>
-                <button class="tab" data-tab="plugins">🧩 Plugins</button>
                 <button class="tab" data-tab="settings">⚙️ Settings</button>
                 <button class="tab" data-tab="logs">📊 Logs</button>
                 <button class="tab" data-tab="about">ℹ️ About</button>
@@ -66,13 +65,12 @@
                                 <th>Name</th>
                                 <th>Format</th>
                                 <th>Base URL</th>
-                                <th>API Key</th>
                                 <th>Models</th>
                                 <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="downstreams-body">
-                            <tr><td colspan="6" class="loading">Loading...</td></tr>
+                            <tr><td colspan="5" class="loading">Loading...</td></tr>
                         </tbody>
                     </table>
 
@@ -99,6 +97,17 @@
                                 </label>
                                 <button type="submit" class="btn-primary">Save</button>
                             </form>
+                        </div>
+                    </div>
+
+                    <!-- Fetch Models Popup -->
+                    <div id="fetch-models-modal" class="modal hidden">
+                        <div class="modal-content" style="max-width:500px;">
+                            <span class="close">&times;</span>
+                            <h3>Fetch Models from Provider</h3>
+                            <p class="text-muted" style="margin-bottom:1rem;">Click <strong>+ Add</strong> next to a model to add it to the output model IDs list.</p>
+                            <div id="fetch-models-list" class="fetch-models-list"></div>
+                            <button type="button" class="btn-small" id="btn-fetch-models-close" style="width:100%;margin-top:0.75rem;">Done</button>
                         </div>
                     </div>
                 </section>
@@ -179,6 +188,20 @@
                         </tbody>
                     </table>
 
+                    <h2 style="margin-top:2rem">Available Plugins</h2>
+                    <table id="plugins-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Description</th>
+                                <th>Config Schema</th>
+                            </tr>
+                        </thead>
+                        <tbody id="plugins-body">
+                            <tr><td colspan="3" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+
                     <!-- Rule Editor Modal -->
                     <div id="rule-modal" class="modal hidden">
                         <div class="modal-content">
@@ -228,23 +251,6 @@
                             </form>
                         </div>
                     </div>
-                </section>
-
-                <!-- Plugins Tab -->
-                <section id="tab-plugins" class="tab-content">
-                    <h2>Available Plugins</h2>
-                    <table id="plugins-table">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Description</th>
-                                <th>Config Schema</th>
-                            </tr>
-                        </thead>
-                        <tbody id="plugins-body">
-                            <tr><td colspan="3" class="loading">Loading...</td></tr>
-                        </tbody>
-                    </table>
                 </section>
 
                 <!-- Settings Tab -->
@@ -302,13 +308,13 @@
                         <div class="settings-group">
                             <h3>Logging</h3>
                             <p class="settings-description">
-                                Control request logging verbosity. Entries below the selected level are filtered out.
+                                Control request logging verbosity. <strong>Info</strong> shows only gateway traffic (requests, responses, errors). <strong>Debug</strong> adds internal system messages about routing decisions, alias resolution, rule matching, and auto-translation.
                             </p>
                             <div class="settings-row">
                                 <label for="setting-log-level">Log Level</label>
                                 <select id="setting-log-level">
-                                    <option value="debug">Debug (all requests)</option>
-                                    <option value="info" selected>Info (default)</option>
+                                    <option value="debug">Debug (traffic + system messages)</option>
+                                    <option value="info" selected>Info (traffic only)</option>
                                     <option value="warn">Warn</option>
                                     <option value="error">Error only</option>
                                 </select>
@@ -326,7 +332,6 @@
                                     <option value="downstreams">Downstreams</option>
                                     <option value="aliases">Aliases</option>
                                     <option value="rules">Rules</option>
-                                    <option value="plugins">Plugins</option>
                                     <option value="settings">Settings</option>
                                     <option value="logs">Logs</option>
                                     <option value="about">About</option>
@@ -398,7 +403,7 @@
                             <a href="https://github.com/Ladbaby/Tresor" target="_blank" rel="noopener noreferrer" class="about-link">
                                 📦 GitHub Repository
                             </a>
-                            <a href="https://github.com/Ladbaby/Tresor/blob/main/README.md" target="_blank" rel="noopener noreferrer" class="about-link">
+                            <a href="https://ladbaby.github.io/Tresor-docs/" target="_blank" rel="noopener noreferrer" class="about-link">
                                 📖 Documentation
                             </a>
                         </div>

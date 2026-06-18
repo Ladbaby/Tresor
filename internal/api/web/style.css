@@ -483,10 +483,16 @@ form .btn-primary {
 select {
     appearance: none;
     -webkit-appearance: none;
+    -moz-appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b949e' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 0.75rem center;
+    background-size: 12px;
     padding-right: 2rem;
+}
+
+select::-ms-expand {
+    display: none;
 }
 
 [data-theme="light"] select {
@@ -962,25 +968,53 @@ select option:checked {
 [data-theme="light"] .format-openai_responses { background: #ddf0ff; color: #0969da; }
 [data-theme="light"] .format-anthropic { background: #fff8c2; color: #9e6a0c; }
 
-/* Format checkbox group */
+/* Format checkbox group — pill/tag style matching alias model tags */
 .format-checkboxes {
     display: flex;
-    gap: 1rem;
+    flex-wrap: wrap;
+    gap: 0.4rem;
     margin-top: 0.3rem;
 }
 
 .format-checkbox {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
-    font-size: 0.85rem;
-    color: var(--text-primary);
+    gap: 0.3rem;
+    padding: 0.25rem 0.6rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
     cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+    font-size: 0.78rem;
+    color: var(--text-primary);
+}
+
+.format-checkbox:hover {
+    background: var(--border-color);
+}
+
+.format-checkbox:has(input:checked) {
+    background: var(--accent-bg);
+    border-color: var(--accent);
+    color: var(--accent);
 }
 
 .format-checkbox input[type="checkbox"] {
-    width: auto;
-    cursor: pointer;
+    display: none;
+}
+
+.format-checkbox::before {
+    content: "☐";
+    font-size: 0.7rem;
+    line-height: 1;
+    opacity: 0.6;
+}
+
+.format-checkbox:has(input:checked)::before {
+    content: "☑";
+    opacity: 1;
 }
 
 .model-list {
@@ -1000,6 +1034,20 @@ select option:checked {
     font-size: 0.7rem;
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
     color: var(--text-secondary);
+}
+
+.model-extra {
+    display: inline-block;
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
+    color: var(--accent);
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.model-extra:hover {
+    color: var(--accent-hover);
+    text-decoration: underline;
 }
 
 .model-ids-container {
@@ -1137,6 +1185,64 @@ select option:checked {
 .custom-model-input:focus {
     outline: none;
     border-color: var(--accent);
+}
+
+/* Fetch models popup list */
+.fetch-models-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+}
+
+.fetch-model-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.45rem 0.75rem;
+    border-bottom: 1px solid var(--bg-tertiary);
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.82rem;
+}
+
+.fetch-model-row:last-child {
+    border-bottom: none;
+}
+
+.fetch-model-row:hover {
+    background: var(--bg-hover);
+}
+
+.fetch-model-row .fetch-model-name {
+    color: var(--text-primary);
+    word-break: break-all;
+    flex: 1;
+    margin-right: 0.5rem;
+}
+
+.fetch-model-row .fetch-model-add {
+    flex-shrink: 0;
+    background: #238636;
+    color: #fff;
+    border: 1px solid rgba(240, 246, 252, 0.1);
+    padding: 0.2rem 0.55rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 600;
+    font-family: inherit;
+    white-space: nowrap;
+}
+
+.fetch-model-row .fetch-model-add:hover {
+    background: #2ea043;
+}
+
+.fetch-model-row .fetch-model-add.added {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border-color: var(--border-color);
 }
 
 /* ============================================================
@@ -1530,4 +1636,20 @@ select option:checked {
 }
 #btn-pause-logs:hover {
     background: var(--border-color);
+}
+
+/* Debug log entries */
+#tab-logs tr.log-entry.log-debug td {
+    color: var(--text-secondary);
+    font-style: italic;
+    font-size: 0.8rem;
+    padding: 0.35rem 0.6rem;
+}
+.debug-bullet {
+    color: var(--accent);
+    margin-right: 0.4rem;
+}
+.debug-msg {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.78rem;
 }

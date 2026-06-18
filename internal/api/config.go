@@ -120,6 +120,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			}
 			// Push the log level change to the logger live.
 			r.logger.SetLevel(logLevel)
+			r.logger.Debug("log level changed to %s", incoming.LogLevel)
 		}
 
 		runtimeCfgMu.Lock()
