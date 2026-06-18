@@ -97,7 +97,11 @@ else
     VERSION=$(printf '%s' "$LATEST" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
     [ -z "$VERSION" ] && fail "Could not determine latest release version."
 
-    ok "Latest release: $VERSION${INCLUDE_PRERELEASE:+ (pre-release)}"
+    if [ "$INCLUDE_PRERELEASE" = "true" ]; then
+        ok "Latest release: $VERSION (pre-release)"
+    else
+        ok "Latest release: $VERSION"
+    fi
 fi
 
 # ── Download ───────────────────────────────────────────────────────────
