@@ -21,13 +21,17 @@ const AuthCookie = "tresor_token"
 const CookieMaxAge = 365 * 24 * 3600
 
 // SetAuthCookie sets the auth cookie on the response with secure attributes.
+// Also clears any legacy Path=/ cookie so the browser doesn't keep a stale token.
 func SetAuthCookie(w http.ResponseWriter, token string) {
-	w.Header().Set("Set-Cookie", fmt.Sprintf("%s=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d", AuthCookie, token, CookieMaxAge))
+	w.Header().Add("Set-Cookie", fmt.Sprintf("%s=%s; Path=/api/; HttpOnly; SameSite=Lax; Max-Age=%d", AuthCookie, token, CookieMaxAge))
+	w.Header().Add("Set-Cookie", fmt.Sprintf("%s=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", AuthCookie))
 }
 
 // ClearAuthCookie clears the auth cookie by expiring it immediately.
+// Clears both the current Path=/api/ scope and the legacy Path=/ scope.
 func ClearAuthCookie(w http.ResponseWriter) {
-	w.Header().Set("Set-Cookie", fmt.Sprintf("%s=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", AuthCookie))
+	w.Header().Add("Set-Cookie", fmt.Sprintf("%s=; Path=/api/; SameSite=Lax; Max-Age=0", AuthCookie))
+	w.Header().Add("Set-Cookie", fmt.Sprintf("%s=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", AuthCookie))
 }
 
 // SecurityHeaders wraps an http.Handler and injects security headers on every
