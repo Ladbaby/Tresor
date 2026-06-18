@@ -42,13 +42,29 @@ type Router struct {
 }
 
 // NewRouter creates an admin API router with all API endpoints.
+// It wires up session token persistence so the auth cookie survives daemon restarts.
 func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger, cfg *config.AppConfig, version, buildTime string) *Router {
+	authMW := middleware.NewAuthMiddleware(cfg.AdminPassword)
+
+	// Wire persistence hooks so the session token is saved to SQLite
+	authMW.OnTokenGenerated = func(token string) error {
+		return s.SaveSessionToken(token)
+	}
+	authMW.OnTokenCleared = func() error {
+		return s.SaveSessionToken("")
+	}
+
+	// Restore any existing session token from the database
+	if token, err := s.LoadSessionToken(); err == nil && token != "" {
+		authMW.SetToken(token)
+	}
+
 	return &Router{
 		store:     s,
 		engine:    eng,
 		logger:    logger,
 		cfg:       cfg,
-		authMW:    middleware.NewAuthMiddleware(cfg.AdminPassword),
+		authMW:    authMW,
 		version:   version,
 		buildTime: buildTime,
 	}

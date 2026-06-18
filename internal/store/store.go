@@ -202,6 +202,11 @@ func (s *Store) migrate() error {
 			model_id      TEXT NOT NULL,
 			PRIMARY KEY (downstream_id, model_id)
 		)`,
+		// Settings table: stores persistent key-value pairs (e.g. session tokens)
+		`CREATE TABLE IF NOT EXISTS settings (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
 	}
 
 	for _, q := range queries {

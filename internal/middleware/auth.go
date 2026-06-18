@@ -22,12 +22,12 @@ const CookieMaxAge = 365 * 24 * 3600
 
 // SetAuthCookie sets the auth cookie on the response with secure attributes.
 func SetAuthCookie(w http.ResponseWriter, token string) {
-	w.Header().Set("Set-Cookie", fmt.Sprintf("%s=%s; Path=/api/; SameSite=Lax; Max-Age=%d", AuthCookie, token, CookieMaxAge))
+	w.Header().Set("Set-Cookie", fmt.Sprintf("%s=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d", AuthCookie, token, CookieMaxAge))
 }
 
 // ClearAuthCookie clears the auth cookie by expiring it immediately.
 func ClearAuthCookie(w http.ResponseWriter) {
-	w.Header().Set("Set-Cookie", fmt.Sprintf("%s=; Path=/api/; SameSite=Lax; Max-Age=0", AuthCookie))
+	w.Header().Set("Set-Cookie", fmt.Sprintf("%s=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", AuthCookie))
 }
 
 // SecurityHeaders wraps an http.Handler and injects security headers on every
@@ -55,6 +55,11 @@ type AuthMiddleware struct {
 	token    string // current session token (set on login, cleared on logout)
 	tokenMu  sync.RWMutex
 	limiter  *rateLimiter
+
+	// Persistence hooks — called when the token is generated or cleared,
+	// allowing the caller to persist the token to a data store.
+	OnTokenGenerated func(token string) error
+	OnTokenCleared   func() error
 }
 
 // NewAuthMiddleware creates an auth middleware. If password is empty, authentication is disabled.
@@ -72,6 +77,10 @@ func (am *AuthMiddleware) SetPassword(password string) {
 	am.tokenMu.Lock()
 	am.token = "" // invalidate session on password change
 	am.tokenMu.Unlock()
+
+	if am.OnTokenCleared != nil {
+		am.OnTokenCleared()
+	}
 
 	am.password = password
 }
@@ -102,6 +111,9 @@ func (am *AuthMiddleware) GenerateToken() string {
 	am.tokenMu.Lock()
 	am.token = hex.EncodeToString(b)
 	am.tokenMu.Unlock()
+	if am.OnTokenGenerated != nil {
+		am.OnTokenGenerated(am.token)
+	}
 	return am.token
 }
 
@@ -109,6 +121,16 @@ func (am *AuthMiddleware) GenerateToken() string {
 func (am *AuthMiddleware) ClearToken() {
 	am.tokenMu.Lock()
 	am.token = ""
+	am.tokenMu.Unlock()
+	if am.OnTokenCleared != nil {
+		am.OnTokenCleared()
+	}
+}
+
+// SetToken sets the session token directly (used to restore a persisted token on startup).
+func (am *AuthMiddleware) SetToken(token string) {
+	am.tokenMu.Lock()
+	am.token = token
 	am.tokenMu.Unlock()
 }
 
