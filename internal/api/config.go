@@ -12,7 +12,7 @@ import (
 )
 
 // ValidDefaultTabs lists the allowed tab IDs for DefaultTab.
-var ValidDefaultTabs = []string{"downstreams", "aliases", "rules", "plugins", "settings", "about"}
+var ValidDefaultTabs = []string{"downstreams", "aliases", "rules", "settings", "about"}
 
 // RuntimeConfig exposes the mutable runtime settings via the admin API.
 type RuntimeConfig struct {

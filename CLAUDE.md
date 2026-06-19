@@ -26,38 +26,43 @@ To get started: `cp config.example.yaml config.yaml`, then edit as needed.
 bind_addr: "127.0.0.1:11510"         # TCP address for gateway
 socket_path: "/tmp/tresor.sock"  # Optional Unix socket (admin only)
 db_path: "./tresor.db"          # SQLite database path
-admin_password: "secret"              # Optional Bearer token auth
+admin_password: "secret"        # Optional: admin password for cookie-based session auth
+proxy_api_keys:                 # Optional: require clients to authenticate proxy requests
+  - sk-proxy-123
+proxy_mode: "auto"              # Outbound proxy: auto, env, windows, none
+default_tab: "downstreams"      # Dashboard tab on load (values: downstreams, aliases, rules, settings, about)
+log_level: "info"               # Request logging verbosity: debug, info, warn, error
 
-downstreams:                          # LLM provider endpoints
+downstreams:                    # LLM provider endpoints
   - id: my-provider
     name: My Provider
     base_url: https://api.example.com/v1
     api_key: sk-...
-    output_model_ids:                 # Models this downstream can handle (required for forwarding)
+    api_formats: [openai]       # API format(s): openai, anthropic, openai_responses
+    output_model_ids:           # Models this downstream can handle (required for forwarding)
       - gpt-4o
 
-rules:                                # Routing rules (OPTIONAL — only for transforms)
+rules:                          # Routing rules (OPTIONAL — only for transforms)
   - id: my-rule
     name: Chat Rule
     pattern_path: /v1/chat/completions
-    pattern_model: gpt-4o             # Optional model filter
-    active_downstream: my-provider
-    pipeline_config:                  # Transformation steps
+    pattern_model: gpt-4o       # Optional model filter
+    match_format: [openai]      # Match input request format
+    match_downstream_format: [anthropic]  # Match downstream API format
+    match_downstreams: [my-provider]      # Match specific downstreams
+    pipeline_config:            # Transformation steps
       - plugin_id: openai2anthropic
     is_enabled: true
 
-aliases:                              # Model name mappings (hot-switchable, ordered by array position)
+aliases:                        # Model name mappings (hot-switchable, ordered by array position)
   - input_model_id: gpt-4o
+    is_regex: false             # Treat input_model_id as regex (group-level, optional)
     options:
       - id: alias-gpt4o-anthropic
         downstream_id: my-provider
         output_model_id: claude-sonnet-4-20250514
-        is_regex: false               # Treat input_model_id as regex (optional)
 ```
 
-On startup, the YAML data is **upserted** into SQLite: existing rows (matched by ID) are updated, new rows are inserted. Rows only in the DB are preserved. If no downstreams/rules/aliases are defined in YAML, built-in defaults are seeded.
-
-**Rules are optional.** Forwarding works if `downstreams` + `output_model_ids` are configured. Rules only add plugin pipelines and can optionally override the resolved downstream when no alias exists.
 
 ## Build and Run
 
@@ -81,8 +86,8 @@ go test ./internal/plugins/...
 
 # CLI commands (connect to running daemon via config)
 ./tresor.exe rule list
-./tresor.exe rule switch <rule-id> <downstream-id>
-./tresor.exe rule create <name> <pattern_path> <downstream_id>
+./tresor.exe rule create [name] [pattern_path] [--match-format openai,anthropic]
+./tresor.exe version
 
 # Alias CLI commands
 ./tresor.exe alias list
@@ -102,59 +107,79 @@ The codebase follows a clean layered structure with three core concerns:
 
 | Package | Purpose |
 |---|---|
-| `cmd/` | Cobra CLI commands (`root.go`, `run.go`, `rule.go`) |
+| `cmd/` | Cobra CLI commands (`root.go`, `run.go`, `rule.go`, `version.go`) |
 | `internal/config/` | YAML configuration loader with auto-detect path resolution |
-| `internal/store/` | SQLite data layer: `store.go` (schema/migrations/upsert), `rule.go` (CRUD + matching), `downstream.go` (CRUD), `alias.go` (alias CRUD + grouping) |
-| `internal/engine/` | Core gateway handler: `engine.go` (gateway forwarding + alias override), `pipeline.go` (transformer orchestration), `types.go` (interfaces), `logger.go` (request logging + SSE) |
-| `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go` |
-| `internal/api/` | Admin REST API: `router.go` (routing), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE endpoints), `config.go` (runtime config), `embed.go` (embedded web UI) |
-| `internal/middleware/` | Bearer-token auth middleware for admin API |
+| `internal/store/` | SQLite data layer: `store.go` (schema/migrations/upsert), `rule.go` (CRUD + matching), `downstream.go` (CRUD + model IDs), `alias.go` (alias CRUD + grouping) |
+| `internal/engine/` | Core gateway handler: `engine.go` (proxy, model resolution, auto-translation, model listing), `pipeline.go` (transformer orchestration), `types.go` (interfaces), `logger.go` (request logging + SSE) |
+| `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go`, `fix_anthropic_images.go`, `openai2responses.go`, `responses2openai.go`, `responses2anthropic.go`, `anthropic2responses.go` |
+| `internal/api/` | Admin REST API: `router.go` (routing + auth), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list + model fetch), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE + log level), `config.go` (runtime config), `embed.go` (embedded web UI) |
+| `internal/middleware/` | Cookie-based session auth middleware for admin API (with rate limiting) |
+| `internal/proxy/` | Outbound proxy mode configuration (auto, env, windows, none) + URL validation |
 | `internal/api/web/` | Embedded SPA: `index.html`, `style.css`, `app.js` |
 
 ### Data Flow (Gateway Request)
 
-1. Client sends request to Tresor gateway → `HandleProxy` reads body, extracts model name
-2. **Model Resolution** (the forwarding gate):
+1. Client sends request to Tresor gateway → `HandleProxy` reads body, extracts model
+2. **Proxy Auth** (if `proxy_api_keys` configured): validate `Authorization: Bearer` or `x-api-key` header, strip auth from forwarded request
+3. **Model Resolution** (the forwarding gate):
    - Try active exact alias via `FindActiveAlias(model)` — first tries exact `input_model_id` match
    - If no exact match, try active regex aliases (`is_regex: true`) — pattern-matched against the model name
    - If no alias, try direct resolution via `FindDownstreamByOutputModel(model)` — matches against downstream `output_model_ids`
    - If neither resolves a downstream → return 404 "unknown model"
-3. **Optional Rule Lookup** (for pipeline transforms only):
-   - `FindMatchingRule(path, model)` queries SQLite for the best matching enabled rule (priority: exact path+model > exact path > wildcard `*`)
-   - If a rule matched AND no alias exists, let the rule override the downstream
-   - Use the rule's `pipeline_config` if present, otherwise use an empty pipeline (`[]`)
-4. Parse `pipeline_config` JSON → instantiate plugin transformers via registry
-5. Execute request transformers sequentially (body + headers may change)
-6. Forward transformed request to downstream server
-7. Execute response transformers sequentially on the downstream's response
-8. Return final response to client
+4. **Rule Matching** (for pipeline transforms):
+   - `FindMatchingRules(path, model, inputFormat, dsID, dsFormats)` queries SQLite for all matching enabled rules (priority: exact path+model > exact path > wildcard `*`)
+   - Rules are filtered by format criteria: `match_format`, `match_downstream_format`, `match_downstreams`
+   - Multiple rules can match; their pipelines are concatenated in priority order
+   - Rules NEVER override the downstream — they only contribute transformers
+5. **Auto-translation**: If input format differs from downstream format, automatically insert the appropriate format transformer (e.g., OpenAI → Anthropic) before any rule transformers
+6. Parse `pipeline_config` JSON → instantiate plugin transformers via registry
+7. Execute request transformers sequentially (body + headers may change)
+8. Forward transformed request to downstream server
+9. Execute response transformers sequentially on the downstream's response
+10. Return final response to client
 
 ### Plugin System
 
-Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing requests) and `ResponseTransformer` (modifies incoming responses). Three built-in plugins exist:
+Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing requests), `ResponseTransformer` (modifies incoming responses), and `StreamResponseTransformer` (transforms SSE events). Eight built-in plugins exist:
 
 - **custom_header**: Injects arbitrary HTTP headers into forwarded requests
 - **openai2anthropic**: Converts OpenAI Chat Completion format to Anthropic Messages format (and vice versa for responses)
+- **fix_anthropic_images**: Extracts image parts from tool_result.content[] and promotes them to top-level message content for Anthropic-compatible backends
 - **anthropic2openai**: Converts Anthropic Messages format to OpenAI Chat Completion format (and vice versa for responses)
+- **responses2openai**: Converts OpenAI Responses API format to Chat Completions format (and vice versa)
+- **responses2anthropic**: Converts OpenAI Responses API format to Anthropic Messages format (and vice versa)
+- **openai2responses**: Converts OpenAI Chat Completion format to Responses API format
+- **anthropic2responses**: Converts Anthropic Messages format to Responses API format
 
 Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plugin_id": "...", "config": {...}}]`
+
+**Auto-translation:** When input format (detected from path) differs from downstream format, the engine automatically inserts the appropriate transformer without any rule needed.
 
 ### Admin API Endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/health` | Health check |
+| GET | `/api/auth/status` | Check if auth is enabled (public) |
+| POST | `/api/auth/login` | Log in with password, get session cookie (public) |
+| POST | `/api/auth/logout` | Clear session cookie and token (public) |
+| GET | `/api/health` | Health check (public) |
+| GET | `/api/version` | Print version and build info (public) |
+| GET/PUT | `/api/log_level` | Get/set request logging verbosity |
+| GET/PUT | `/api/config` | Get/set runtime config (proxy_mode, proxy_api_keys, admin_password, default_tab, log_level) |
+| POST | `/api/fetch-models` | Fetch available models from a provider (body: base_url + api_key) |
 | GET | `/api/rules` | List all rules |
 | POST | `/api/rules` | Create a new rule |
 | GET | `/api/rules/{id}` | Get single rule |
-| PUT | `/api/rules/{id}` | Partial update (enabled state only) |
+| PUT | `/api/rules/{id}` | Partial update (enabled state or full rule fields) |
 | DELETE | `/api/rules/{id}` | Delete a rule |
-| PUT | `/api/rules/{id}/switch` | Change rule's active downstream |
 | GET | `/api/downstreams` | List all downstreams |
 | POST | `/api/downstreams` | Create a new downstream |
 | GET | `/api/downstreams/{id}` | Get single downstream |
 | PUT | `/api/downstreams/{id}` | Update downstream |
-| DELETE | `/api/downstreams/{id}` | Delete downstream (nullifies referencing rules) |
+| DELETE | `/api/downstreams/{id}` | Delete downstream (removes from rule match_downstreams, deletes referencing aliases) |
+| POST | `/api/downstreams/{id}/models` | Add a model ID to downstream |
+| DELETE | `/api/downstreams/{id}/models/{model_id}` | Remove a model ID from downstream |
+| POST | `/api/downstreams/{id}/fetch-models` | Auto-discover models from provider |
 | GET | `/api/plugins` | List registered plugins |
 | GET | `/api/aliases` | List all alias groups (grouped view, ordered by group_order) |
 | POST | `/api/aliases` | Create a new alias option |
@@ -166,8 +191,8 @@ Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plu
 | DELETE | `/api/aliases/group/{inputModelId}` | Delete all aliases for an input model |
 | GET | `/api/logs` | Get recent log entries (newest first) |
 | GET | `/api/logs/stream` | SSE stream of log entries |
+| GET | `/v1/models` | Aggregated model listing (OpenAI format, gateway path) |
 
-Admin API is protected by optional Bearer-token auth (configured via `admin_password` in YAML). Web UI is embedded via `//go:embed web/*`.
 
 ### Listening Modes
 

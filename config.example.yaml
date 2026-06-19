@@ -23,8 +23,11 @@ proxy_api_keys:                        # Optional: require clients to authentica
 proxy_mode: "auto"
 
 # Default dashboard tab on page load or refresh.
-# Values: downstreams, aliases, rules, plugins, settings
+# Values: downstreams, aliases, rules, settings, about
 default_tab: "downstreams"
+
+# Request log verbosity: debug, info, warn, error (default: info)
+# log_level: "info"
 
 # Downstream LLM providers
 downstreams:
