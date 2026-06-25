@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"tresor/internal/engine"
@@ -317,19 +318,700 @@ func TestFixAnthropicImages_MultipleMessages(t *testing.T) {
 	}
 }
 
-func TestFixAnthropicImages_ResponseNoOp(t *testing.T) {
+func TestFixAnthropicImages_ToolResultMixedTextAndImage(t *testing.T) {
 	p := &FixAnthropicImages{}
-	body := []byte(`{"content":[{"type":"text","text":"response"}]}`)
-	resp := &http.Response{Header: http.Header{}}
 
-	newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
-	if err != nil {
-		t.Fatalf("transform response: %v", err)
+	payload := map[string]interface{}{
+		"model":      "claude-sonnet-4-20250514",
+		"max_tokens": 1024,
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "Look at this:"},
+					map[string]interface{}{
+						"type": "tool_result",
+						"tool_use_id": "tool_123",
+						"content": []interface{}{
+							map[string]interface{}{
+								"type": "text",
+								"text": "The screenshot shows the login page",
+							},
+							map[string]interface{}{
+								"type": "image",
+								"source": map[string]interface{}{
+									"type":       "base64",
+									"media_type": "image/png",
+									"data":       "aW1hZ2UtZGF0YQ==",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
-	if string(newBody) != string(body) {
-		t.Fatal("response body should be unchanged")
+	body, _ := json.Marshal(payload)
+
+	req, _ := http.NewRequest("POST", "http://example.com/v1/messages", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var result map[string]interface{}
+	json.Unmarshal(newBody, &result)
+
+	messages := result["messages"].([]interface{})
+	msg := messages[0].(map[string]interface{})
+	content := msg["content"].([]interface{})
+
+	// Should have: original text + preserved tool_result text + promoted image
+	if len(content) != 3 {
+		t.Fatalf("expected 3 content parts (text + preserved text + image), got %d", len(content))
+	}
+
+	// First part: original text
+	if content[0].(map[string]interface{})["type"] != "text" {
+		t.Fatal("first part should be original text")
+	}
+	if content[0].(map[string]interface{})["text"] != "Look at this:" {
+		t.Fatal("first part text changed")
+	}
+
+	// Second part: preserved tool_result text
+	if content[1].(map[string]interface{})["type"] != "text" {
+		t.Fatal("second part should be preserved text from tool_result")
+	}
+	if content[1].(map[string]interface{})["text"] != "The screenshot shows the login page" {
+		t.Fatalf("preserved text incorrect: %v", content[1].(map[string]interface{})["text"])
+	}
+
+	// Third part: promoted image
+	if content[2].(map[string]interface{})["type"] != "image" {
+		t.Fatal("third part should be promoted image")
 	}
 }
+
+func TestFixAnthropicImages_ResponseToolUseInThinkingArray(t *testing.T) {
+	p := &FixAnthropicImages{}
+
+	// Simulates a backend response where thinking.content is an array
+	// containing both text and tool_use blocks
+	body := []byte(`{
+		"id": "msg_123",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{
+				"type": "thinking",
+				"content": [
+					{"type": "text", "text": "Let me analyze the code..."},
+					{"type": "tool_use", "id": "tu_1", "name": "read_file", "input": {"path": "main.go"}}
+				]
+			},
+			{"type": "text", "text": "Here is my analysis:"}
+		]
+	}`)
+
+	resp := &http.Response{Header: http.Header{}}
+	newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	content := result["content"].([]interface{})
+	// Expected: thinking (cleaned, only text), tool_use (promoted), text (original)
+	if len(content) != 3 {
+		t.Fatalf("expected 3 content parts, got %d", len(content))
+	}
+
+	// Part 0: cleaned thinking (only text, no tool_use)
+	thinking := content[0].(map[string]interface{})
+	if thinking["type"] != "thinking" {
+		t.Fatalf("expected thinking, got %v", thinking["type"])
+	}
+	thinkingContent := thinking["content"].([]interface{})
+	if len(thinkingContent) != 1 {
+		t.Fatalf("thinking should have 1 part (text), got %d", len(thinkingContent))
+	}
+	if thinkingContent[0].(map[string]interface{})["type"] != "text" {
+		t.Fatal("thinking content should be text")
+	}
+
+	// Part 1: promoted tool_use
+	toolUse := content[1].(map[string]interface{})
+	if toolUse["type"] != "tool_use" {
+		t.Fatalf("expected promoted tool_use, got %v", toolUse["type"])
+	}
+	if toolUse["name"] != "read_file" {
+		t.Fatalf("tool_use name incorrect: %v", toolUse["name"])
+	}
+
+	// Part 2: original text part
+	textPart := content[2].(map[string]interface{})
+	if textPart["type"] != "text" {
+		t.Fatal("third part should be original text")
+	}
+}
+
+func TestFixAnthropicImages_ResponseToolUseInThinkingText(t *testing.T) {
+	p := &FixAnthropicImages{}
+
+	// Simulates a backend response where thinking.text contains embedded
+	// JSON tool_use blocks mixed with natural language text
+	body := []byte(`{
+		"id": "msg_123",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{
+				"type": "thinking",
+				"text": "Let me check the code first.\n{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"read_file\",\"input\":{\"path\":\"main.go\"}}\nNow I have the code."
+			},
+			{"type": "text", "text": "Analysis complete."}
+		]
+	}`)
+
+	resp := &http.Response{Header: http.Header{}}
+	newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	content := result["content"].([]interface{})
+	// Expected: thinking (cleaned text), tool_use (promoted), text (original)
+	if len(content) != 3 {
+		t.Fatalf("expected 3 content parts, got %d: %s", len(content), string(newBody))
+	}
+
+	// Part 0: cleaned thinking text (JSON replaced with reference)
+	thinking := content[0].(map[string]interface{})
+	if thinking["type"] != "thinking" {
+		t.Fatalf("expected thinking, got %v", thinking["type"])
+	}
+	thinkingText := thinking["text"].(string)
+	if !strings.Contains(thinkingText, "Let me check the code first") {
+		t.Fatal("thinking text should preserve surrounding text")
+	}
+	if !strings.Contains(thinkingText, "[tool_use:") {
+		t.Fatal("thinking text should contain tool_use reference")
+	}
+
+	// Part 1: promoted tool_use
+	toolUse := content[1].(map[string]interface{})
+	if toolUse["type"] != "tool_use" {
+		t.Fatalf("expected promoted tool_use, got %v", toolUse["type"])
+	}
+	if toolUse["name"] != "read_file" {
+		t.Fatalf("tool_use name incorrect: %v", toolUse["name"])
+	}
+}
+
+func TestFixAnthropicImages_ResponseNoToolUseInThinking(t *testing.T) {
+	p := &FixAnthropicImages{}
+
+	// Normal thinking response — should pass through unchanged
+	body := []byte(`{
+		"id": "msg_123",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{"type": "thinking", "text": "Let me think about this..."},
+			{"type": "text", "text": "Here is my answer."}
+		]
+	}`)
+
+	resp := &http.Response{Header: http.Header{}}
+	newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var result map[string]interface{}
+	json.Unmarshal(newBody, &result)
+
+	content := result["content"].([]interface{})
+	if len(content) != 2 {
+		t.Fatalf("expected 2 content parts (unchanged), got %d", len(content))
+	}
+	if content[0].(map[string]interface{})["type"] != "thinking" {
+		t.Fatal("first part should be thinking")
+	}
+	if content[1].(map[string]interface{})["type"] != "text" {
+		t.Fatal("second part should be text")
+	}
+}
+
+func TestFixAnthropicImages_StreamToolUseInThinking(t *testing.T) {
+	p := &FixAnthropicImages{}
+	ctx := &engine.PipelineContext{}
+
+	// Simulate SSE stream: thinking block starts, tool_use block emitted inside,
+	// then thinking continues
+	events := []engine.SSEChunk{
+		// Enter thinking block
+		{EventType: "content_block_start", Data: []byte(`{"index":0,"type":"thinking"}`)},
+		// Thinking delta
+		{EventType: "content_block_delta", Data: []byte(`{"index":0,"delta":{"type":"text_delta","text":"Let me"}}`)},
+		// Nested tool_use block starts inside thinking
+		{EventType: "content_block_start", Data: []byte(`{"index":1,"type":"tool_use","id":"tu_1","name":"read_file"}`)},
+		// Tool_use delta
+		{EventType: "content_block_delta", Data: []byte(`{"index":1,"delta":{"input_json":"{\"path\""}}`)},
+		// Tool_use block completes
+		{EventType: "content_block_stop", Data: []byte(`{"index":1}`)},
+		// Thinking continues
+		{EventType: "content_block_delta", Data: []byte(`{"index":0,"delta":{"type":"text_delta","text":" done."}}`)},
+		// Thinking block ends
+		{EventType: "content_block_stop", Data: []byte(`{"index":0}`)},
+	}
+
+	var results []engine.SSEChunk
+	for _, ev := range events {
+		out, err := p.TransformStreamChunk(ev, ctx)
+		if err != nil {
+			t.Fatalf("transform chunk: %v", err)
+		}
+		results = append(results, out)
+	}
+
+	// Verify:
+	// 1. thinking content_block_start passes through
+	// 2. First thinking delta passes through
+	// 3. Nested tool_use events are absorbed (empty data)
+	// 4. When tool_use completes, buffered events are emitted as raw SSE
+	// 5. Remaining thinking delta passes through (insideThinking restored)
+	// 6. Thinking block stop passes through
+
+	if len(results) != 7 {
+		t.Fatalf("expected 7 result chunks, got %d", len(results))
+	}
+
+	// Chunk 0: thinking content_block_start (passed through)
+	if results[0].EventType != "content_block_start" {
+		t.Errorf("chunk 0: expected content_block_start, got %s", results[0].EventType)
+	}
+
+	// Chunk 1: thinking delta (passed through)
+	if results[1].EventType != "content_block_delta" {
+		t.Errorf("chunk 1: expected content_block_delta, got %s", results[1].EventType)
+	}
+
+	// Chunk 2: tool_use content_block_start (absorbed — empty data)
+	if len(results[2].Data) != 0 {
+		t.Error("chunk 2: tool_use start should be absorbed (empty data)")
+	}
+
+	// Chunk 3: tool_use delta (absorbed — empty data)
+	if len(results[3].Data) != 0 {
+		t.Error("chunk 3: tool_use delta should be absorbed (empty data)")
+	}
+
+	// Chunk 4: tool_use content_block_stop triggers flush — emits raw SSE
+	if !strings.Contains(string(results[4].Data), "\n\n") {
+		t.Error("chunk 4: should contain raw SSE with event boundaries")
+	}
+	if !strings.Contains(string(results[4].Data), "tool_use") {
+		t.Error("chunk 4: should contain tool_use event data")
+	}
+
+	// Chunk 5: thinking delta (passed through after insideThinking restored)
+	if results[5].EventType != "content_block_delta" {
+		t.Errorf("chunk 5: expected content_block_delta, got %s", results[5].EventType)
+	}
+
+	// Chunk 6: thinking block stop (passed through)
+	if results[6].EventType != "content_block_stop" {
+		t.Errorf("chunk 6: expected content_block_stop, got %s", results[6].EventType)
+	}
+}
+
+func TestFixAnthropicImages_StreamNoChange(t *testing.T) {
+	p := &FixAnthropicImages{}
+	ctx := &engine.PipelineContext{}
+
+	// Normal stream without thinking — should pass through unchanged
+	events := []engine.SSEChunk{
+		{EventType: "content_block_start", Data: []byte(`{"index":0,"type":"text"}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":0,"delta":{"type":"text_delta","text":"Hello"}}`)},
+		{EventType: "content_block_stop", Data: []byte(`{"index":0}`)},
+	}
+
+	for _, ev := range events {
+		out, err := p.TransformStreamChunk(ev, ctx)
+		if err != nil {
+			t.Fatalf("transform: %v", err)
+		}
+		if !bytes.Equal(out.Data, ev.Data) {
+			t.Errorf("data changed: %s -> %s", string(ev.Data), string(out.Data))
+		}
+		if out.EventType != ev.EventType {
+			t.Errorf("event type changed: %s -> %s", ev.EventType, out.EventType)
+		}
+	}
+}
+
+// --- Regression tests for review findings ---
+
+// F1: Two tool_use blocks in one thinking string must not corrupt the
+// cleaned text. Previously the code spliced `cleaned` in place using
+// stale indices, which panicked on the second object.
+func TestFixAnthropicImages_ResponseMultipleToolUseInThinkingText(t *testing.T) {
+	p := &FixAnthropicImages{}
+
+	body := []byte(`{
+		"id": "msg_123",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{
+				"type": "thinking",
+				"text": "Plan: {\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"read_file\",\"input\":{\"path\":\"a.go\"}} then {\"type\":\"tool_use\",\"id\":\"tu_2\",\"name\":\"write_file\",\"input\":{\"path\":\"b.go\"}} done"
+			},
+			{"type": "text", "text": "OK"}
+		]
+	}`)
+
+	resp := &http.Response{Header: http.Header{}}
+	newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	content := result["content"].([]interface{})
+	if len(content) != 4 {
+		t.Fatalf("expected 4 parts (thinking + 2 tool_use + text), got %d: %s", len(content), string(newBody))
+	}
+
+	thinking := content[0].(map[string]interface{})["text"].(string)
+	if !strings.Contains(thinking, "Plan:") || !strings.Contains(thinking, "done") {
+		t.Fatalf("cleaned thinking should preserve surrounding prose, got: %q", thinking)
+	}
+	if !strings.Contains(thinking, "[tool_use:") {
+		t.Fatal("cleaned thinking should contain tool_use references")
+	}
+	// Two distinct placeholders, no double-substitution.
+	if strings.Count(thinking, "[tool_use:") != 2 {
+		t.Fatalf("expected 2 tool_use placeholders, got %d in %q", strings.Count(thinking, "[tool_use:"), thinking)
+	}
+
+	if content[1].(map[string]interface{})["name"] != "read_file" {
+		t.Fatal("first promoted tool_use should be read_file")
+	}
+	if content[2].(map[string]interface{})["name"] != "write_file" {
+		t.Fatal("second promoted tool_use should be write_file")
+	}
+	if content[3].(map[string]interface{})["type"] != "text" {
+		t.Fatal("last part should be original text")
+	}
+}
+
+// F2: A content_block_stop with an index that does NOT match the buffered
+// tool_use's index (e.g. the outer thinking block's stop arriving first)
+// must NOT trigger the flush.
+func TestFixAnthropicImages_StreamToolUseStopIndexMismatch(t *testing.T) {
+	p := &FixAnthropicImages{}
+	ctx := &engine.PipelineContext{}
+
+	events := []engine.SSEChunk{
+		{EventType: "content_block_start", Data: []byte(`{"index":0,"type":"thinking"}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":0,"delta":{"type":"text_delta","text":"Let me"}}`)},
+		{EventType: "content_block_start", Data: []byte(`{"index":1,"type":"tool_use","id":"tu_1","name":"read_file"}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":1,"delta":{"input_json":"{\"path\""}}`)},
+		// Outer thinking stop arrives FIRST (out-of-order)
+		{EventType: "content_block_stop", Data: []byte(`{"index":0}`)},
+		// Then the actual tool_use stop
+		{EventType: "content_block_stop", Data: []byte(`{"index":1}`)},
+		// Finally the thinking stop (already past)
+		{EventType: "content_block_stop", Data: []byte(`{"index":0}`)},
+	}
+
+	var results []engine.SSEChunk
+	for _, ev := range events {
+		out, err := p.TransformStreamChunk(ev, ctx)
+		if err != nil {
+			t.Fatalf("transform chunk: %v", err)
+		}
+		results = append(results, out)
+	}
+
+	// Result 4 is the index=0 stop — must be absorbed (buffered), not flushed.
+	if len(results[4].Data) != 0 {
+		t.Errorf("chunk 4 (thinking stop, index mismatch): expected absorbed, got data=%q", string(results[4].Data))
+	}
+	// Result 5 is the index=1 stop — must trigger the flush with all buffered
+	// events including the absorbed index=0 stop.
+	if !strings.Contains(string(results[5].Data), "\n\n") {
+		t.Error("chunk 5 (matching tool_use stop): expected raw SSE flush")
+	}
+	if !strings.Contains(string(results[5].Data), "tu_1") {
+		t.Error("chunk 5: flush should contain tool_use id")
+	}
+	if !strings.Contains(string(results[5].Data), `"index":0`) {
+		t.Error("chunk 5: flush should include the absorbed index=0 stop event")
+	}
+}
+
+// F3a: message_stop arriving while trackingToolUse=true must flush first.
+func TestFixAnthropicImages_StreamMessageStopFlushes(t *testing.T) {
+	p := &FixAnthropicImages{}
+	ctx := &engine.PipelineContext{}
+
+	events := []engine.SSEChunk{
+		{EventType: "content_block_start", Data: []byte(`{"index":0,"type":"thinking"}`)},
+		{EventType: "content_block_start", Data: []byte(`{"index":1,"type":"tool_use","id":"tu_1","name":"x"}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":1,"delta":{"input_json":"{}"}}`)},
+		// No content_block_stop for the tool_use — terminated by message_stop.
+		{EventType: "message_stop", Data: []byte(`{"type":"message_stop"}`)},
+	}
+
+	var results []engine.SSEChunk
+	for _, ev := range events {
+		out, err := p.TransformStreamChunk(ev, ctx)
+		if err != nil {
+			t.Fatalf("transform chunk: %v", err)
+		}
+		results = append(results, out)
+	}
+
+	// The message_stop chunk must emit the buffered tool_use events.
+	last := results[len(results)-1]
+	if !strings.Contains(string(last.Data), "tu_1") {
+		t.Errorf("message_stop should flush buffered tool_use; got data=%q", string(last.Data))
+	}
+	if !strings.Contains(string(last.Data), "\n\n") {
+		t.Error("message_stop flush should be raw SSE")
+	}
+	// State must be reset — a follow-up chunk should not think we're still
+	// inside a tool_use.
+	out, err := p.TransformStreamChunk(engine.SSEChunk{EventType: "content_block_start", Data: []byte(`{"index":0,"type":"text"}`)}, ctx)
+	if err != nil {
+		t.Fatalf("post-reset transform: %v", err)
+	}
+	if out.EventType != "content_block_start" {
+		t.Errorf("post-reset chunk should pass through; got event=%q", out.EventType)
+	}
+}
+
+// F3b: synthetic [DONE] (engine.go:701) must also flush buffered tool_use.
+func TestFixAnthropicImages_StreamDoneFlushes(t *testing.T) {
+	p := &FixAnthropicImages{}
+	ctx := &engine.PipelineContext{}
+
+	events := []engine.SSEChunk{
+		{EventType: "content_block_start", Data: []byte(`{"index":0,"type":"thinking"}`)},
+		{EventType: "content_block_start", Data: []byte(`{"index":1,"type":"tool_use","id":"tu_x","name":"y"}`)},
+		// Aborted mid-tool-use — no content_block_stop.
+		{EventType: "", Data: []byte("[DONE]")},
+	}
+
+	var results []engine.SSEChunk
+	for _, ev := range events {
+		out, err := p.TransformStreamChunk(ev, ctx)
+		if err != nil {
+			t.Fatalf("transform chunk: %v", err)
+		}
+		results = append(results, out)
+	}
+
+	last := results[len(results)-1]
+	if !strings.Contains(string(last.Data), "tu_x") {
+		t.Errorf("[DONE] should flush buffered tool_use; got data=%q", string(last.Data))
+	}
+}
+
+// F3c: same scenario as 3b but the stream ends without any termination
+// event. Verify the state-reset logic that the new code added doesn't
+// itself introduce a leak. (This is a state-shape test, not a wire test.)
+func TestFixAnthropicImages_StreamAbortedMidToolUse(t *testing.T) {
+	p := &FixAnthropicImages{}
+	ctx := &engine.PipelineContext{}
+
+	// Begin a tool_use and feed [DONE] immediately, no deltas, no stop.
+	p.TransformStreamChunk(engine.SSEChunk{EventType: "content_block_start", Data: []byte(`{"index":0,"type":"thinking"}`)}, ctx)
+	p.TransformStreamChunk(engine.SSEChunk{EventType: "content_block_start", Data: []byte(`{"index":1,"type":"tool_use","id":"tu_abort","name":"z"}`)}, ctx)
+	out, err := p.TransformStreamChunk(engine.SSEChunk{EventType: "", Data: []byte("[DONE]")}, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if !strings.Contains(string(out.Data), "tu_abort") {
+		t.Fatalf("aborted stream should still flush buffered tool_use; got data=%q", string(out.Data))
+	}
+}
+
+// F4: tool_use whose input contains `}` inside a string must still parse.
+func TestFixAnthropicImages_ResponseToolUseWithBraceInString(t *testing.T) {
+	p := &FixAnthropicImages{}
+
+	body := []byte(`{
+		"id": "msg_x",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{
+				"type": "thinking",
+				"text": "Note: {\"type\":\"tool_use\",\"id\":\"tu_brace\",\"name\":\"write\",\"input\":{\"content\":\"hello } world\"}} done"
+			}
+		]
+	}`)
+
+	resp := &http.Response{Header: http.Header{}}
+	newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	content := result["content"].([]interface{})
+	if len(content) < 2 {
+		t.Fatalf("expected at least thinking + promoted tool_use, got %d: %s", len(content), string(newBody))
+	}
+	var foundToolUse bool
+	for _, part := range content {
+		m := part.(map[string]interface{})
+		if m["type"] == "tool_use" && m["name"] == "write" {
+			foundToolUse = true
+			id, _ := m["id"].(string)
+			if id != "tu_brace" {
+				t.Fatalf("tool_use id mismatch: %v", id)
+			}
+		}
+	}
+	if !foundToolUse {
+		t.Fatalf("expected promoted tool_use named 'write', got: %s", string(newBody))
+	}
+}
+
+// F5: tool_result.content with numbers/booleans/null alongside an image
+// must have the primitives preserved as text (rather than silently dropped)
+// while the image is promoted to top level.
+func TestFixAnthropicImages_ToolResultPreservesNonStringPrimitives(t *testing.T) {
+	p := &FixAnthropicImages{}
+
+	payload := map[string]interface{}{
+		"model":      "claude-sonnet-4-20250514",
+		"max_tokens": 1024,
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "tool_prim",
+						"content": []interface{}{
+							float64(42),
+							true,
+							map[string]interface{}{
+								"type": "image",
+								"source": map[string]interface{}{
+									"type":       "base64",
+									"media_type": "image/png",
+									"data":       "AAAA",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/messages", bytes.NewReader(body))
+	_, newBody, err := p.TransformRequest(req, body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	json.Unmarshal(newBody, &result)
+	msg := result["messages"].([]interface{})[0].(map[string]interface{})
+	content := msg["content"].([]interface{})
+
+	// Find the preserved primitives text — combined form "42\ntrue".
+	var primitives string
+	var hasImage bool
+	for _, p := range content {
+		pm := p.(map[string]interface{})
+		switch pm["type"] {
+		case "text":
+			if s, ok := pm["text"].(string); ok && strings.Contains(s, "42") {
+				primitives = s
+			}
+		case "image":
+			hasImage = true
+		}
+	}
+	if !hasImage {
+		t.Fatal("image should be promoted to top level")
+	}
+	if primitives != "42\ntrue" {
+		t.Fatalf("expected primitives preserved as '42\\ntrue', got %q (content=%v)", primitives, content)
+	}
+}
+
+// F8: Case 3 — thinking.text as an array of parts containing a tool_use
+// must promote the tool_use.
+func TestFixAnthropicImages_ResponseCase3ThinkingTextArray(t *testing.T) {
+	p := &FixAnthropicImages{}
+
+	body := []byte(`{
+		"id": "msg_c3",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{
+				"type": "thinking",
+				"text": [
+					{"type": "text", "text": "let me read"},
+					{"type": "tool_use", "id": "tu_c3", "name": "read_file", "input": {"path": "x"}}
+				]
+			},
+			{"type": "text", "text": "done"}
+		]
+	}`)
+
+	resp := &http.Response{Header: http.Header{}}
+	newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	content := result["content"].([]interface{})
+	if len(content) != 3 {
+		t.Fatalf("expected 3 parts (thinking + tool_use + text), got %d", len(content))
+	}
+	toolUse := content[1].(map[string]interface{})
+	if toolUse["type"] != "tool_use" || toolUse["name"] != "read_file" {
+		t.Fatalf("expected promoted tool_use, got %v", toolUse)
+	}
+	// Thinking part should retain only the text portion of the array.
+	thinking := content[0].(map[string]interface{})
+	arr := thinking["text"].([]interface{})
+	if len(arr) != 1 || arr[0].(map[string]interface{})["text"] != "let me read" {
+		t.Fatalf("thinking text array should keep only the text part, got %v", arr)
+	}
+}
+
 
 func TestFixAnthropicImages_EmptyBase64Data(t *testing.T) {
 	p := &FixAnthropicImages{}
