@@ -634,8 +634,10 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		return engine.SSEChunk{}, nil
 
 	default:
-		// Unknown event — pass through unchanged
-		return chunk, nil
+		// Unknown event types (e.g. Anthropic "ping" keepalives) are
+		// dropped - they have no meaning in OpenAI format and confuse
+		// strict OpenAI client validators.
+		return engine.SSEChunk{}, nil
 	}
 }
 
