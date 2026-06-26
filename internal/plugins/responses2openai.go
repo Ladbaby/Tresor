@@ -296,10 +296,10 @@ func (t *Responses2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 	msgContent := make([]map[string]any, 0)
 
 	for _, choice := range oaiResp.Choices {
-		if choice.Message.Content != "" {
+		if choice.Message.Content.Text != "" {
 			msgContent = append(msgContent, map[string]any{
 				"type":        "output_text",
-				"text":        choice.Message.Content,
+				"text":        choice.Message.Content.Text,
 				"annotations": []any{},
 			})
 		}

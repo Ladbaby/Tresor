@@ -2,10 +2,12 @@ package plugins
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"tresor/internal/engine"
 )
@@ -15,9 +17,44 @@ type OpenAI2Anthropic struct{}
 
 type openAIChatMessage struct {
 	Role       string               `json:"role"`
-	Content    string               `json:"content"`
+	Content    openAIChatContent     `json:"content"`
 	ToolCalls  []openAIChatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string               `json:"tool_call_id,omitempty"`
+}
+
+// openAIChatContent accepts both a plain string ("hi") and an array of parts
+// ([{"type":"text","text":"..."},{"type":"image_url",...}]) — OpenAI clients
+// send either form depending on whether the message is text-only or multimodal.
+type openAIChatContent struct {
+	Text  string                   // populated when content was a plain string
+	Parts []map[string]interface{} // populated when content was an array of parts
+	Raw   json.RawMessage          // original payload, for passthrough
+	Set   bool                     // true if the field was present in the JSON
+}
+
+func (c *openAIChatContent) UnmarshalJSON(data []byte) error {
+	c.Raw = append(c.Raw[:0], data...)
+	c.Set = true
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		c.Text = s
+		return nil
+	}
+	var parts []map[string]interface{}
+	if err := json.Unmarshal(data, &parts); err == nil {
+		c.Parts = parts
+		return nil
+	}
+	return fmt.Errorf("openai chat content must be string or array of parts")
+}
+
+// MarshalJSON emits the content in the same shape OpenAI uses on the wire:
+// a plain string for text-only, an array of parts for multimodal.
+func (c openAIChatContent) MarshalJSON() ([]byte, error) {
+	if len(c.Parts) > 0 {
+		return json.Marshal(c.Parts)
+	}
+	return json.Marshal(c.Text)
 }
 
 type openAIChatToolCall struct {
@@ -137,18 +174,21 @@ func (t *OpenAI2Anthropic) TransformRequest(req *http.Request, body []byte, ctx 
 			if systemText != "" {
 				systemText += "\n"
 			}
-			systemText += msg.Content
+			systemText += msg.Content.Text
 			continue
 		}
 
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
 			// Assistant message with tool_calls → content blocks with text + tool_use
 			blocks := make([]map[string]interface{}, 0)
-			if msg.Content != "" {
+			if msg.Content.Text != "" {
 				blocks = append(blocks, map[string]interface{}{
 					"type": "text",
-					"text": msg.Content,
+					"text": msg.Content.Text,
 				})
+			} else if msg.Content.Set {
+				// Multi-part assistant content (rare) — merge into blocks alongside tool_use
+				blocks = append(blocks, openAIPartsToAnthropicBlocks(msg.Content.Parts)...)
 			}
 			for _, tc := range msg.ToolCalls {
 				var input interface{}
@@ -166,11 +206,19 @@ func (t *OpenAI2Anthropic) TransformRequest(req *http.Request, body []byte, ctx 
 			})
 		} else if msg.Role == "tool" {
 			// Tool role → tool_result content block
+			// If the upstream tool payload was multimodal, pass parts through;
+			// otherwise fall back to the textual content.
+			var toolContent interface{}
+			if len(msg.Content.Parts) > 0 {
+				toolContent = openAIPartsToAnthropicBlocks(msg.Content.Parts)
+			} else {
+				toolContent = msg.Content.Text
+			}
 			blocks := []map[string]interface{}{
 				{
 					"type":        "tool_result",
 					"tool_use_id": msg.ToolCallID,
-					"content":     msg.Content,
+					"content":     toolContent,
 				},
 			}
 			anthroMessages = append(anthroMessages, map[string]interface{}{
@@ -178,11 +226,18 @@ func (t *OpenAI2Anthropic) TransformRequest(req *http.Request, body []byte, ctx 
 				"content": blocks,
 			})
 		} else {
-			// Regular text message
-			anthroMessages = append(anthroMessages, map[string]interface{}{
-				"role":    msg.Role,
-				"content": msg.Content,
-			})
+			// Regular text or multimodal message
+			if len(msg.Content.Parts) > 0 {
+				anthroMessages = append(anthroMessages, map[string]interface{}{
+					"role":    msg.Role,
+					"content": openAIPartsToAnthropicBlocks(msg.Content.Parts),
+				})
+			} else {
+				anthroMessages = append(anthroMessages, map[string]interface{}{
+					"role":    msg.Role,
+					"content": msg.Content.Text,
+				})
+			}
 		}
 	}
 
@@ -312,8 +367,11 @@ func (t *OpenAI2Anthropic) transformJSONResponse(body []byte) ([]byte, error) {
 	}
 
 	msg := openAIChatMessage{
-		Role:    "assistant",
-		Content: content,
+		Role: "assistant",
+		Content: openAIChatContent{
+			Text: content,
+			Set:  content != "",
+		},
 	}
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
@@ -645,6 +703,92 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 type openai2anthropicStreamState struct {
 	ID    string
 	Model string
+}
+
+// openAIPartsToAnthropicBlocks translates an OpenAI multimodal content-parts
+// array into Anthropic content blocks. Supports text and image_url parts;
+// unrecognized parts are skipped (matching the OpenAI SDK's lenient behavior).
+func openAIPartsToAnthropicBlocks(parts []map[string]interface{}) []map[string]interface{} {
+	blocks := make([]map[string]interface{}, 0, len(parts))
+	for _, p := range parts {
+		ptype, _ := p["type"].(string)
+		switch ptype {
+		case "text":
+			if text, _ := p["text"].(string); text != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type": "text",
+					"text": text,
+				})
+			}
+		case "image_url":
+			iu, _ := p["image_url"].(map[string]interface{})
+			url, _ := iu["url"].(string)
+			if url == "" {
+				continue
+			}
+			if strings.HasPrefix(url, "data:") {
+				// data:<media-type>;base64,<payload>
+				if block, ok := dataURIToAnthropicImage(url); ok {
+					blocks = append(blocks, block)
+				}
+				continue
+			}
+			// External URL — fetch the bytes (best-effort; failures are skipped)
+			if block, ok := externalURLToAnthropicImage(url); ok {
+				blocks = append(blocks, block)
+			}
+		}
+	}
+	return blocks
+}
+
+// dataURIToAnthropicImage converts "data:<media-type>;base64,<payload>" into
+// an Anthropic image content block.
+func dataURIToAnthropicImage(uri string) (map[string]interface{}, bool) {
+	rest := strings.TrimPrefix(uri, "data:")
+	semi := strings.Index(rest, ";")
+	if semi < 0 || !strings.HasPrefix(rest[semi+1:], "base64,") {
+		return nil, false
+	}
+	mediaType := rest[:semi]
+	payload := rest[semi+1+len("base64,"):]
+	if payload == "" {
+		return nil, false
+	}
+	return map[string]interface{}{
+		"type": "image",
+		"source": map[string]interface{}{
+			"type":       "base64",
+			"media_type": mediaType,
+			"data":       payload,
+		},
+	}, true
+}
+
+// externalURLToAnthropicImage fetches the image at url and returns an
+// Anthropic image block. Best-effort: network errors drop the part silently.
+func externalURLToAnthropicImage(url string) (map[string]interface{}, bool) {
+	resp, err := http.Get(url)
+	if err != nil || resp.StatusCode != 200 {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	mediaType := resp.Header.Get("Content-Type")
+	if mediaType == "" {
+		mediaType = "image/png"
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return map[string]interface{}{
+		"type": "image",
+		"source": map[string]interface{}{
+			"type":       "base64",
+			"media_type": mediaType,
+			"data":       base64.StdEncoding.EncodeToString(data),
+		},
+	}, true
 }
 
 // Ensure interface compliance.

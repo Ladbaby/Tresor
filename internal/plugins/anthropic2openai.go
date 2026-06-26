@@ -555,8 +555,8 @@ func (t *Anthropic2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
     content := make([]anthropicContent, 0)
     for _, choice := range openAIResp.Choices {
         // Add text content if present
-        if choice.Message.Content != "" {
-            content = append(content, anthropicContent{Type: "text", Text: choice.Message.Content})
+        if choice.Message.Content.Text != "" {
+            content = append(content, anthropicContent{Type: "text", Text: choice.Message.Content.Text})
         }
         // Add tool_use content blocks for each tool call
         for _, tc := range choice.Message.ToolCalls {

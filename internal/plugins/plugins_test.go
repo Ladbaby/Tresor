@@ -204,6 +204,76 @@ func TestOpenAI2Anthropic_TransformRequest_ToolChoice_Object(t *testing.T) {
 	}
 }
 
+func TestOpenAI2Anthropic_TransformRequest_MultimodalContent(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+
+	// OpenAI-style multimodal message: text part + image_url (data URI) part.
+	dataURI := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA"
+	openAIReq := map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "What is this?"},
+					map[string]interface{}{
+						"type": "image_url",
+						"image_url": map[string]interface{}{
+							"url": dataURI,
+						},
+					},
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(openAIReq)
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{
+		TargetDownstream: &engine.Downstream{APIKey: "sk-ant-test"},
+	}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform multimodal: %v", err)
+	}
+
+	var anthReq map[string]interface{}
+	if err := json.Unmarshal(newBody, &anthReq); err != nil {
+		t.Fatalf("unmarshal anthropic body: %v", err)
+	}
+
+	msgs := anthReq["messages"].([]interface{})
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+
+	blocks := msgs[0].(map[string]interface{})["content"].([]interface{})
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 content blocks, got %d", len(blocks))
+	}
+
+	textBlock := blocks[0].(map[string]interface{})
+	if textBlock["type"] != "text" || textBlock["text"] != "What is this?" {
+		t.Fatalf("expected first block to be text 'What is this?', got %v", textBlock)
+	}
+
+	imageBlock := blocks[1].(map[string]interface{})
+	if imageBlock["type"] != "image" {
+		t.Fatalf("expected second block to be image, got %v", imageBlock)
+	}
+	src, ok := imageBlock["source"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected image block to have source, got %v", imageBlock)
+	}
+	if src["type"] != "base64" || src["media_type"] != "image/png" {
+		t.Fatalf("expected base64 source with image/png, got %v", src)
+	}
+	if src["data"] != "iVBORw0KGgoAAAANSUhEUgAAAAUA" {
+		t.Fatalf("expected base64 payload preserved, got %v", src["data"])
+	}
+}
+
 func TestOpenAI2Anthropic_TransformRequest_ToolCallsInMessage(t *testing.T) {
 	p := &OpenAI2Anthropic{}
 
