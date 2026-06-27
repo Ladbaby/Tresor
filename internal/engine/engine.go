@@ -82,13 +82,19 @@ func (e *Engine) SetRegistry(r PluginRegistry) {
 // SetProxyMode configures the outbound HTTP client's proxy behavior and transport settings.
 // It replaces the default http.Client with one that uses a custom Transport
 // respecting the given proxy mode (auto, env, windows, none).
+//
+// DisableCompression is set to true so Go does not silently decompress upstream
+// responses. Some downstreams return Brotli-encoded streams (Content-Encoding: br)
+// which Go's stdlib cannot decode, and when the body is streamed to the client
+// (SSE) the raw compressed bytes leak through. Instead, we ask the downstream
+// for plain text via Accept-Encoding: identity, set in forwardRequest.
 func (e *Engine) SetProxyMode(mode proxy.Mode) {
 	transport := &http.Transport{
 		Proxy:               proxy.ProxyFunc(mode),
 		IdleConnTimeout:     30 * time.Second,       // Close idle connections after 30s of inactivity
 		MaxIdleConns:        25,                      // Total idle connection pool
 		MaxIdleConnsPerHost: 5,                       // Per-downstream idle pool
-		DisableCompression:  false,
+		DisableCompression:  true,
 	}
 	e.client = &http.Client{
 		Transport: transport,
@@ -431,8 +437,8 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// Collect rule IDs for logging
 	if len(rules) > 0 {
 		entry.RuleIDs = make([]string, len(rules))
-		for i, r := range rules {
-			entry.RuleIDs[i] = r.ID
+		for i, rule := range rules {
+			entry.RuleIDs[i] = rule.ID
 		}
 	}
 
@@ -494,9 +500,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy response headers, stripping stale framing headers
+	// Copy response headers, stripping stale framing headers and any
+// Content-Encoding marker left from upstream (we ask for identity, but be
+// defensive in case the downstream ignores Accept-Encoding).
 	for k, v := range resp.Header {
-		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") {
+		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") || strings.EqualFold(k, "Content-Encoding") {
 			continue
 		}
 		cw.Header()[k] = v
@@ -777,6 +785,14 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		}
 	}
 	forwardedReq.Header.Set("Host", parsedURL.Host)
+	// Ask the downstream for an uncompressed response. We disable compression
+	// in the transport (DisableCompression: true) but Go's Transport only stops
+	// auto-setting Accept-Encoding — it does not actively request identity. By
+	// setting it here we ensure upstream returns plain text we can stream or
+	// transform without a decoder in the loop. If a downstream only serves
+	// compressed, our SSE handler will surface garbled bytes; the per-request
+	// fix can be added when that becomes a real problem.
+	forwardedReq.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := e.client.Do(forwardedReq)
 	if err != nil {

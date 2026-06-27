@@ -1138,3 +1138,78 @@ func TestEngine_HandleProxy_AutoTranslate_OpenAI2Anthropic_WhenResponsesNotAvail
 		t.Fatalf("expected X-Auto-Translated: openai2anthropic, got %q", translatedHeader)
 	}
 }
+
+// TestEngine_ForwardRequest_AcceptsIdentityEncoding verifies that the gateway
+// asks the downstream for an uncompressed response. Without this, downstreams
+// that default to Brotli (Content-Encoding: br) — which Go's stdlib cannot
+// decode — would deliver garbled bytes to the streaming client. Cherry Studio
+// was seeing this as empty responses from MiniMax-M2.5.
+func TestEngine_ForwardRequest_AcceptsIdentityEncoding(t *testing.T) {
+	s := newTestStore(t)
+
+	var seenAcceptEncoding string
+	var seenAuthHeader string
+	ds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAcceptEncoding = r.Header.Get("Accept-Encoding")
+		seenAuthHeader = r.Header.Get("x-api-key")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer ds.Close()
+
+	addDownstream(t, s, "ds1", "ds1", ds.URL, "key-ds1", "anthropic")
+	addOutputModelIDs(t, s, "ds1", "claude-haiku")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"claude-haiku","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if seenAcceptEncoding != "identity" {
+		t.Fatalf("expected Accept-Encoding: identity on forwarded request, got %q", seenAcceptEncoding)
+	}
+	if seenAuthHeader != "key-ds1" {
+		t.Fatalf("expected x-api-key from downstream, got %q", seenAuthHeader)
+	}
+}
+
+// TestEngine_NonStreaming_StripsContentEncodingFromClientResponse verifies that
+// even if a downstream ignores Accept-Encoding: identity and replies with a
+// compressed body, the gateway strips Content-Encoding from the client-facing
+// response (we never decode compressed bytes — the body wouldn't match the
+// advertised encoding). This prevents the client from trying to decode
+// already-decoded bytes.
+func TestEngine_NonStreaming_StripsContentEncodingFromClientResponse(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer ds.Close()
+
+	addDownstream(t, s, "ds1", "ds1", ds.URL, "sk-openai", "openai")
+	addOutputModelIDs(t, s, "ds1", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if got := resp.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected Content-Encoding stripped from client response, got %q", got)
+	}
+}
