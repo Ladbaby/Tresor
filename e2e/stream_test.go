@@ -698,3 +698,270 @@ func writeMockSSE(w http.ResponseWriter, v interface{}) {
 	data, _ := json.Marshal(v)
 	fmt.Fprintf(w, "data: %s\n\n", string(data))
 }
+
+// TestOpenAIToAnthropicStreaming_ThinkingBlocks is a regression test for the
+// "empty response" bug observed when proxying an OpenAI client to an
+// Anthropic-format reasoning model (e.g. MiniMax-M2.5, DeepSeek-R1).
+//
+// These models emit a `type: "thinking"` content block with chain-of-thought
+// before the visible `type: "text"` block. The OpenAI client must see the
+// reasoning surfaced as `delta.reasoning_content` and the visible text as
+// `delta.content`. Without the fix, the thinking block is silently dropped
+// and (with tight max_tokens) the response is empty.
+func TestOpenAIToAnthropicStreaming_ThinkingBlocks(t *testing.T) {
+	// --- Step 1: Start a mock Anthropic-format downstream ---
+	mockPort := 9300
+	mockServer := startMockAnthropicThinkingServer(t, mockPort)
+	defer mockServer.Close()
+
+	// --- Step 2: Configure Tresor ---
+	tmpDir, err := os.MkdirTemp("", "tresor-e2e-thinking-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+
+	cfgContent := fmt.Sprintf(`
+bind_addr: 127.0.0.1:%d
+db_path: %s
+
+downstreams:
+  - id: mock-anthropic
+    name: Mock Anthropic
+    api_formats: [anthropic]
+    base_url: http://127.0.0.1:%d
+    api_key: sk-mock-key
+    output_model_ids:
+      - thinking-model
+`, tresorPort, dbPath, mockPort)
+
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// --- Step 3: Start Tresor daemon ---
+	binary, err := filepath.Abs("../tresor.exe")
+	if err != nil {
+		t.Fatalf("Failed to resolve binary path: %v", err)
+	}
+
+	cmd := exec.Command(binary, "run", "--config", cfgPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start daemon: %v", err)
+	}
+	defer cmd.Process.Kill()
+	time.Sleep(2 * time.Second)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/health", tresorPort))
+	if err != nil || resp.StatusCode != 200 {
+		cmd.Process.Kill()
+		t.Fatalf("Tresor not ready: err=%v, status=%d", err, safeStatus(resp))
+	}
+	resp.Body.Close()
+
+	// --- Step 4: Send OpenAI-format streaming request to /v1/chat/completions ---
+	openAIReq := map[string]interface{}{
+		"model":      "thinking-model",
+		"max_tokens": 1000,
+		"stream":     true,
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Reply with PONG"},
+		},
+	}
+	body, _ := json.Marshal(openAIReq)
+	req, _ := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", tresorPort),
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected 200, got %d: %s", resp.StatusCode, respBody)
+	}
+	if !strings.EqualFold(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("Expected text/event-stream, got %s", resp.Header.Get("Content-Type"))
+	}
+
+	// --- Step 5: Parse the OpenAI SSE stream and verify both surfaces ---
+	var events []sseEvent
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			events = append(events, sseEvent{Type: "done", Data: payload})
+			continue
+		}
+		events = append(events, sseEvent{Type: "data", Data: payload})
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("Scanner error: %v", err)
+	}
+
+	t.Logf("Received %d SSE events from Tresor", len(events))
+	var sawReasoningContent bool
+	var sawVisibleText bool
+	for _, e := range events {
+		if e.Type == "done" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Role             string `json:"role"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(e.Data), &chunk); err != nil {
+			t.Errorf("Failed to parse chunk: %v, data=%s", err, e.Data)
+			continue
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		d := chunk.Choices[0].Delta
+		if d.ReasoningContent != "" {
+			sawReasoningContent = true
+			t.Logf("reasoning_content chunk: %q", d.ReasoningContent)
+		}
+		if d.Content != "" {
+			sawVisibleText = true
+			t.Logf("content chunk: %q", d.Content)
+		}
+	}
+
+	if !sawReasoningContent {
+		t.Fatal("expected at least one chunk with delta.reasoning_content, got none")
+	}
+	if !sawVisibleText {
+		t.Fatal("expected at least one chunk with delta.content, got none (the original bug)")
+	}
+}
+
+// startMockAnthropicThinkingServer creates a mock downstream that speaks
+// the Anthropic Messages SSE protocol and emits a thinking block followed
+// by a text block — the pattern produced by reasoning models like
+// MiniMax-M2.5 and DeepSeek-R1.
+func startMockAnthropicThinkingServer(t *testing.T, port int) *http.Server {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		t.Logf("Mock Anthropic received: model=%v, stream=%v", req["model"], req["stream"])
+
+		flusher, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		// message_start
+		writeMockSSEEvent(w, "message_start", map[string]interface{}{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"id":    "msg_mock_thinking",
+				"model": "thinking-model",
+				"role":  "assistant",
+			},
+		})
+		flusher.Flush()
+
+		// content_block_start: thinking block
+		writeMockSSEEvent(w, "content_block_start", map[string]interface{}{
+			"type":  "content_block_start",
+			"index": 0,
+			"content_block": map[string]interface{}{
+				"type":     "thinking",
+				"thinking": "The user wants PONG. I will reply with exactly PONG.",
+			},
+		})
+		flusher.Flush()
+
+		// content_block_stop: thinking block
+		writeMockSSEEvent(w, "content_block_stop", map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": 0,
+		})
+		flusher.Flush()
+
+		// content_block_start: text block (empty initial text)
+		writeMockSSEEvent(w, "content_block_start", map[string]interface{}{
+			"type":  "content_block_start",
+			"index": 1,
+			"content_block": map[string]interface{}{
+				"type": "text",
+				"text": "",
+			},
+		})
+		flusher.Flush()
+
+		// content_block_delta: text
+		writeMockSSEEvent(w, "content_block_delta", map[string]interface{}{
+			"type":  "content_block_delta",
+			"index": 1,
+			"delta": map[string]interface{}{
+				"type": "text_delta",
+				"text": "PONG",
+			},
+		})
+		flusher.Flush()
+
+		// content_block_stop: text block
+		writeMockSSEEvent(w, "content_block_stop", map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": 1,
+		})
+		flusher.Flush()
+
+		// message_delta: stop_reason
+		writeMockSSEEvent(w, "message_delta", map[string]interface{}{
+			"type": "message_delta",
+			"delta": map[string]interface{}{
+				"stop_reason":   "end_turn",
+				"stop_sequence": nil,
+			},
+		})
+		flusher.Flush()
+
+		// message_stop
+		writeMockSSEEvent(w, "message_stop", map[string]interface{}{
+			"type": "message_stop",
+		})
+		flusher.Flush()
+	})
+
+	// Bind explicitly so the test can fail fast if the port is taken.
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("Mock server failed to bind 127.0.0.1:%d: %v", port, err)
+	}
+	server := &http.Server{Handler: mux}
+	go func() { _ = server.Serve(listener) }()
+	return server
+}
+
+// writeMockSSEEvent writes a single typed SSE event (event: ...\ndata: ...\n\n).
+func writeMockSSEEvent(w http.ResponseWriter, eventType string, payload interface{}) {
+	data, _ := json.Marshal(payload)
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(data))
+}

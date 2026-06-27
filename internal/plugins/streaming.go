@@ -112,9 +112,10 @@ type openAIToolCallDelta struct {
 
 // openAIDelta represents the content delta in a streaming choice.
 type openAIDelta struct {
-	Role      string               `json:"role,omitempty"`
-	Content   string               `json:"content,omitempty"`
-	ToolCalls []openAIToolCallDelta `json:"tool_calls,omitempty"`
+	Role             string                `json:"role,omitempty"`
+	Content          string                `json:"content,omitempty"`
+	ToolCalls        []openAIToolCallDelta `json:"tool_calls,omitempty"`
+	ReasoningContent string                `json:"reasoning_content,omitempty"`
 }
 
 // writeSSEData marshals v as JSON and writes an SSE "data:" line to buf.

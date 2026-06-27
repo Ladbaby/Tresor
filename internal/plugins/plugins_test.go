@@ -459,6 +459,202 @@ data: {"type":"message_stop"}
 	}
 }
 
+// TestOpenAI2Anthropic_TransformResponse_Thinking verifies that a non-streaming
+// Anthropic response containing a `type: "thinking"` content block surfaces the
+// reasoning text on the OpenAI message as `reasoning_content`. Without this
+// passthrough, reasoning models (e.g. MiniMax-M2.5, DeepSeek-R1) that emit
+// thinking blocks would produce empty `content` on the OpenAI side.
+func TestOpenAI2Anthropic_TransformResponse_Thinking(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+	anthroResp := map[string]interface{}{
+		"id":    "msg_thinking_only",
+		"model": "MiniMax-M2.5",
+		"content": []interface{}{
+			map[string]interface{}{
+				"type":     "thinking",
+				"thinking": "The user asked for PONG. I should reply with exactly PONG.",
+				"signature": "abcd",
+			},
+		},
+		"usage":       map[string]interface{}{"input_tokens": 6, "output_tokens": 32},
+		"stop_reason": "max_tokens",
+	}
+	body, _ := json.Marshal(anthroResp)
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Type", "application/json")
+
+	newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform response: %v", err)
+	}
+
+	var openAIResp map[string]interface{}
+	if err := json.Unmarshal(newBody, &openAIResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	choices := openAIResp["choices"].([]interface{})
+	msg := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+
+	if got := msg["reasoning_content"]; got != "The user asked for PONG. I should reply with exactly PONG." {
+		t.Fatalf("expected reasoning_content populated, got %v", got)
+	}
+	if got, ok := msg["content"]; ok && got != "" {
+		t.Fatalf("expected content to be empty/missing, got %v", got)
+	}
+}
+
+// TestOpenAI2Anthropic_TransformResponse_ThinkingAndText verifies that when
+// the upstream emits both a thinking block and a text block, both surfaces
+// are populated independently on the OpenAI message.
+func TestOpenAI2Anthropic_TransformResponse_ThinkingAndText(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+	anthroResp := map[string]interface{}{
+		"id":    "msg_thinking_and_text",
+		"model": "MiniMax-M2.5",
+		"content": []interface{}{
+			map[string]interface{}{
+				"type":     "thinking",
+				"thinking": "Let me think about this carefully.",
+			},
+			map[string]interface{}{
+				"type": "text",
+				"text": "PONG",
+			},
+		},
+		"usage":       map[string]interface{}{"input_tokens": 6, "output_tokens": 40},
+		"stop_reason": "end_turn",
+	}
+	body, _ := json.Marshal(anthroResp)
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Type", "application/json")
+
+	newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform response: %v", err)
+	}
+
+	var openAIResp map[string]interface{}
+	if err := json.Unmarshal(newBody, &openAIResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	choices := openAIResp["choices"].([]interface{})
+	msg := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+
+	if got := msg["reasoning_content"]; got != "Let me think about this carefully." {
+		t.Fatalf("expected reasoning_content, got %v", got)
+	}
+	if got := msg["content"]; got != "PONG" {
+		t.Fatalf("expected content PONG, got %v", got)
+	}
+}
+
+// TestOpenAI2Anthropic_ResponseStreaming_Thinking covers the MiniMax-style SSE
+// pattern where the entire thinking is delivered as a single content_block_start
+// event (no deltas), followed by a regular text block. Both surfaces must be
+// forwarded as separate OpenAI chunks.
+func TestOpenAI2Anthropic_ResponseStreaming_Thinking(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+	input := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_t1","model":"MiniMax-M2.5"}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"reasoning goes here"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"PONG"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Type", "text/event-stream")
+
+	newBody, err := p.TransformResponse(resp, []byte(input), &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform streaming response: %v", err)
+	}
+
+	output := string(newBody)
+	if !strings.Contains(output, `"reasoning_content":"reasoning goes here"`) {
+		t.Fatalf("expected reasoning_content chunk in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, `"content":"PONG"`) {
+		t.Fatalf("expected PONG text chunk in output, got:\n%s", output)
+	}
+	// The reasoning chunk should NOT carry a role or content; reasoning_content only.
+	if strings.Contains(output, `"role":"assistant","content":"reasoning`) {
+		t.Fatalf("reasoning text should not appear in content, got:\n%s", output)
+	}
+}
+
+// TestOpenAI2Anthropic_TransformStreamChunk_Thinking covers the standard
+// Anthropic extended-thinking pattern where reasoning is delivered as
+// `content_block_delta` events with `delta.type: "thinking_delta"` and
+// `delta.thinking: "..."`.
+func TestOpenAI2Anthropic_TransformStreamChunk_Thinking(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: map[string]interface{}{}}
+
+	// 1. message_start
+	c1 := engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"msg_t2","model":"claude-sonnet-4-20250514"}}`),
+	}
+	if _, err := p.TransformStreamChunk(c1, ctx); err != nil {
+		t.Fatalf("message_start: %v", err)
+	}
+
+	// 2. content_block_start with thinking block
+	c2 := engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+	}
+	if _, err := p.TransformStreamChunk(c2, ctx); err != nil {
+		t.Fatalf("content_block_start thinking: %v", err)
+	}
+
+	// 3. content_block_delta with thinking_delta
+	c3 := engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"step 1 "}}`),
+	}
+	out3, err := p.TransformStreamChunk(c3, ctx)
+	if err != nil {
+		t.Fatalf("content_block_delta thinking_delta: %v", err)
+	}
+	if !strings.Contains(string(out3.Data), `"reasoning_content":"step 1 "`) {
+		t.Fatalf("expected reasoning_content delta, got: %s", string(out3.Data))
+	}
+
+	// 4. second thinking_delta
+	c4 := engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"step 2"}}`),
+	}
+	out4, err := p.TransformStreamChunk(c4, ctx)
+	if err != nil {
+		t.Fatalf("content_block_delta thinking_delta 2: %v", err)
+	}
+	if !strings.Contains(string(out4.Data), `"reasoning_content":"step 2"`) {
+		t.Fatalf("expected second reasoning_content delta, got: %s", string(out4.Data))
+	}
+}
+
 func TestOpenAI2Anthropic_TransformStreamChunk_ToolUse(t *testing.T) {
 	p := &OpenAI2Anthropic{}
 	ctx := &engine.PipelineContext{Variables: map[string]interface{}{}}

@@ -16,10 +16,11 @@ import (
 type OpenAI2Anthropic struct{}
 
 type openAIChatMessage struct {
-	Role       string               `json:"role"`
-	Content    openAIChatContent     `json:"content"`
-	ToolCalls  []openAIChatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string               `json:"tool_call_id,omitempty"`
+	Role             string               `json:"role"`
+	Content          openAIChatContent    `json:"content"`
+	ToolCalls        []openAIChatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string               `json:"tool_call_id,omitempty"`
+	ReasoningContent string               `json:"reasoning_content,omitempty"`
 }
 
 // openAIChatContent accepts both a plain string ("hi") and an array of parts
@@ -297,6 +298,7 @@ func (t *OpenAI2Anthropic) TransformResponse(resp *http.Response, body []byte, c
 type anthropicContent struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
@@ -342,10 +344,13 @@ func (t *OpenAI2Anthropic) transformJSONResponse(body []byte) ([]byte, error) {
 
 	// Build OpenAI response — extract text and tool calls from content blocks
 	content := ""
+	var reasoningContent string
 	var toolCalls []openAIChatToolCall
 	for _, c := range anthropicResp.Content {
 		if c.Type == "text" {
 			content += c.Text
+		} else if c.Type == "thinking" {
+			reasoningContent += c.Thinking
 		} else if c.Type == "tool_use" {
 			tc := openAIChatToolCall{
 				ID:   c.ID,
@@ -372,6 +377,7 @@ func (t *OpenAI2Anthropic) transformJSONResponse(body []byte) ([]byte, error) {
 			Text: content,
 			Set:  content != "",
 		},
+		ReasoningContent: reasoningContent,
 	}
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
@@ -430,10 +436,11 @@ func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 		case "content_block_start":
 			var block struct {
 				ContentBlock struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-					ID   string `json:"id"`
-					Name string `json:"name"`
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					Thinking string `json:"thinking"`
+					ID       string `json:"id"`
+					Name     string `json:"name"`
 				} `json:"content_block"`
 			}
 			if err := json.Unmarshal(data, &block); err != nil {
@@ -447,6 +454,16 @@ func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 						Object:  "chat.completion.chunk",
 						Model:   model,
 						Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{Content: block.ContentBlock.Text}, FinishReason: nil}},
+					}
+					writeSSEData(&out, chunk)
+				}
+			case "thinking":
+				if block.ContentBlock.Thinking != "" {
+					chunk := openAIChunk{
+						ID:      id,
+						Object:  "chat.completion.chunk",
+						Model:   model,
+						Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{ReasoningContent: block.ContentBlock.Thinking}, FinishReason: nil}},
 					}
 					writeSSEData(&out, chunk)
 				}
@@ -472,6 +489,7 @@ func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 				Delta struct {
 					Type        string `json:"type"`
 					Text        string `json:"text"`
+					Thinking    string `json:"thinking"`
 					PartialJSON string `json:"partial_json"`
 				} `json:"delta"`
 			}
@@ -486,6 +504,16 @@ func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 						Object:  "chat.completion.chunk",
 						Model:   model,
 						Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{Content: delta.Delta.Text}, FinishReason: nil}},
+					}
+					writeSSEData(&out, chunk)
+				}
+			case "thinking_delta":
+				if delta.Delta.Thinking != "" {
+					chunk := openAIChunk{
+						ID:      id,
+						Object:  "chat.completion.chunk",
+						Model:   model,
+						Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{ReasoningContent: delta.Delta.Thinking}, FinishReason: nil}},
 					}
 					writeSSEData(&out, chunk)
 				}
@@ -573,10 +601,11 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		var block struct {
 			Index        int `json:"index"`
 			ContentBlock struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-				ID   string `json:"id"`
-				Name string `json:"name"`
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				Thinking string `json:"thinking"`
+				ID       string `json:"id"`
+				Name     string `json:"name"`
 			} `json:"content_block"`
 		}
 		if err := json.Unmarshal(chunk.Data, &block); err != nil {
@@ -590,6 +619,18 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					Object:  "chat.completion.chunk",
 					Model:   state.Model,
 					Choices: []openAIChunkChoice{{Index: block.Index, Delta: openAIDelta{Content: block.ContentBlock.Text}}},
+				}
+				data, _ := json.Marshal(outChunk)
+				return engine.SSEChunk{EventType: "", Data: data}, nil
+			}
+			return engine.SSEChunk{}, nil
+		case "thinking":
+			if block.ContentBlock.Thinking != "" {
+				outChunk := openAIChunk{
+					ID:      state.ID,
+					Object:  "chat.completion.chunk",
+					Model:   state.Model,
+					Choices: []openAIChunkChoice{{Index: block.Index, Delta: openAIDelta{ReasoningContent: block.ContentBlock.Thinking}}},
 				}
 				data, _ := json.Marshal(outChunk)
 				return engine.SSEChunk{EventType: "", Data: data}, nil
@@ -620,6 +661,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			Delta struct {
 				Type        string `json:"type"`
 				Text        string `json:"text"`
+				Thinking    string `json:"thinking"`
 				PartialJSON string `json:"partial_json"`
 			} `json:"delta"`
 		}
@@ -634,6 +676,18 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					Object:  "chat.completion.chunk",
 					Model:   state.Model,
 					Choices: []openAIChunkChoice{{Index: delta.Index, Delta: openAIDelta{Content: delta.Delta.Text}}},
+				}
+				data, _ := json.Marshal(outChunk)
+				return engine.SSEChunk{EventType: "", Data: data}, nil
+			}
+			return engine.SSEChunk{}, nil
+		case "thinking_delta":
+			if delta.Delta.Thinking != "" {
+				outChunk := openAIChunk{
+					ID:      state.ID,
+					Object:  "chat.completion.chunk",
+					Model:   state.Model,
+					Choices: []openAIChunkChoice{{Index: delta.Index, Delta: openAIDelta{ReasoningContent: delta.Delta.Thinking}}},
 				}
 				data, _ := json.Marshal(outChunk)
 				return engine.SSEChunk{EventType: "", Data: data}, nil
