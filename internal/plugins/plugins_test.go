@@ -3,6 +3,7 @@ package plugins
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -599,6 +600,142 @@ data: {"type":"message_stop"}
 	// The reasoning chunk should NOT carry a role or content; reasoning_content only.
 	if strings.Contains(output, `"role":"assistant","content":"reasoning`) {
 		t.Fatalf("reasoning text should not appear in content, got:\n%s", output)
+	}
+}
+
+// TestOpenAI2Anthropic_ResponseStreaming_ChoiceIndexZero is a regression test
+// for the bug where TransformStreamChunk forwarded the Anthropic-side block
+// index as the OpenAI choice index. For a stream with thinking block (index 0)
+// followed by text block (index 1), every emitted OpenAI chunk must use
+// index: 0; otherwise OpenAI clients (Cherry Studio, openai-python's
+// streaming reconstruction) treat the chunks as separate choices and the
+// content is lost — manifesting as an empty `content` field.
+func TestOpenAI2Anthropic_ResponseStreaming_ChoiceIndexZero(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+	input := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_idx0","model":"MiniMax-M2.5"}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"reasoning goes here"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"PONG"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Type", "text/event-stream")
+
+	newBody, err := p.TransformResponse(resp, []byte(input), &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform streaming response: %v", err)
+	}
+
+	// Parse every "data: ..." line as a chunk and assert choices[0].index == 0.
+	lines := strings.Split(string(newBody), "\n")
+	var contentNonZeroIndex []string
+	for _, line := range lines {
+		const p = "data: "
+		if !strings.HasPrefix(line, p) {
+			continue
+		}
+		payload := strings.TrimPrefix(line, p)
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Index int `json:"index"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			t.Fatalf("parse chunk %q: %v", payload, err)
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		if chunk.Choices[0].Index != 0 {
+			contentNonZeroIndex = append(contentNonZeroIndex, payload)
+		}
+	}
+	if len(contentNonZeroIndex) > 0 {
+		t.Fatalf("expected every chunk's choices[0].index to be 0, but found non-zero in:\n%s",
+			strings.Join(contentNonZeroIndex, "\n"))
+	}
+}
+
+// TestOpenAI2Anthropic_TransformStreamChunk_ChoiceIndexZero exercises the
+// per-chunk streaming path (TransformStreamChunk), which is the one the live
+// daemon uses. Mirrors the MiniMax thinking-then-text pattern and asserts all
+// emitted chunks use choice index 0.
+func TestOpenAI2Anthropic_TransformStreamChunk_ChoiceIndexZero(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: map[string]interface{}{}}
+
+	chunks := []engine.SSEChunk{
+		{EventType: "message_start",
+			Data: []byte(`{"type":"message_start","message":{"id":"msg_idx_chunk","model":"MiniMax-M2.5"}}`)},
+		{EventType: "content_block_start",
+			Data: []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"reasoning goes here"}}`)},
+		{EventType: "content_block_stop",
+			Data: []byte(`{"type":"content_block_stop","index":0}`)},
+		{EventType: "content_block_start",
+			Data: []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`)},
+		{EventType: "content_block_delta",
+			Data: []byte(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"PONG"}}`)},
+		{EventType: "content_block_stop",
+			Data: []byte(`{"type":"content_block_stop","index":1}`)},
+		{EventType: "message_delta",
+			Data: []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`)},
+		{EventType: "message_stop",
+			Data: []byte(`{"type":"message_stop"}`)},
+	}
+
+	var offenders []string
+	for _, c := range chunks {
+		out, err := p.TransformStreamChunk(c, ctx)
+		if err != nil {
+			t.Fatalf("chunk %s: %v", c.EventType, err)
+		}
+		if len(out.Data) == 0 {
+			continue
+		}
+		if string(out.Data) == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Index int `json:"index"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(out.Data, &chunk); err != nil {
+			t.Fatalf("parse %s chunk: %v", c.EventType, err)
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		if chunk.Choices[0].Index != 0 {
+			offenders = append(offenders, fmt.Sprintf("event=%s payload=%s index=%d",
+				c.EventType, string(out.Data), chunk.Choices[0].Index))
+		}
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("expected every emitted chunk's choices[0].index to be 0, but:\n%s",
+			strings.Join(offenders, "\n"))
 	}
 }
 

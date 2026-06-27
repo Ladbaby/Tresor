@@ -599,7 +599,6 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 	case "content_block_start":
 		var block struct {
-			Index        int `json:"index"`
 			ContentBlock struct {
 				Type     string `json:"type"`
 				Text     string `json:"text"`
@@ -618,7 +617,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					ID:      state.ID,
 					Object:  "chat.completion.chunk",
 					Model:   state.Model,
-					Choices: []openAIChunkChoice{{Index: block.Index, Delta: openAIDelta{Content: block.ContentBlock.Text}}},
+					Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{Content: block.ContentBlock.Text}}},
 				}
 				data, _ := json.Marshal(outChunk)
 				return engine.SSEChunk{EventType: "", Data: data}, nil
@@ -630,7 +629,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					ID:      state.ID,
 					Object:  "chat.completion.chunk",
 					Model:   state.Model,
-					Choices: []openAIChunkChoice{{Index: block.Index, Delta: openAIDelta{ReasoningContent: block.ContentBlock.Thinking}}},
+					Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{ReasoningContent: block.ContentBlock.Thinking}}},
 				}
 				data, _ := json.Marshal(outChunk)
 				return engine.SSEChunk{EventType: "", Data: data}, nil
@@ -647,7 +646,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				ID:      state.ID,
 				Object:  "chat.completion.chunk",
 				Model:   state.Model,
-				Choices: []openAIChunkChoice{{Index: block.Index, Delta: openAIDelta{ToolCalls: []openAIToolCallDelta{tc}}}},
+				Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{ToolCalls: []openAIToolCallDelta{tc}}}},
 			}
 			data, _ := json.Marshal(outChunk)
 			return engine.SSEChunk{EventType: "", Data: data}, nil
@@ -657,7 +656,6 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 	case "content_block_delta":
 		var delta struct {
-			Index int `json:"index"`
 			Delta struct {
 				Type        string `json:"type"`
 				Text        string `json:"text"`
@@ -675,7 +673,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					ID:      state.ID,
 					Object:  "chat.completion.chunk",
 					Model:   state.Model,
-					Choices: []openAIChunkChoice{{Index: delta.Index, Delta: openAIDelta{Content: delta.Delta.Text}}},
+					Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{Content: delta.Delta.Text}}},
 				}
 				data, _ := json.Marshal(outChunk)
 				return engine.SSEChunk{EventType: "", Data: data}, nil
@@ -687,7 +685,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					ID:      state.ID,
 					Object:  "chat.completion.chunk",
 					Model:   state.Model,
-					Choices: []openAIChunkChoice{{Index: delta.Index, Delta: openAIDelta{ReasoningContent: delta.Delta.Thinking}}},
+					Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{ReasoningContent: delta.Delta.Thinking}}},
 				}
 				data, _ := json.Marshal(outChunk)
 				return engine.SSEChunk{EventType: "", Data: data}, nil
@@ -701,7 +699,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					ID:      state.ID,
 					Object:  "chat.completion.chunk",
 					Model:   state.Model,
-					Choices: []openAIChunkChoice{{Index: delta.Index, Delta: openAIDelta{ToolCalls: []openAIToolCallDelta{tc}}}},
+					Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{ToolCalls: []openAIToolCallDelta{tc}}}},
 				}
 				data, _ := json.Marshal(outChunk)
 				return engine.SSEChunk{EventType: "", Data: data}, nil
