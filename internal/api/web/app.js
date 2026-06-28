@@ -1989,7 +1989,7 @@ function initLogs() {
 async function fetchLogs() {
     try {
         logEntries = await api('/logs');
-        renderLogTable(logEntries);
+        renderLogStream(logEntries);
     } catch (err) {
         // If the endpoint doesn't exist (old server) or auth fails, skip logs
     }
@@ -2030,7 +2030,7 @@ function connectLogStream() {
         logEntries.unshift(entry);
         if (logEntries.length > 500) logEntries.pop();
         if (logPaused) return; // skip rendering while paused
-        prependLogRow(entry, true);
+        prependLogEntry(entry, true);
     });
 
     logSSE.addEventListener('config', function (e) {
@@ -2074,158 +2074,158 @@ function disconnectLogStream() {
 }
 
 /**
- * Render the full log table from an array of entries (newest first).
- * Entries are appended in order since the API returns newest-first.
+ * Render the full log stream from an array of entries (newest first).
  */
-function renderLogTable(entries) {
-    const tbody = document.getElementById('logs-table-body');
-    if (!tbody) return;
-    tbody.innerHTML = '';
+function renderLogStream(entries) {
+    const container = document.getElementById('logs-stream');
+    if (!container) return;
+    container.innerHTML = '';
     entries.forEach(function (entry) {
-        const tr = buildLogRow(entry, false);
-        tbody.appendChild(tr);
+        const div = buildLogEntry(entry, false);
+        container.appendChild(div);
     });
 }
 
 /**
- * Create a table row for a log entry. Returns the built <tr> element.
+ * Build a log entry DOM element (a <div> with timestamp, level badge, message).
  */
-function buildLogRow(entry, isNew) {
-    const tr = document.createElement('tr');
-    tr.className = 'log-entry';
-    tr.dataset.id = entry.id;
-    if (isNew) tr.classList.add('new');
-    if (entry.error || (entry.status >= 500)) tr.classList.add('log-error');
-    else if (entry.status >= 400) tr.classList.add('log-warn');
+function buildLogEntry(entry, isNew) {
+    const div = document.createElement('div');
+    div.className = 'log-entry';
+    div.dataset.id = entry.id;
+    if (isNew) div.classList.add('new');
 
-    // Debug entries render as system messages spanning all columns
+    // Timestamp
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'log-time';
+    timeSpan.textContent = formatTime(entry.timestamp);
+    div.appendChild(timeSpan);
+
+    // Level badge
+    const levelBadge = document.createElement('span');
+    const level = entry.level || 'info';
+    levelBadge.className = 'log-level log-level-' + level;
+    levelBadge.textContent = level;
+    div.appendChild(levelBadge);
+
+    // Message body
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'log-msg';
+
     if (entry.level === 'debug') {
-        tr.classList.add('log-debug');
-        const td = document.createElement('td');
-        td.setAttribute('colspan', '9');
-        td.innerHTML = '<span class="debug-bullet">◆</span> <span class="debug-msg">' + esc(entry.message || '') + '</span>';
-        tr.appendChild(td);
-        return tr;
-    }
-
-    // Time
-    let td = document.createElement('td');
-    td.textContent = formatTime(entry.timestamp);
-    tr.appendChild(td);
-
-    // Method
-    td = document.createElement('td');
-    td.textContent = entry.method || '';
-    tr.appendChild(td);
-
-    // Path
-    td = document.createElement('td');
-    td.textContent = entry.path || '';
-    tr.appendChild(td);
-
-    // Model (show resolved downstream model, fall back to input model)
-    td = document.createElement('td');
-    td.innerHTML = '<code>' + esc(entry.resolved_model || entry.model || '—') + '</code>';
-    tr.appendChild(td);
-
-    // Downstream
-    td = document.createElement('td');
-    td.textContent = entry.downstream_name || entry.downstream_id || '—';
-    tr.appendChild(td);
-
-    // Alias
-    td = document.createElement('td');
-    if (entry.alias_group) {
-        td.innerHTML = '<span class="badge">' + esc(entry.alias_group) + '</span>';
+        div.classList.add('log-debug');
+        msgDiv.innerHTML = '&#9670; ' + esc(entry.message || '');
     } else {
-        td.textContent = '—';
+        div.classList.add('log-request');
+
+        const parts = [];
+
+        // Method + Path
+        if (entry.method || entry.path) {
+            parts.push((entry.method || '') + ' ' + (entry.path || ''));
+        }
+
+        // Model chain: input-model -> resolved-model
+        if (entry.model) {
+            let modelPart = esc(entry.model);
+            if (entry.resolved_model && entry.resolved_model !== entry.model) {
+                modelPart += ' &rarr; ' + esc(entry.resolved_model);
+            }
+            parts.push(modelPart);
+        }
+
+        // Downstream
+        if (entry.downstream_name) {
+            parts.push(esc(entry.downstream_name));
+        } else if (entry.downstream_id) {
+            parts.push(esc(entry.downstream_id));
+        }
+
+        // Alias group
+        if (entry.alias_group) {
+            parts.push('via ' + esc(entry.alias_group));
+        }
+
+        // Status code with color class
+        let statusClass = 'log-status-ok';
+        if (entry.status >= 500) {
+            statusClass = 'log-status-error';
+            div.classList.add('log-error');
+        } else if (entry.status >= 400) {
+            statusClass = 'log-status-warn';
+            div.classList.add('log-warn');
+        }
+        parts.push('<span class="' + statusClass + '">' + entry.status + '</span>');
+
+        // Duration
+        const dur = formatDuration(entry.duration);
+        if (dur && dur !== '') {
+            parts.push(dur);
+        }
+
+        // Error
+        if (entry.error) {
+            parts.push('<span style="color:var(--danger-hover);">ERR: ' + esc(entry.error) + '</span>');
+        }
+
+        msgDiv.innerHTML = parts.join(' ');
     }
-    tr.appendChild(td);
 
-    // Status
-    td = document.createElement('td');
-    let statusClass = 'status-ok';
-    if (entry.status >= 500) statusClass = 'status-error';
-    else if (entry.status >= 400) statusClass = 'status-warn';
-    td.innerHTML = '<span class="' + statusClass + '">' + entry.status + '</span>';
-    tr.appendChild(td);
-
-    // Duration
-    td = document.createElement('td');
-    td.textContent = formatDuration(entry.duration);
-    tr.appendChild(td);
-
-    // Error
-    td = document.createElement('td');
-    if (entry.error) {
-        td.innerHTML = '<span style="color:var(--color-danger);">' + esc(entry.error) + '</span>';
-    } else {
-        td.textContent = '—';
-    }
-    tr.appendChild(td);
-
-    return tr;
+    div.appendChild(msgDiv);
+    return div;
 }
 
 /**
- * Prepend a log entry row (newest at top).
+ * Prepend a log entry (newest at top).
  */
-function prependLogRow(entry, isNew) {
-    const tbody = document.getElementById('logs-table-body');
-    if (!tbody) return;
+function prependLogEntry(entry, isNew) {
+    const container = document.getElementById('logs-stream');
+    if (!container) return;
 
-    const tr = buildLogRow(entry, isNew);
-    if (tbody.firstChild) {
-        tbody.insertBefore(tr, tbody.firstChild);
+    const div = buildLogEntry(entry, isNew);
+    if (container.firstChild) {
+        container.insertBefore(div, container.firstChild);
     } else {
-        tbody.appendChild(tr);
+        container.appendChild(div);
     }
 
-    // Remove oldest rows from bottom if exceeding 500
-    while (tbody.children.length > 500) {
-        tbody.removeChild(tbody.lastChild);
+    // Remove oldest entries from bottom if exceeding 500
+    while (container.children.length > 500) {
+        container.removeChild(container.lastChild);
     }
 
     // Remove flash class after animation completes
     if (isNew) {
-        setTimeout(function () { tr.classList.remove('new'); }, 600);
+        setTimeout(function () { div.classList.remove('new'); }, 600);
     }
 }
 
 /**
- * Append a log entry row (kept for backwards compat; now delegates to prepend).
- */
-function appendLogRow(entry, isNew) {
-    prependLogRow(entry, isNew);
-}
-
-/**
- * Clear all log entries from the table and memory.
+ * Clear all log entries from the stream and memory.
  */
 window.clearLogEntries = function () {
-    const tbody = document.getElementById('logs-table-body');
-    if (tbody) tbody.innerHTML = '';
+    const container = document.getElementById('logs-stream');
+    if (container) container.innerHTML = '';
     logEntries = [];
 };
 
 /**
- * Filter log rows by search text. Matches against model, path, downstream,
- * status, error, alias_group, and method. Rows that don't match are hidden.
+ * Filter log entries by search text.
  */
 function applyLogFilter(query) {
-    const tbody = document.getElementById('logs-table-body');
-    if (!tbody) return;
+    const container = document.getElementById('logs-stream');
+    if (!container) return;
     const q = query.toLowerCase();
 
-    tbody.querySelectorAll('tr.log-entry').forEach(function (tr) {
-        const id = parseInt(tr.dataset.id, 10);
+    container.querySelectorAll('.log-entry').forEach(function (div) {
+        const id = parseInt(div.dataset.id, 10);
         const entry = logEntries.find(function (e) { return e.id === id; });
-        if (!entry) { tr.style.display = 'none'; return; }
+        if (!entry) { div.style.display = 'none'; return; }
 
         const text = [entry.model, entry.resolved_model, entry.path, entry.downstream_name,
             entry.downstream_id, entry.error, entry.alias_group, entry.method,
             String(entry.status), entry.message, entry.level].join(' ').toLowerCase();
-        tr.style.display = (q === '' || text.indexOf(q) !== -1) ? '' : 'none';
+        div.style.display = (q === '' || text.indexOf(q) !== -1) ? '' : 'none';
     });
 }
 
@@ -2279,14 +2279,16 @@ function formatTime(ts) {
         d = new Date(ts);
     }
     if (isNaN(d.getTime())) return String(ts);
-    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    return String(d.getHours()).padStart(2, '0') + ':'
+        + String(d.getMinutes()).padStart(2, '0') + ':'
+        + String(d.getSeconds()).padStart(2, '0');
 }
 
 /**
  * Format a duration in milliseconds to a readable string.
  */
 function formatDuration(ms) {
-    if (ms == null || ms === 0) return '—';
+    if (ms == null || ms === 0) return '';
     if (ms < 1000) return Math.round(ms) + 'ms';
     if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
     const mins = Math.floor(ms / 60000);

@@ -358,25 +358,10 @@
                         <input type="text" id="log-filter-input" placeholder="Filter logs (model, path, downstream, status, error)..." style="width:100%;padding:0.5rem;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:0.85rem;">
                     </div>
                     <div id="log-level-indicator" class="log-level-bar" style="margin-bottom:1rem;display:none;">Level: Info</div>
-                    <div style="overflow-x:auto;border:1px solid var(--border-color);border-radius:8px;">
-                        <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
-                            <thead>
-                                <tr style="background:var(--bg-secondary);">
-                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Time</th>
-                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Method</th>
-                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Path</th>
-                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Model</th>
-                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Downstream</th>
-                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Alias</th>
-                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Status</th>
-                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Duration</th>
-                                    <th style="padding:0.6rem;text-align:left;border-bottom:1px solid var(--border-color);">Error</th>
-                                </tr>
-                            </thead>
-                            <tbody id="logs-table-body">
-                                <!-- Log entries appended here by JS -->
-                            </tbody>
-                        </table>
+                    <div id="logs-container" class="logs-container">
+                        <div id="logs-stream">
+                            <!-- Log entries appended here by JS -->
+                        </div>
                     </div>
                     <p style="color:var(--text-muted);font-size:0.8rem;margin-top:0.5rem;">Up to 500 recent entries shown in real-time via SSE</p>
                 </section>
