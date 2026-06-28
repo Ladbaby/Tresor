@@ -113,7 +113,7 @@ The codebase follows a clean layered structure with three core concerns:
 | `internal/engine/` | Core gateway handler: `engine.go` (proxy, model resolution, auto-translation, model listing), `pipeline.go` (transformer orchestration), `types.go` (interfaces), `logger.go` (request logging + SSE) |
 | `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go`, `fix_anthropic_images.go`, `openai2responses.go`, `responses2openai.go`, `responses2anthropic.go`, `anthropic2responses.go` |
 | `internal/api/` | Admin REST API: `router.go` (routing + auth), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list + model fetch), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE + log level), `config.go` (runtime config), `embed.go` (embedded web UI) |
-| `internal/middleware/` | Cookie-based session auth middleware for admin API (with rate limiting) |
+| `internal/middleware/` | Cookie-based session auth middleware for admin API (with rate limiting and multi-session support) |
 | `internal/proxy/` | Outbound proxy mode configuration (auto, env, windows, none) + URL validation |
 | `internal/api/web/` | Embedded SPA: `index.html`, `style.css`, `app.js` |
 
@@ -161,7 +161,7 @@ Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plu
 |---|---|---|
 | GET | `/api/auth/status` | Check if auth is enabled (public) |
 | POST | `/api/auth/login` | Log in with password, get session cookie (public) |
-| POST | `/api/auth/logout` | Clear session cookie and token (public) |
+| POST | `/api/auth/logout` | Clear current session cookie and token (public) |
 | GET | `/api/health` | Health check (public) |
 | GET | `/api/version` | Print version and build info (public) |
 | GET/PUT | `/api/log_level` | Get/set request logging verbosity |
