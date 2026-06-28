@@ -56,7 +56,7 @@
                 <!-- Downstreams Tab -->
                 <section id="tab-downstreams" class="tab-content">
                     <div class="header-actions">
-                        <h2>Downstream Providers</h2>
+                        <h2>Downstream Providers<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Manage the LLM providers and your API keys here (e.g., OpenAI, Claude, Deepseek.).">?</span></h2>
                         <button id="btn-new-downstream" class="btn-primary">+ New Downstream</button>
                     </div>
                     <table id="downstreams-table">
@@ -115,7 +115,7 @@
                 <!-- Aliases Tab -->
                 <section id="tab-aliases" class="tab-content">
                     <div class="header-actions">
-                        <h2>Model Aliases</h2>
+                        <h2>Model Aliases<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Change the actual model in use for client apps. e.g., In order to let Claude Code (the client app) use Deepseek V4 Flash (the downstream provider's model), create a new alias group named 'claude.*', enable regex pattern such that it matches 'claude-opus', 'claude-sonnent', and 'claude-haiku', then add 'deepseek-v4-flash' in output model IDs.">?</span></h2>
                         <button id="btn-new-alias-group" class="btn-primary">+ New Alias Group</button>
                     </div>
                     <div id="alias-groups-container"></div>
@@ -168,7 +168,7 @@
                 <!-- Rules Tab (default active) -->
                 <section id="tab-rules" class="tab-content">
                     <div class="header-actions">
-                        <h2>Routing Rules</h2>
+                        <h2>Routing Rules<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Optional pipelines that run on matching requests (e.g., inject headers, fix payloads). Tresor can auto-translate APIs, so normally you don't need to manually specify a pipeline for API translation.">?</span></h2>
                         <button id="btn-new-rule" class="btn-primary">+ New Rule</button>
                     </div>
                     <table id="rules-table">
