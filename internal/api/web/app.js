@@ -2087,6 +2087,54 @@ function renderLogStream(entries) {
 }
 
 /**
+ * Highlight quoted identifiers in a debug log message so the same model/alias
+ * distinctions used in request lines apply to system messages too.
+ *
+ * Debug messages use printf-style %q quoting: `model "X"`, `alias "Y"`, etc.
+ * We tokenize the message by alternating plain text and "quoted" runs, then
+ * assign a class based on the preceding keyword (model/alias/downstream).
+ */
+function highlightDebugMessage(message) {
+    if (!message) return '';
+    let out = '';
+    let i = 0;
+    let lastKeyword = '';
+    while (i < message.length) {
+        const ch = message[i];
+        if (ch === '"') {
+            // Find closing quote (no escaping in these messages)
+            let j = i + 1;
+            while (j < message.length && message[j] !== '"') j++;
+            const value = message.slice(i + 1, j);
+            const cls = debugClassForKeyword(lastKeyword);
+            out += cls
+                ? '<span class="' + cls + '">' + esc(value) + '</span>'
+                : esc(value);
+            i = j + 1;
+            lastKeyword = '';
+        } else {
+            // Accumulate plain text up to the next quote, capturing the last
+            // word before the quote so we can classify the quoted value.
+            let j = i;
+            while (j < message.length && message[j] !== '"') j++;
+            const segment = message.slice(i, j);
+            out += esc(segment);
+            const wordMatch = segment.match(/(\w+)\s*$/);
+            if (wordMatch) lastKeyword = wordMatch[1].toLowerCase();
+            i = j;
+        }
+    }
+    return out;
+}
+
+function debugClassForKeyword(keyword) {
+    if (keyword === 'model') return 'log-model-input';
+    if (keyword === 'alias') return 'log-alias';
+    if (keyword === 'downstream') return 'log-downstream';
+    return '';
+}
+
+/**
  * Build a log entry DOM element (a <div> with timestamp, level badge, message).
  */
 function buildLogEntry(entry, isNew) {
@@ -2114,7 +2162,7 @@ function buildLogEntry(entry, isNew) {
 
     if (entry.level === 'debug') {
         div.classList.add('log-debug');
-        msgDiv.innerHTML = '&#9670; ' + esc(entry.message || '');
+        msgDiv.innerHTML = '&#9670; ' + highlightDebugMessage(entry.message || '');
     } else {
         div.classList.add('log-request');
 
@@ -2122,28 +2170,28 @@ function buildLogEntry(entry, isNew) {
 
         // Method + Path
         if (entry.method || entry.path) {
-            parts.push((entry.method || '') + ' ' + (entry.path || ''));
+            parts.push('<span class="log-method-path">' + esc((entry.method || '') + ' ' + (entry.path || '')).trim() + '</span>');
         }
 
         // Model chain: input-model -> resolved-model
         if (entry.model) {
-            let modelPart = esc(entry.model);
+            let modelPart = '<span class="log-model-input">' + esc(entry.model) + '</span>';
             if (entry.resolved_model && entry.resolved_model !== entry.model) {
-                modelPart += ' &rarr; ' + esc(entry.resolved_model);
+                modelPart += ' <span class="log-arrow">&rarr;</span> <span class="log-model-resolved">' + esc(entry.resolved_model) + '</span>';
             }
             parts.push(modelPart);
         }
 
         // Downstream
         if (entry.downstream_name) {
-            parts.push(esc(entry.downstream_name));
+            parts.push('<span class="log-downstream">' + esc(entry.downstream_name) + '</span>');
         } else if (entry.downstream_id) {
-            parts.push(esc(entry.downstream_id));
+            parts.push('<span class="log-downstream">' + esc(entry.downstream_id) + '</span>');
         }
 
         // Alias group
         if (entry.alias_group) {
-            parts.push('via ' + esc(entry.alias_group));
+            parts.push('via <span class="log-alias">' + esc(entry.alias_group) + '</span>');
         }
 
         // Status code with color class

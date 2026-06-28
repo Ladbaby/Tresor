@@ -1718,6 +1718,35 @@ html[data-theme="light"] form select {
 .log-status-warn { color: #ffc107; }
 .log-status-error { color: var(--danger-hover); }
 
+/* Log message components: input model, resolved model, alias group */
+.log-model-input {
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    color: var(--text-primary);
+}
+.log-model-resolved {
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    color: var(--green-code);
+}
+.log-arrow {
+    color: var(--text-muted);
+    margin: 0 0.15em;
+}
+.log-alias {
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    color: var(--accent);
+    background: var(--accent-bg);
+    padding: 0 0.35em;
+    border-radius: 3px;
+}
+.log-downstream {
+    color: var(--text-secondary);
+    font-style: italic;
+}
+.log-method-path {
+    color: var(--text-heading);
+    font-weight: 500;
+}
+
 /* Pause button in Logs tab */
 #btn-pause-logs {
     background: var(--bg-tertiary);
