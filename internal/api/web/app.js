@@ -1142,6 +1142,109 @@ function esc(s) {
     });
 }
 
+// ---- Help Tooltip Texts ----
+const tooltipTexts = {
+    'alias.regex_badge': "This group uses a regex pattern — matches any incoming model name the regex accepts. (e.g., claude-opus.* matches both claude-opus-4-7 and claude-opus-4-8)",
+};
+
+function makeHelpIcon(tooltip) {
+    const icon = document.createElement('span');
+    icon.className = 'help-icon';
+    icon.tabIndex = 0;
+    icon.setAttribute('role', 'button');
+    icon.setAttribute('aria-label', 'Help');
+    icon.setAttribute('aria-describedby', 'help-popover');
+    icon.dataset.tooltip = tooltip;
+    icon.textContent = '?';
+    return icon;
+}
+
+(function setupHelpPopover() {
+    const popover = document.createElement('div');
+    popover.id = 'help-popover';
+    popover.setAttribute('role', 'tooltip');
+    document.body.appendChild(popover);
+
+    let activeIcon = null;
+    let pinned = false;
+
+    function place(icon) {
+        const r = icon.getBoundingClientRect();
+        popover.textContent = icon.dataset.tooltip;
+        popover.classList.remove('anchor-right', 'anchor-above');
+        popover.style.top = '0px';
+        popover.style.left = '0px';
+
+        requestAnimationFrame(() => {
+            const pr = popover.getBoundingClientRect();
+            let top = r.bottom + window.scrollY + 6;
+            let left = r.left + window.scrollX;
+
+            if (r.left + pr.width > window.innerWidth - 8) {
+                left = r.right + window.scrollX - pr.width;
+                popover.classList.add('anchor-right');
+            }
+            if (r.bottom + pr.height > window.innerHeight - 8) {
+                top = r.top + window.scrollY - pr.height - 6;
+                left = r.left + window.scrollX + r.width / 2 - pr.width / 2;
+                popover.classList.add('anchor-above');
+            }
+            popover.style.top = top + 'px';
+            popover.style.left = left + 'px';
+        });
+    }
+
+    function show(icon) {
+        activeIcon = icon;
+        place(icon);
+        popover.classList.add('visible');
+    }
+    function hide() {
+        if (pinned) return;
+        activeIcon = null;
+        popover.classList.remove('visible');
+    }
+
+    document.addEventListener('mouseenter', e => {
+        const icon = e.target.closest && e.target.closest('.help-icon');
+        if (icon) { pinned = false; show(icon); }
+    }, true);
+    document.addEventListener('mouseleave', e => {
+        const icon = e.target.closest && e.target.closest('.help-icon');
+        if (icon) hide();
+    }, true);
+    document.addEventListener('focusin', e => {
+        const icon = e.target.closest && e.target.closest('.help-icon');
+        if (icon) { pinned = false; show(icon); }
+    });
+    document.addEventListener('focusout', e => {
+        const icon = e.target.closest && e.target.closest('.help-icon');
+        if (icon) hide();
+    });
+    document.addEventListener('click', e => {
+        const icon = e.target.closest && e.target.closest('.help-icon');
+        if (icon) {
+            e.preventDefault();
+            if (pinned && activeIcon === icon) {
+                pinned = false; hide();
+            } else {
+                pinned = true; show(icon);
+            }
+            return;
+        }
+        if (pinned) { pinned = false; hide(); }
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && (pinned || popover.classList.contains('visible'))) {
+            pinned = false;
+            hide();
+            if (activeIcon) activeIcon.focus();
+        }
+    });
+    window.addEventListener('scroll', () => { if (!pinned) hide(); }, true);
+    window.addEventListener('resize', hide);
+})();
+
 // Event delegation for rule table buttons (replaces inline onclick)
 document.getElementById('rules-body').addEventListener('click', function (e) {
     const btn = e.target.closest('.rule-edit-btn, .rule-toggle-btn, .rule-delete-btn');
@@ -1257,16 +1360,23 @@ function renderAliasGroup(container, group) {
     const isRegexGroup = group.is_regex;
     title.innerHTML = esc(group.input_model_id) +
         (isRegexGroup ? '<span class="badge" style="background:#6e256d;color:#e879f9;margin-left:0.4rem;font-size:0.7rem;">regex</span>' : '');
+    if (isRegexGroup) {
+        title.appendChild(makeHelpIcon(tooltipTexts['alias.regex_badge']));
+    }
 
     const actions = document.createElement('div');
     actions.className = 'alias-group-actions';
+
+    const addBtnWrap = document.createElement('span');
+    addBtnWrap.style.cssText = 'display:inline-flex;align-items:center;gap:0.3rem;';
 
     // Add option button in header area
     const addBtn = document.createElement('button');
     addBtn.className = 'btn-small';
     addBtn.textContent = '+ Option';
     addBtn.onclick = () => openAliasOptionModal(group.input_model_id);
-    actions.appendChild(addBtn);
+    addBtnWrap.appendChild(addBtn);
+    actions.appendChild(addBtnWrap);
 
     // Delete group button
     const deleteGroupBtn = document.createElement('button');

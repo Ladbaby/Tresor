@@ -1688,3 +1688,66 @@ html[data-theme="light"] form select {
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
     font-size: 0.78rem;
 }
+
+/* ============================================================
+   Help Tooltip System
+   ============================================================ */
+
+.help-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    font-weight: 700;
+    font-family: inherit;
+    cursor: help;
+    margin-left: 0.35rem;
+    vertical-align: 1px;
+    border: 1px solid var(--border-color);
+    user-select: none;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.help-icon:hover,
+.help-icon:focus-visible {
+    background: var(--accent-bg);
+    color: var(--accent);
+    border-color: var(--accent);
+    outline: none;
+}
+
+#help-popover {
+    position: absolute;
+    z-index: 2000;
+    max-width: 280px;
+    padding: 0.6rem 0.8rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: opacity 0.12s, transform 0.12s;
+}
+
+#help-popover.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+#help-popover code {
+    background: var(--bg-tertiary);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.78rem;
+    color: var(--green-code);
+}

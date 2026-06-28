@@ -53,7 +53,7 @@ func NewRegistry() engine.PluginRegistry {
 
 	r.register("fix_anthropic_images", engine.PluginInfo{
 		ID:          "fix_anthropic_images",
-		Description: "Extracts image parts from tool_result.content[] and promotes them to top-level message content for Anthropic-compatible backends",
+		Description: "Fix the image reading capability for the Anthropic API of some providers (e.g., llama.cpp). Refer to https://github.com/ggml-org/llama.cpp/pull/22536",
 		ConfigSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{},

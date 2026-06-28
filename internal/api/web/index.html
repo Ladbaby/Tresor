@@ -82,15 +82,15 @@
                             <form id="downstream-form">
                                 <input type="hidden" id="downstream-id">
                                 <label>Name: <input type="text" id="downstream-name" required></label>
-                                <label>Base URL: <input type="text" id="downstream-url" placeholder="https://api.openai.com/v1"></label>
+                                <label>Base URL:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Endpoint of the provider&apos;s API. Must include the path">?</span> <input type="text" id="downstream-url" placeholder="https://api.openai.com/v1"></label>
                                 <label>API Key: <input type="password" id="downstream-key"></label>
-                                <label>API Formats:</label>
+                                <label>API Formats:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Which protocols this provider accepts. (e.g., Claude Code uses 'Anthropic', Codex uses 'OpenAI Responses', and llama.cpp accepts both 'OpenAI' and 'Anthropic'.)">?</span></label>
                                 <div class="format-checkboxes" id="format-checkboxes">
                                     <label class="format-checkbox"><input type="checkbox" name="format" value="openai"><img class="format-icon icon-openai" src="icons/openai-completions.svg" alt="" aria-hidden="true"> OpenAI</label>
                                     <label class="format-checkbox"><input type="checkbox" name="format" value="openai_responses"><img class="format-icon icon-openai_responses" src="icons/openai-responses.svg" alt="" aria-hidden="true"> OpenAI Responses</label>
                                     <label class="format-checkbox"><input type="checkbox" name="format" value="anthropic"><img class="format-icon icon-anthropic" src="icons/anthropic.svg" alt="" aria-hidden="true"> Anthropic</label>
                                 </div>
-                                <label>Output Model IDs:
+                                <label>Output Model IDs:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Models client apps can access from this provider. Add IDs manually or use 'Fetch from Provider' button (appears after filling out provider's information in above fields).">?</span>
                                     <div id="model-ids-container"></div>
                                     <button type="button" class="btn-small" id="btn-add-model-id" style="margin-top:0.3rem">+ Add Model</button>
                                     <button type="button" class="btn-small" id="btn-fetch-models" style="margin-top:0.3rem">⟳ Fetch from Provider</button>
@@ -127,11 +127,11 @@
                             <h3>Add Alias Option</h3>
                             <form id="alias-form">
                                 <input type="hidden" id="alias-input-model">
-                                <label>Input Model ID: <strong id="alias-group-label"></strong></label>
+                                <label>Input Model ID:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model name used in client apps (e.g, Claude Code, Codex, Gemini CLI). Tresor changes the actual model in use for these apps, by routing requests to the selected downstream model instead.">?</span> <strong id="alias-group-label"></strong></label>
                                 <label>Downstream:
                                     <select id="alias-downstream"></select>
                                 </label>
-                                <label>Output Model IDs:
+                                <label>Output Model IDs:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model(s) you actually want to use, from the downstream provider. Tresor will route requests to the selected downstream model instead.">?</span>
                                     <div id="alias-output-models" class="model-multi-select"></div>
                                     <input type="text" id="alias-output-model-custom" class="custom-model-input" placeholder="or type a model ID..." style="display:none; margin-top:0.3rem;">
                                 </label>
@@ -146,16 +146,16 @@
                             <span class="close">&times;</span>
                             <h3>Create New Alias Group</h3>
                             <form id="new-group-form">
-                                <label>Input Model ID:
+                                <label>Input Model ID:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model name used in client apps (e.g, Claude Code, Codex, Gemini CLI). Tresor changes the actual model in use for these apps, by routing requests to the selected downstream model instead.">?</span>
                                     <input type="text" id="new-group-input-model" placeholder="e.g. gpt-4o" required>
                                 </label>
                                 <label style="display:inline-flex;align-items:center;gap:0.3rem;margin:0.5rem 0.5rem 0.5rem 0;cursor:pointer;">
-                                    <input type="checkbox" id="new-group-is-regex"> <span style="font-size:0.85rem;color:var(--text-muted);">Regex Pattern</span>
+                                    <input type="checkbox" id="new-group-is-regex"> <span style="font-size:0.85rem;color:var(--text-muted);">Regex Pattern<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Treat Input Model ID as a regex to match multiple model names (e.g., claude-opus.* matches both claude-opus-4-7 and claude-opus-4-8).">?</span></span>
                                 </label>
                                 <label>Downstream:
                                     <select id="new-group-downstream"></select>
                                 </label>
-                                <label>Output Model IDs:
+                                <label>Output Model IDs:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model(s) you actually want to use, from the downstream provider. Tresor will route requests to the selected downstream model instead.">?</span>
                                     <div id="new-group-output-models" class="model-multi-select"></div>
                                     <input type="text" id="new-group-output-model-custom" class="custom-model-input" placeholder="or type a model ID..." style="display:none; margin-top:0.3rem;">
                                 </label>
@@ -210,11 +210,11 @@
                             <form id="rule-form">
                                 <input type="hidden" id="rule-id">
                                 <label>Name: <input type="text" id="rule-name" required></label>
-                                <label>Pattern Path: <input type="text" id="rule-path" placeholder="/v1/chat/completions or *"></label>
-                                <label>Pattern Model: <input type="text" id="rule-model" placeholder="gpt-4o (optional)"></label>
+                                <label>Pattern Path:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="URL path that must match (e.g., /v1/chat/completions). Use * to match all paths.">?</span> <input type="text" id="rule-path" placeholder="/v1/chat/completions or *"></label>
+                                <label>Pattern Model:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Only apply this rule when the request targets this model. Leave empty to match any model.">?</span> <input type="text" id="rule-model" placeholder="gpt-4o (optional)"></label>
 
                                 <!-- Match Input Format -->
-                                <label>Match Input Format:</label>
+                                <label>Match Input Format:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Only apply when the incoming client request uses this format. Leave empty to match any.">?</span></label>
                                 <div class="format-checkboxes" id="rule-match-input-formats">
                                     <label class="format-checkbox"><input type="checkbox" name="match_input_format" value="openai"><img class="format-icon icon-openai" src="icons/openai-completions.svg" alt="" aria-hidden="true"> OpenAI</label>
                                     <label class="format-checkbox"><input type="checkbox" name="match_input_format" value="openai_responses"><img class="format-icon icon-openai_responses" src="icons/openai-responses.svg" alt="" aria-hidden="true"> OpenAI Responses</label>
@@ -223,7 +223,7 @@
                                 <p class="text-muted">Leave empty to match any input format.</p>
 
                                 <!-- Match Downstream Format -->
-                                <label>Match Downstream Format:</label>
+                                <label>Match Downstream Format:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Only apply when the target downstream speaks this format. Leave empty to match any.">?</span></label>
                                 <div class="format-checkboxes" id="rule-match-downstream-formats">
                                     <label class="format-checkbox"><input type="checkbox" name="match_downstream_format" value="openai"><img class="format-icon icon-openai" src="icons/openai-completions.svg" alt="" aria-hidden="true"> OpenAI</label>
                                     <label class="format-checkbox"><input type="checkbox" name="match_downstream_format" value="openai_responses"><img class="format-icon icon-openai_responses" src="icons/openai-responses.svg" alt="" aria-hidden="true"> OpenAI Responses</label>
@@ -232,12 +232,12 @@
                                 <p class="text-muted">Leave empty to match any downstream format.</p>
 
                                 <!-- Match Downstreams (multi-select) -->
-                                <label>Match Downstreams:
+                                <label>Match Downstreams:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Limit this rule to specific providers. Leave empty to match any downstream.">?</span>
                                     <div id="rule-match-downstreams" class="model-multi-select"></div>
                                 </label>
                                 <p class="text-muted">Leave empty to match any downstream.</p>
 
-                                <label>Pipeline Transformers:
+                                <label>Pipeline Transformers:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Ordered list of plugins that transform the request/response. Order matters.">?</span>
                                     <div id="pipeline-editor">
                                         <div id="pipeline-steps"></div>
                                         <button type="button" class="btn-small" id="btn-add-step" style="margin-top:0.3rem">+ Add Step</button>
