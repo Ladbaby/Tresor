@@ -154,7 +154,7 @@ func TestAuthMiddleware_ClearToken_InvalidatesSession(t *testing.T) {
 	protected := mw.Protect(handler)
 
 	token := mw.GenerateToken()
-	mw.ClearToken() // logout
+	mw.ClearToken(token) // logout this session
 
 	req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -184,6 +184,173 @@ func TestAuthMiddleware_SetPassword_ClearsToken(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 after password change, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_MultipleTokensCoexist(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	// Two independent logins (e.g. two browsers)
+	tokenA := mw.GenerateToken()
+	tokenB := mw.GenerateToken()
+	if tokenA == tokenB {
+		t.Fatalf("tokens must differ: %q == %q", tokenA, tokenB)
+	}
+
+	// Token A works via Bearer
+	req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenA)
+	w := httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token A (Bearer): expected 200, got %d", w.Code)
+	}
+
+	// Token B works via Bearer — and crucially token A still does
+	req = httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenB)
+	w = httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token B (Bearer): expected 200, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenA)
+	w = httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token A (Bearer, after B login): expected 200, got %d", w.Code)
+	}
+
+	// Token B works via cookie (SSE path)
+	req = httptest.NewRequest(http.MethodGet, "/api/logs/stream", nil)
+	req.AddCookie(&http.Cookie{Name: AuthCookie, Value: tokenB})
+	w = httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token B (cookie): expected 200, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_ClearOneTokenLeavesOther(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	tokenA := mw.GenerateToken()
+	tokenB := mw.GenerateToken()
+
+	mw.ClearToken(tokenA)
+
+	// A is gone
+	req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenA)
+	w := httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("token A after clear: expected 401, got %d", w.Code)
+	}
+
+	// B survives
+	req = httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenB)
+	w = httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token B after A clear: expected 200, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_ClearAllTokensRemovesAll(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	tokenA := mw.GenerateToken()
+	tokenB := mw.GenerateToken()
+
+	mw.ClearAllTokens()
+
+	for label, tok := range map[string]string{"A": tokenA, "B": tokenB} {
+		req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		w := httptest.NewRecorder()
+		protected.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("token %s after ClearAllTokens: expected 401, got %d", label, w.Code)
+		}
+	}
+}
+
+func TestAuthMiddleware_ClearUnknownTokenIsNoop(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	token := mw.GenerateToken()
+
+	// Clearing an unrelated token must not panic or affect token.
+	mw.ClearToken("definitely-not-a-real-token")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token after unknown clear: expected 200, got %d", w.Code)
+	}
+
+	// Empty string must also be a no-op (not ClearAllTokens).
+	mw.ClearToken("")
+	req = httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token after empty clear: expected 200, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddleware_SetTokens_RestoresBulk(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+	handler := newTestHandler("ok")
+	protected := mw.Protect(handler)
+
+	// Simulate restore-from-disk on daemon startup.
+	mw.SetTokens([]string{"tok1", "tok2"})
+
+	for _, tok := range []string{"tok1", "tok2"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		w := httptest.NewRecorder()
+		protected.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("restored %q: expected 200, got %d", tok, w.Code)
+		}
+	}
+}
+
+func TestAuthMiddleware_OnTokenGenerated_Cleared(t *testing.T) {
+	mw := NewAuthMiddleware("secret")
+
+	var generated []string
+	var cleared []string
+	mw.OnTokenGenerated = func(tok string) error { generated = append(generated, tok); return nil }
+	mw.OnTokenCleared = func(tok string) error { cleared = append(cleared, tok); return nil }
+
+	a := mw.GenerateToken()
+	b := mw.GenerateToken()
+	mw.ClearToken(a)
+	mw.ClearAllTokens()
+
+	if len(generated) != 2 || generated[0] != a || generated[1] != b {
+		t.Fatalf("OnTokenGenerated: got %v, want [%s %s]", generated, a, b)
+	}
+	if len(cleared) != 2 || cleared[0] != a || cleared[1] != "" {
+		t.Fatalf("OnTokenCleared: got %v, want [%s \"\"]", cleared, a)
 	}
 }
 

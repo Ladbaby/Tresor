@@ -616,3 +616,105 @@ func TestStore_FindDownstreamByOutputModel_Deterministic(t *testing.T) {
 		t.Fatalf("expected first-created downstream %s, got %s", d1.ID, resolved.ID)
 	}
 }
+
+func TestSessions_SaveLoadDelete(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.SaveSessionToken("tok-a"); err != nil {
+		t.Fatalf("save a: %v", err)
+	}
+	if err := s.SaveSessionToken("tok-b"); err != nil {
+		t.Fatalf("save b: %v", err)
+	}
+	// Saving the same token again must be a no-op (INSERT OR IGNORE).
+	if err := s.SaveSessionToken("tok-a"); err != nil {
+		t.Fatalf("save a again: %v", err)
+	}
+
+	tokens, err := s.LoadAllSessionTokens()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(tokens) != 2 {
+		t.Fatalf("expected 2 tokens, got %d: %v", len(tokens), tokens)
+	}
+	got := map[string]bool{}
+	for _, tok := range tokens {
+		got[tok] = true
+	}
+	if !got["tok-a"] || !got["tok-b"] {
+		t.Fatalf("missing tokens, got %v", tokens)
+	}
+
+	if err := s.DeleteSessionToken("tok-a"); err != nil {
+		t.Fatalf("delete a: %v", err)
+	}
+	tokens, err = s.LoadAllSessionTokens()
+	if err != nil {
+		t.Fatalf("load after delete: %v", err)
+	}
+	if len(tokens) != 1 || tokens[0] != "tok-b" {
+		t.Fatalf("expected only tok-b, got %v", tokens)
+	}
+}
+
+func TestSessions_DeleteEmptyRemovesAll(t *testing.T) {
+	s := newTestStore(t)
+
+	for _, tok := range []string{"a", "b", "c"} {
+		if err := s.SaveSessionToken(tok); err != nil {
+			t.Fatalf("save %s: %v", tok, err)
+		}
+	}
+
+	if err := s.DeleteSessionToken(""); err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+
+	tokens, err := s.LoadAllSessionTokens()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("expected 0 tokens, got %v", tokens)
+	}
+}
+
+func TestSessions_PersistAcrossInstances(t *testing.T) {
+	// Open store A, write tokens, close it.
+	f, err := os.CreateTemp("", "tresor-sessions-*.db")
+	if err != nil {
+		t.Fatalf("create temp db: %v", err)
+	}
+	f.Close()
+	t.Cleanup(func() { os.Remove(f.Name()) })
+
+	storeA, err := Open(f.Name())
+	if err != nil {
+		t.Fatalf("open A: %v", err)
+	}
+	if err := storeA.SaveSessionToken("survivor-1"); err != nil {
+		t.Fatalf("save 1: %v", err)
+	}
+	if err := storeA.SaveSessionToken("survivor-2"); err != nil {
+		t.Fatalf("save 2: %v", err)
+	}
+	if err := storeA.Close(); err != nil {
+		t.Fatalf("close A: %v", err)
+	}
+
+	// Reopen the same DB file — both tokens must still be there.
+	storeB, err := Open(f.Name())
+	if err != nil {
+		t.Fatalf("open B: %v", err)
+	}
+	defer storeB.Close()
+
+	tokens, err := storeB.LoadAllSessionTokens()
+	if err != nil {
+		t.Fatalf("load B: %v", err)
+	}
+	if len(tokens) != 2 {
+		t.Fatalf("expected 2 tokens to survive restart, got %d: %v", len(tokens), tokens)
+	}
+}

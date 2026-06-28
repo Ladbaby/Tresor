@@ -202,10 +202,17 @@ func (s *Store) migrate() error {
 			model_id      TEXT NOT NULL,
 			PRIMARY KEY (downstream_id, model_id)
 		)`,
-		// Settings table: stores persistent key-value pairs (e.g. session tokens)
+		// Settings table: stores persistent key-value pairs (legacy; only the
+		// pre-multi-session `session_token` row may exist from older daemons)
 		`CREATE TABLE IF NOT EXISTS settings (
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL
+		)`,
+		// Sessions table: persistent admin session tokens. One row per active
+		// browser/device login, so multiple sessions can coexist across restarts.
+		`CREATE TABLE IF NOT EXISTS sessions (
+			token      TEXT PRIMARY KEY,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 	}
 
@@ -213,6 +220,12 @@ func (s *Store) migrate() error {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("migrate query %q: %w", q[:40], err)
 		}
+	}
+
+	// One-time upgrade-in-place cleanup: drop the legacy single-session row.
+	// The new sessions table is the source of truth from now on.
+	if _, err := s.db.Exec("DELETE FROM settings WHERE key = 'session_token'"); err != nil {
+		return fmt.Errorf("migrate delete legacy session_token: %w", err)
 	}
 
 	// Remove UNIQUE constraint from rules.name (allows duplicate rule names)

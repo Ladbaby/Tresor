@@ -42,21 +42,23 @@ type Router struct {
 }
 
 // NewRouter creates an admin API router with all API endpoints.
-// It wires up session token persistence so the auth cookie survives daemon restarts.
+// It wires up session token persistence so all auth cookies survive daemon restarts.
 func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger, cfg *config.AppConfig, version, buildTime string) *Router {
 	authMW := middleware.NewAuthMiddleware(cfg.AdminPassword)
 
-	// Wire persistence hooks so the session token is saved to SQLite
+	// Wire persistence hooks so every session token is saved to SQLite,
+	// and individual tokens can be removed without disturbing the others.
 	authMW.OnTokenGenerated = func(token string) error {
 		return s.SaveSessionToken(token)
 	}
-	authMW.OnTokenCleared = func() error {
-		return s.SaveSessionToken("")
+	authMW.OnTokenCleared = func(token string) error {
+		return s.DeleteSessionToken(token)
 	}
 
-	// Restore any existing session token from the database
-	if token, err := s.LoadSessionToken(); err == nil && token != "" {
-		authMW.SetToken(token)
+	// Restore every existing session token from the database so browsers that
+	// were logged in before the daemon restarted stay logged in.
+	if tokens, err := s.LoadAllSessionTokens(); err == nil {
+		authMW.SetTokens(tokens)
 	}
 
 	return &Router{
@@ -233,17 +235,38 @@ func (r *Router) handleAuthLogin(w http.ResponseWriter, req *http.Request) {
 	})
 }
 
-// handleAuthLogout clears the auth cookie and invalidates the session token.
-// Always accessible (no auth required).
+// handleAuthLogout clears the caller's session cookie and revokes only that
+// session. Other browsers/devices remain logged in. If no session token is
+// attached (no cookie, no Bearer), we just expire the cookie and return OK —
+// we don't know which session to revoke, and we must not nuke everyone else's.
 func (r *Router) handleAuthLogout(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	r.authMW.ClearToken()
+	if token := callerSessionToken(req); token != "" {
+		r.authMW.ClearToken(token)
+	}
 	clearAuthCookie(w)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+}
+
+// callerSessionToken returns the session token attached to the request, if any.
+// Cookie is checked first (the normal web UI path); Bearer header is the
+// fallback (matches what Authenticate accepts). The Bearer branch returns
+// the bearer value even if it happens to equal the admin password — passing
+// it to ClearToken is a harmless no-op since the password is never inserted
+// into the token set.
+func callerSessionToken(r *http.Request) string {
+	if cookie, err := r.Cookie(middleware.AuthCookie); err == nil && cookie.Value != "" {
+		return cookie.Value
+	}
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	return ""
 }
 
 // UDSHandler returns an http.Handler that serves both the API and Web UI (for Unix sockets).

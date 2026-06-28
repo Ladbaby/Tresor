@@ -50,20 +50,25 @@ func SecurityHeaders(next http.Handler) http.Handler {
 }
 
 // AuthMiddleware provides authentication for admin API endpoints.
-// It supports two authentication methods:
+// It supports three authentication methods:
 //   - Raw password as Bearer token (backwards compat for CLI)
 //   - Session token as Bearer header (for web UI fetch requests)
 //   - Session token as cookie (for SSE EventSource, which cannot set custom headers)
+//
+// The middleware holds a *set* of valid session tokens, so multiple browsers
+// or devices can be logged in independently. Each login produces a fresh
+// token that survives subsequent logins, logouts, and daemon restarts.
 type AuthMiddleware struct {
 	password string
-	token    string // current session token (set on login, cleared on logout)
+	tokens   map[string]struct{}
 	tokenMu  sync.RWMutex
 	limiter  *rateLimiter
 
-	// Persistence hooks — called when the token is generated or cleared,
-	// allowing the caller to persist the token to a data store.
+	// Persistence hooks. OnTokenGenerated is called when a fresh session
+	// token is issued (login). OnTokenCleared is called when a token is
+	// removed; an empty string signals "clear all" (used by password change).
 	OnTokenGenerated func(token string) error
-	OnTokenCleared   func() error
+	OnTokenCleared   func(token string) error
 }
 
 // NewAuthMiddleware creates an auth middleware. If password is empty, authentication is disabled.
@@ -71,20 +76,15 @@ type AuthMiddleware struct {
 func NewAuthMiddleware(password string) *AuthMiddleware {
 	return &AuthMiddleware{
 		password: password,
+		tokens:   make(map[string]struct{}),
 		limiter:  newRateLimiter(5, 60*time.Second),
 	}
 }
 
 // SetPassword updates the password at runtime.
-// Clearing the password also invalidates any active session token.
+// Clearing the password also invalidates all active session tokens.
 func (am *AuthMiddleware) SetPassword(password string) {
-	am.tokenMu.Lock()
-	am.token = "" // invalidate session on password change
-	am.tokenMu.Unlock()
-
-	if am.OnTokenCleared != nil {
-		am.OnTokenCleared()
-	}
+	am.ClearAllTokens()
 
 	am.password = password
 }
@@ -105,37 +105,62 @@ func (am *AuthMiddleware) CheckRateLimit(ip string) bool {
 	return am.limiter.record(ip)
 }
 
-// GenerateToken creates a random session token. The token is a 32-byte random
-// hex string (64 chars), making it practically unguessable.
+// GenerateToken creates a random session token, adds it to the active set, and
+// fires OnTokenGenerated. The token is a 32-byte random hex string (64 chars),
+// making it practically unguessable. Existing tokens are untouched.
 func (am *AuthMiddleware) GenerateToken() string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		panic("failed to generate random token: " + err.Error())
 	}
+	token := hex.EncodeToString(b)
 	am.tokenMu.Lock()
-	am.token = hex.EncodeToString(b)
+	am.tokens[token] = struct{}{}
 	am.tokenMu.Unlock()
 	if am.OnTokenGenerated != nil {
-		am.OnTokenGenerated(am.token)
+		am.OnTokenGenerated(token)
 	}
-	return am.token
+	return token
 }
 
-// ClearToken invalidates the current session token (used by logout).
-func (am *AuthMiddleware) ClearToken() {
+// ClearToken removes a single session token from the active set and fires
+// OnTokenCleared with that token. Removing an unknown token is a no-op.
+func (am *AuthMiddleware) ClearToken(token string) {
+	if token == "" {
+		return
+	}
 	am.tokenMu.Lock()
-	am.token = ""
+	delete(am.tokens, token)
 	am.tokenMu.Unlock()
 	if am.OnTokenCleared != nil {
-		am.OnTokenCleared()
+		am.OnTokenCleared(token)
 	}
 }
 
-// SetToken sets the session token directly (used to restore a persisted token on startup).
-func (am *AuthMiddleware) SetToken(token string) {
+// ClearAllTokens removes every active session token. Used by password change
+// and any "log out everywhere" path. Fires OnTokenCleared with an empty
+// string to signal "all".
+func (am *AuthMiddleware) ClearAllTokens() {
 	am.tokenMu.Lock()
-	am.token = token
+	hadAny := len(am.tokens) > 0
+	am.tokens = make(map[string]struct{})
 	am.tokenMu.Unlock()
+	if hadAny && am.OnTokenCleared != nil {
+		am.OnTokenCleared("")
+	}
+}
+
+// SetTokens bulk-loads session tokens (e.g. from the database on startup).
+// It does not fire any hooks — this is a restore operation, not a user action.
+func (am *AuthMiddleware) SetTokens(tokens []string) {
+	am.tokenMu.Lock()
+	defer am.tokenMu.Unlock()
+	am.tokens = make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		if t != "" {
+			am.tokens[t] = struct{}{}
+		}
+	}
 }
 
 // Protect wraps an http.Handler with authentication.
@@ -179,17 +204,20 @@ func (am *AuthMiddleware) Authenticate(r *http.Request) bool {
 		tokens = append(tokens, cookie.Value)
 	}
 
+	// Check raw password match (backwards compat for CLI) — outside the
+	// tokenMu critical section so the password check isn't blocked by
+	// concurrent token set mutations.
 	for _, token := range tokens {
-		// Check 1: Raw password match (backwards compat for CLI)
 		if subtle.ConstantTimeCompare([]byte(token), []byte(am.password)) == 1 {
 			return true
 		}
+	}
 
-		// Check 2: Session token match
-		am.tokenMu.RLock()
-		stored := am.token
-		am.tokenMu.RUnlock()
-		if stored != "" && subtle.ConstantTimeCompare([]byte(token), []byte(stored)) == 1 {
+	// Check each candidate against the active session token set.
+	am.tokenMu.RLock()
+	defer am.tokenMu.RUnlock()
+	for _, token := range tokens {
+		if _, ok := am.tokens[token]; ok {
 			return true
 		}
 	}

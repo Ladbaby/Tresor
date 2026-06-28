@@ -1,29 +1,45 @@
 package store
 
-import "fmt"
-
-// settingsKeySessionToken is the key used in the settings table to store
-// the persistent admin session token.
-const settingsKeySessionToken = "session_token"
-
-// SaveSessionToken persists the session token to the settings table.
-// An empty string removes any existing token.
+// SaveSessionToken persists a single admin session token. It is idempotent
+// (INSERT OR IGNORE), so calling it on an existing token is a no-op.
 func (s *Store) SaveSessionToken(token string) error {
 	if token == "" {
-		_, err := s.db.Exec("DELETE FROM settings WHERE key = ?", settingsKeySessionToken)
-		return err
+		return nil
 	}
-	_, err := s.db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", settingsKeySessionToken, token)
+	_, err := s.db.Exec("INSERT OR IGNORE INTO sessions (token) VALUES (?)", token)
 	return err
 }
 
-// LoadSessionToken retrieves the persisted session token from the settings table.
-// Returns an empty string if no token exists.
-func (s *Store) LoadSessionToken() (string, error) {
-	var token string
-	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", settingsKeySessionToken).Scan(&token)
-	if err != nil {
-		return "", fmt.Errorf("query session token: %w", err)
+// DeleteSessionToken removes a single admin session token. An empty string
+// removes every row in the sessions table (used by password change).
+func (s *Store) DeleteSessionToken(token string) error {
+	if token == "" {
+		_, err := s.db.Exec("DELETE FROM sessions")
+		return err
 	}
-	return token, nil
+	_, err := s.db.Exec("DELETE FROM sessions WHERE token = ?", token)
+	return err
+}
+
+// LoadAllSessionTokens returns every persisted admin session token. Used at
+// daemon startup to rehydrate the in-memory token set so existing browser
+// sessions survive restarts.
+func (s *Store) LoadAllSessionTokens() ([]string, error) {
+	rows, err := s.db.Query("SELECT token FROM sessions")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tokens []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tokens, nil
 }
