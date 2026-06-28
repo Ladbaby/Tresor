@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"tresor/internal/engine"
 )
@@ -348,8 +349,32 @@ func (t *Responses2Anthropic) transformJSONResponse(body []byte) ([]byte, error)
 	output := make([]map[string]any, 0)
 	msgContent := make([]map[string]any, 0)
 
+	reasoningIndex := 0
 	for _, c := range anthropicResp.Content {
 		switch c.Type {
+		case "thinking":
+			if c.Thinking == "" && c.Signature == "" {
+				continue
+			}
+			reasoningItem := map[string]any{
+				"id":      fmt.Sprintf("%s_reasoning_%d", respID, reasoningIndex),
+				"type":    "reasoning",
+				"status":  "completed",
+				"summary": []any{},
+			}
+			if c.Thinking != "" {
+				reasoningItem["summary"] = []any{
+					map[string]any{
+						"type": "summary_text",
+						"text": c.Thinking,
+					},
+				}
+			}
+			if c.Signature != "" {
+				reasoningItem["encrypted_content"] = c.Signature
+			}
+			output = append(output, reasoningItem)
+			reasoningIndex++
 		case "text":
 			if c.Text != "" {
 				msgContent = append(msgContent, map[string]any{
@@ -382,7 +407,20 @@ func (t *Responses2Anthropic) transformJSONResponse(body []byte) ([]byte, error)
 			"role":    "assistant",
 			"content": msgContent,
 		}
-		output = append([]map[string]any{msgItem}, output...)
+		// Reasoning items were appended to `output` in declaration order; the
+		// message item goes at the position right after the last reasoning
+		// item (or at index 0 if there is no reasoning).
+		insertAt := 0
+		for i, item := range output {
+			if item["type"] == "reasoning" {
+				insertAt = i + 1
+			} else {
+				break
+			}
+		}
+		output = append(output, nil)
+		copy(output[insertAt+1:], output[insertAt:])
+		output[insertAt] = msgItem
 	}
 
 	usage := map[string]any{
@@ -404,13 +442,98 @@ func (t *Responses2Anthropic) transformJSONResponse(body []byte) ([]byte, error)
 }
 
 func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, error) {
-	var id string
 	var out bytes.Buffer
-	var textContent string
-	var msgItemSent bool
-	var contentPartSent bool
-	var toolOutputIdx int = 1
-	openToolCalls := make(map[string]*r2aStreamToolCall)
+	// Local closure state for this single bulk response. Mirrors r2aStreamState
+	// but lives in the closure because this path rewrites the entire stream at
+	// once rather than buffering per-chunk state across chunks.
+	var (
+		id                    string
+		model                 string
+		createdAt             int64
+		textContent           string
+		msgItemSent           bool
+		contentPartSent       bool
+		msgItemID             string
+		msgOutputIdx          int
+		nextOutputIdx         int
+		nextSummaryIdx        int
+		openToolCalls         = make(map[string]*r2aStreamToolCall)
+		reasoningItemSent     bool
+		reasoningItemID       string
+		reasoningOutputIdx    int
+		reasoningContent      string
+		reasoningSignature    string
+		summaryPartSent       bool
+		// inputTokens/outputTokens are pulled from the upstream Anthropic
+		// message_delta event and surfaced on response.completed.usage so the
+		// Vercel AI SDK's openai-responses schema (which requires
+		// usage.{input_tokens, output_tokens}) validates.
+		inputTokens  int
+		outputTokens int
+		// finalItems maps output_index → the completed output item. The
+		// `response.completed` payload must include the full `output` array;
+		// the OpenAI Responses SDK uses that payload (not the accumulated
+		// streaming events) as the source of truth for the final response.
+		finalItems = make(map[int]map[string]any)
+	)
+
+	emitReasoningOpen := func() {
+		if reasoningItemSent {
+			return
+		}
+		reasoningItemSent = true
+		reasoningItemID = id + "_reasoning_0"
+		reasoningOutputIdx = nextOutputIdx
+		nextOutputIdx++
+		writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+			"type":         "response.output_item.added",
+			"output_index": reasoningOutputIdx,
+			"item": map[string]any{
+				"id":      reasoningItemID,
+				"type":    "reasoning",
+				"status":  "in_progress",
+				"summary": []any{},
+			},
+		})
+	}
+
+	ensureSummaryPart := func() {
+		if summaryPartSent {
+			return
+		}
+		summaryPartSent = true
+		writeResponsesSSE(&out, "response.reasoning_summary_part.added", map[string]any{
+			"type":          "response.reasoning_summary_part.added",
+			"item_id":       reasoningItemID,
+			"output_index":  reasoningOutputIdx,
+			"summary_index": nextSummaryIdx,
+			"part": map[string]any{
+				"type": "summary_text",
+				"text": "",
+			},
+		})
+	}
+
+	openMessageItem := func() {
+		if msgItemSent {
+			return
+		}
+		msgItemSent = true
+		msgItemID = id + "_msg_0"
+		msgOutputIdx = nextOutputIdx
+		nextOutputIdx++
+		writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+			"type":         "response.output_item.added",
+			"output_index": msgOutputIdx,
+			"item": map[string]any{
+				"id":      msgItemID,
+				"type":    "message",
+				"status":  "in_progress",
+				"role":    "assistant",
+				"content": []any{},
+			},
+		})
+	}
 
 	parseAnthropicSSE(body, func(eventType string, data []byte) bool {
 		switch eventType {
@@ -425,19 +548,30 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 				return true
 			}
 			id = msg.Message.ID
+			model = msg.Message.Model
+			if createdAt == 0 {
+				createdAt = time.Now().Unix()
+			}
 
+			// Vercel AI SDK (Cherry Studio) validates each chunk with a Zod
+			// schema. response.created requires response.{id, created_at, model};
+			// we include them so the schema parse succeeds.
 			writeResponsesSSE(&out, "response.created", map[string]any{
 				"type": "response.created",
 				"response": map[string]any{
-					"id":     id,
-					"status": "in_progress",
+					"id":         id,
+					"created_at": createdAt,
+					"model":      model,
+					"status":     "in_progress",
 				},
 			})
 			writeResponsesSSE(&out, "response.in_progress", map[string]any{
 				"type": "response.in_progress",
 				"response": map[string]any{
-					"id":     id,
-					"status": "in_progress",
+					"id":         id,
+					"created_at": createdAt,
+					"model":      model,
+					"status":     "in_progress",
 				},
 			})
 
@@ -445,37 +579,64 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 			var block struct {
 				Index        int `json:"index"`
 				ContentBlock struct {
-					Type string `json:"type"`
-					Text string `json:"text,omitempty"`
-					ID   string `json:"id,omitempty"`
-					Name string `json:"name,omitempty"`
+					Type     string `json:"type"`
+					Text     string `json:"text,omitempty"`
+					Thinking string `json:"thinking,omitempty"`
+					ID       string `json:"id,omitempty"`
+					Name     string `json:"name,omitempty"`
 				} `json:"content_block"`
 			}
 			if err := json.Unmarshal(data, &block); err != nil {
 				return true
 			}
 			switch block.ContentBlock.Type {
-			case "tool_use":
-				if !msgItemSent {
-					msgItemSent = true
-					msgID := id + "_msg_0"
-					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
-						"type":         "response.output_item.added",
-						"output_index": 0,
-						"item": map[string]any{
-							"id":      msgID,
-							"type":    "message",
-							"status":  "in_progress",
-							"role":    "assistant",
-							"content": []any{},
-						},
+			case "thinking":
+				emitReasoningOpen()
+				if block.ContentBlock.Thinking != "" {
+					reasoningContent += block.ContentBlock.Thinking
+					ensureSummaryPart()
+					writeResponsesSSE(&out, "response.reasoning_summary_text.delta", map[string]any{
+						"type":          "response.reasoning_summary_text.delta",
+						"item_id":       reasoningItemID,
+						"output_index":  reasoningOutputIdx,
+						"summary_index": nextSummaryIdx,
+						"delta":         block.ContentBlock.Thinking,
 					})
 				}
-				oidx := toolOutputIdx
-				toolOutputIdx++
+			case "text":
+				if block.ContentBlock.Text != "" {
+					textContent += block.ContentBlock.Text
+					openMessageItem()
+					if !contentPartSent {
+						contentPartSent = true
+						writeResponsesSSE(&out, "response.content_part.added", map[string]any{
+							"type":          "response.content_part.added",
+							"output_index":  msgOutputIdx,
+							"content_index": 0,
+							"item_id":       msgItemID,
+							"part": map[string]any{
+								"type":        "output_text",
+								"text":        "",
+								"annotations": []any{},
+							},
+						})
+					}
+					writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
+						"type":         "response.output_text.delta",
+						"item_id":      msgItemID,
+						"output_index": msgOutputIdx,
+						"delta":        block.ContentBlock.Text,
+						"logprobs":     []any{},
+					})
+				}
+			case "tool_use":
+				openMessageItem()
+				oidx := nextOutputIdx
+				nextOutputIdx++
 				tc := &r2aStreamToolCall{
-					CallID: block.ContentBlock.ID,
-					Name:   block.ContentBlock.Name,
+					CallID:    block.ContentBlock.ID,
+					Name:      block.ContentBlock.Name,
+					OutputIdx: oidx,
 				}
 				openToolCalls[block.ContentBlock.ID] = tc
 				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
@@ -496,6 +657,8 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 				Delta struct {
 					Type        string `json:"type"`
 					Text        string `json:"text,omitempty"`
+					Thinking    string `json:"thinking,omitempty"`
+					Signature   string `json:"signature,omitempty"`
 					PartialJSON string `json:"partial_json,omitempty"`
 				} `json:"delta"`
 			}
@@ -503,32 +666,34 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 				return true
 			}
 			switch delta.Delta.Type {
+			case "thinking_delta":
+				if delta.Delta.Thinking != "" {
+					reasoningContent += delta.Delta.Thinking
+					emitReasoningOpen()
+					ensureSummaryPart()
+					writeResponsesSSE(&out, "response.reasoning_summary_text.delta", map[string]any{
+						"type":          "response.reasoning_summary_text.delta",
+						"item_id":       reasoningItemID,
+						"output_index":  reasoningOutputIdx,
+						"summary_index": nextSummaryIdx,
+						"delta":         delta.Delta.Thinking,
+					})
+				}
+			case "signature_delta":
+				if delta.Delta.Signature != "" {
+					reasoningSignature = delta.Delta.Signature
+				}
 			case "text_delta":
 				if delta.Delta.Text != "" {
 					textContent += delta.Delta.Text
-
-					if !msgItemSent {
-						msgItemSent = true
-						msgID := id + "_msg_0"
-						writeResponsesSSE(&out, "response.output_item.added", map[string]any{
-							"type":         "response.output_item.added",
-							"output_index": 0,
-							"item": map[string]any{
-								"id":      msgID,
-								"type":    "message",
-								"status":  "in_progress",
-								"role":    "assistant",
-								"content": []any{},
-							},
-						})
-					}
+					openMessageItem()
 					if !contentPartSent {
 						contentPartSent = true
 						writeResponsesSSE(&out, "response.content_part.added", map[string]any{
 							"type":          "response.content_part.added",
-							"output_index":  0,
+							"output_index":  msgOutputIdx,
 							"content_index": 0,
-							"item_id":       id + "_msg_0",
+							"item_id":       msgItemID,
 							"part": map[string]any{
 								"type":        "output_text",
 								"text":        "",
@@ -536,10 +701,12 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 							},
 						})
 					}
-
 					writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
-						"type":  "response.output_text.delta",
-						"delta": delta.Delta.Text,
+						"type":         "response.output_text.delta",
+						"item_id":      msgItemID,
+						"output_index": msgOutputIdx,
+						"delta":        delta.Delta.Text,
+						"logprobs":     []any{},
 					})
 				}
 			case "input_json_delta":
@@ -550,7 +717,7 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 							"type":         "response.function_call_arguments.delta",
 							"delta":        delta.Delta.PartialJSON,
 							"call_id":      tc.CallID,
-							"output_index": delta.Index + 1,
+							"output_index": tc.OutputIdx,
 						})
 						break
 					}
@@ -558,35 +725,96 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 			}
 
 		case "content_block_stop":
-			for _, tc := range openToolCalls {
-				writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
-					"type":      "response.function_call_arguments.done",
-					"call_id":   tc.CallID,
-					"name":      tc.Name,
-					"arguments": tc.Arguments,
+			// Close the reasoning item if the just-stopped block was thinking.
+			if reasoningItemSent && summaryPartSent {
+				writeResponsesSSE(&out, "response.reasoning_summary_text.done", map[string]any{
+					"type":          "response.reasoning_summary_text.done",
+					"item_id":       reasoningItemID,
+					"output_index":  reasoningOutputIdx,
+					"summary_index": nextSummaryIdx,
+					"text":          reasoningContent,
 				})
-				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
-					"type": "response.output_item.done",
-					"item": map[string]any{
-						"type":    "function_call",
-						"id":      tc.CallID,
-						"call_id": tc.CallID,
-						"status":  "completed",
+				writeResponsesSSE(&out, "response.reasoning_summary_part.done", map[string]any{
+					"type":          "response.reasoning_summary_part.done",
+					"item_id":       reasoningItemID,
+					"output_index":  reasoningOutputIdx,
+					"summary_index": nextSummaryIdx,
+					"part": map[string]any{
+						"type": "summary_text",
+						"text": reasoningContent,
 					},
 				})
+				reasoningItem := map[string]any{
+					"id":      reasoningItemID,
+					"type":    "reasoning",
+					"status":  "completed",
+					"summary": []any{},
+				}
+				if reasoningSignature != "" {
+					reasoningItem["encrypted_content"] = reasoningSignature
+				}
+				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": reasoningOutputIdx,
+					"item":         reasoningItem,
+				})
+				finalItems[reasoningOutputIdx] = reasoningItem
+				summaryPartSent = false
+				reasoningContent = ""
+				reasoningSignature = ""
+				reasoningItemSent = false
+				nextSummaryIdx++
+			}
+			for _, tc := range openToolCalls {
+				writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
+					"type":         "response.function_call_arguments.done",
+					"item_id":      tc.CallID,
+					"call_id":      tc.CallID,
+					"name":         tc.Name,
+					"arguments":    tc.Arguments,
+					"output_index": tc.OutputIdx,
+				})
+				fnItem := map[string]any{
+					"type":      "function_call",
+					"id":        tc.CallID,
+					"call_id":   tc.CallID,
+					"status":    "completed",
+					"name":      tc.Name,
+					"arguments": tc.Arguments,
+				}
+				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": tc.OutputIdx,
+					"item":         fnItem,
+				})
+				finalItems[tc.OutputIdx] = fnItem
 			}
 			openToolCalls = make(map[string]*r2aStreamToolCall)
 
 		case "message_delta":
+			var md struct {
+				Usage struct {
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
+			}
+			if err := json.Unmarshal(data, &md); err == nil {
+				if md.Usage.InputTokens > 0 {
+					inputTokens = md.Usage.InputTokens
+				}
+				if md.Usage.OutputTokens > 0 {
+					outputTokens = md.Usage.OutputTokens
+				}
+			}
 
 		case "message_stop":
 			if textContent != "" {
 				if contentPartSent {
 					writeResponsesSSE(&out, "response.content_part.done", map[string]any{
 						"type":          "response.content_part.done",
-						"output_index":  0,
+						"output_index":  msgOutputIdx,
 						"content_index": 0,
-						"item_id":       id + "_msg_0",
+						"item_id":       msgItemID,
 						"part": map[string]any{
 							"type":        "output_text",
 							"text":        textContent,
@@ -608,24 +836,41 @@ func (t *Responses2Anthropic) transformStreamingResponse(body []byte) ([]byte, e
 						"annotations": []any{},
 					})
 				}
+				msgItem := map[string]any{
+					"type":    "message",
+					"id":      msgItemID,
+					"status":  "completed",
+					"role":    "assistant",
+					"content": msgContent,
+				}
 				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type":         "response.output_item.done",
-					"output_index": 0,
-					"item": map[string]any{
-						"type":    "message",
-						"id":      id + "_msg_0",
-						"status":  "completed",
-						"role":    "assistant",
-						"content": msgContent,
-					},
+					"output_index": msgOutputIdx,
+					"item":         msgItem,
 				})
+				finalItems[msgOutputIdx] = msgItem
+			}
+			// Replay the final `output` array (in output_index order) into
+			// response.completed so the OpenAI Responses SDK can build a
+			// non-empty ParsedResponse from the authoritative `response`
+			// payload. Without this, the SDK returns an empty response.
+			output := make([]map[string]any, 0, len(finalItems))
+			for i := 0; i < nextOutputIdx; i++ {
+				if item, ok := finalItems[i]; ok {
+					output = append(output, item)
+				}
 			}
 			writeResponsesSSE(&out, "response.completed", map[string]any{
 				"type": "response.completed",
 				"response": map[string]any{
 					"id":     id,
 					"status": "completed",
-					"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+					"output": output,
+					"usage": map[string]any{
+						"input_tokens":  inputTokens,
+						"output_tokens": outputTokens,
+						"total_tokens":  inputTokens + outputTokens,
+					},
 				},
 			})
 		}
@@ -641,19 +886,65 @@ type r2aStreamToolCall struct {
 	CallID    string
 	Name      string
 	Arguments string
+	OutputIdx int
 	ItemSent  bool
 }
 
 type r2aStreamState struct {
 	ResponseID      string
 	Model           string
+	CreatedAt       int64 // Unix seconds; required by Vercel AI SDK response.created schema
 	Created         bool
 	TextContent     string
 	TextBlockOpen   bool
 	MessageItemSent bool
 	ContentPartSent bool
-	ToolOutputIdx   int
-	ToolCallAcc     map[string]*r2aStreamToolCall
+	NextOutputIdx   int // monotonically increasing counter for output items
+
+	// Reasoning (Anthropic thinking) tracking. When the upstream emits a
+	// `thinking` content block before text/tool_use, we register a reasoning
+	// item at NextOutputIdx, advance the counter, and emit
+	// response.reasoning_summary_text.delta events for each thinking_delta.
+	// Without this, the OpenAI Responses SDK sees a message item at
+	// output_index 0 instead of a reasoning item, and surfaces the response
+	// as empty.
+	ReasoningContent     string
+	ReasoningSignature   string
+	ReasoningItemSent    bool
+	ReasoningItemID      string
+	ReasoningOutputIdx   int
+	SummaryPartSent      bool
+	NextSummaryIdx       int
+
+	ToolOutputIdx int
+	ToolCallAcc   map[string]*r2aStreamToolCall
+
+	// FinalItems is keyed by output_index. Each value is the completed
+	// output item (with status:"completed" and any aggregated text/signature/
+	// arguments). Populated as each output_item.done event is emitted, then
+	// replayed into the response.completed payload so the OpenAI Responses
+	// SDK can construct a non-empty ParsedResponse — see the bug where an
+	// empty `output` in response.completed causes the SDK to return an
+	// empty response to the client.
+	FinalItems map[int]map[string]any
+
+	// MessageItemID is the stable item id for the assistant message item.
+	// Assigned when the message item is first opened.
+	MessageItemID string
+
+	// InputTokens / OutputTokens come from the upstream Anthropic
+	// message_delta event and are surfaced on response.completed.usage so
+	// the Vercel AI SDK's openai-responses schema (which requires
+	// usage.{input_tokens, output_tokens}) validates.
+	InputTokens  int
+	OutputTokens int
+
+	// _msgOutputIdx is the stable output_index for the assistant message
+	// item, assigned the first time MessageItemSent is set true. Stored
+	// separately from NextOutputIdx so subsequent items (tools, additional
+	// reasoning) continue to advance NextOutputIdx without disturbing the
+	// message item's index.
+	_msgOutputIdx int
 }
 
 func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.PipelineContext) (engine.SSEChunk, error) {
@@ -678,22 +969,38 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 		}
 		state.ResponseID = msg.Message.ID
 		state.Model = msg.Message.Model
+		if state.CreatedAt == 0 {
+			state.CreatedAt = time.Now().Unix()
+		}
 		state.Created = true
 		state.ToolCallAcc = make(map[string]*r2aStreamToolCall)
-		state.ToolOutputIdx = 1
+		state.FinalItems = make(map[int]map[string]any)
+		state.NextOutputIdx = 0
+		state.NextSummaryIdx = 0
+		state.ToolOutputIdx = 0
 
+		// Vercel AI SDK (used by Cherry Studio) validates every chunk with a
+		// Zod schema. response.created requires response.{id, created_at, model};
+		// response.in_progress is not in the schema at all (drops silently).
+		// Without created_at/model the SDK emits an error part and discards the
+		// event, but the rest of the stream continues. We include them so the
+		// SDK has all it needs to construct the synthetic initial response.
 		writeResponsesSSE(&out, "response.created", map[string]any{
 			"type": "response.created",
 			"response": map[string]any{
-				"id":     state.ResponseID,
-				"status": "in_progress",
+				"id":         state.ResponseID,
+				"created_at": state.CreatedAt,
+				"model":      state.Model,
+				"status":     "in_progress",
 			},
 		})
 		writeResponsesSSE(&out, "response.in_progress", map[string]any{
 			"type": "response.in_progress",
 			"response": map[string]any{
-				"id":     state.ResponseID,
-				"status": "in_progress",
+				"id":         state.ResponseID,
+				"created_at": state.CreatedAt,
+				"model":      state.Model,
+				"status":     "in_progress",
 			},
 		})
 
@@ -701,28 +1008,76 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 		var block struct {
 			Index        int `json:"index"`
 			ContentBlock struct {
-				Type string `json:"type"`
-				Text string `json:"text,omitempty"`
-				ID   string `json:"id,omitempty"`
-				Name string `json:"name,omitempty"`
+				Type     string `json:"type"`
+				Text     string `json:"text,omitempty"`
+				Thinking string `json:"thinking,omitempty"`
+				ID       string `json:"id,omitempty"`
+				Name     string `json:"name,omitempty"`
 			} `json:"content_block"`
 		}
 		if err := json.Unmarshal(chunk.Data, &block); err != nil {
 			return chunk, nil
 		}
 		switch block.ContentBlock.Type {
+		case "thinking":
+			// Register a reasoning output item at the next available index.
+			// Without this, the Responses SDK sees a message item at
+			// output_index 0 instead of a reasoning item and surfaces the
+			// response as empty.
+			if !state.ReasoningItemSent {
+				state.ReasoningItemSent = true
+				state.ReasoningItemID = state.ResponseID + "_reasoning_0"
+				state.ReasoningOutputIdx = state.NextOutputIdx
+				state.NextOutputIdx++
+				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": state.ReasoningOutputIdx,
+					"item": map[string]any{
+						"id":      state.ReasoningItemID,
+						"type":    "reasoning",
+						"status":  "in_progress",
+						"summary": []any{},
+					},
+				})
+			}
+			// Some upstreams put the first thinking chunk on the start event.
+			if block.ContentBlock.Thinking != "" {
+				state.ReasoningContent += block.ContentBlock.Thinking
+				if !state.SummaryPartSent {
+					state.SummaryPartSent = true
+					writeResponsesSSE(&out, "response.reasoning_summary_part.added", map[string]any{
+						"type":          "response.reasoning_summary_part.added",
+						"item_id":       state.ReasoningItemID,
+						"output_index":  state.ReasoningOutputIdx,
+						"summary_index": state.NextSummaryIdx,
+						"part": map[string]any{
+							"type": "summary_text",
+							"text": "",
+						},
+					})
+				}
+				writeResponsesSSE(&out, "response.reasoning_summary_text.delta", map[string]any{
+					"type":          "response.reasoning_summary_text.delta",
+					"item_id":       state.ReasoningItemID,
+					"output_index":  state.ReasoningOutputIdx,
+					"summary_index": state.NextSummaryIdx,
+					"delta":         block.ContentBlock.Thinking,
+				})
+			}
 		case "text":
 			state.TextBlockOpen = true
 			if block.ContentBlock.Text != "" {
 				state.TextContent += block.ContentBlock.Text
 				if !state.MessageItemSent {
 					state.MessageItemSent = true
-					msgID := state.ResponseID + "_msg_0"
+					state.MessageItemID = state.ResponseID + "_msg_0"
+					state._msgOutputIdx = state.NextOutputIdx
+					state.NextOutputIdx++
 					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 						"type":         "response.output_item.added",
-						"output_index": 0,
+						"output_index": state._msgOutputIdx,
 						"item": map[string]any{
-							"id":      msgID,
+							"id":      state.MessageItemID,
 							"type":    "message",
 							"status":  "in_progress",
 							"role":    "assistant",
@@ -734,9 +1089,9 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 					state.ContentPartSent = true
 					writeResponsesSSE(&out, "response.content_part.added", map[string]any{
 						"type":          "response.content_part.added",
-						"output_index":  0,
+						"output_index":  state.MessageOutputIdx(),
 						"content_index": 0,
-						"item_id":       state.ResponseID + "_msg_0",
+						"item_id":       state.MessageItemID,
 						"part": map[string]any{
 							"type":        "output_text",
 							"text":        "",
@@ -745,31 +1100,20 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 					})
 				}
 				writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
-					"type":  "response.output_text.delta",
-					"delta": block.ContentBlock.Text,
+					"type":         "response.output_text.delta",
+					"item_id":      state.MessageItemID,
+					"output_index": state.MessageOutputIdx(),
+					"delta":        block.ContentBlock.Text,
+					"logprobs":     []any{},
 				})
 			}
 		case "tool_use":
-			if !state.MessageItemSent {
-				state.MessageItemSent = true
-				msgID := state.ResponseID + "_msg_0"
-				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
-					"type":         "response.output_item.added",
-					"output_index": 0,
-					"item": map[string]any{
-						"id":      msgID,
-						"type":    "message",
-						"status":  "in_progress",
-						"role":    "assistant",
-						"content": []any{},
-					},
-				})
-			}
-			oidx := state.ToolOutputIdx
-			state.ToolOutputIdx++
+			oidx := state.NextOutputIdx
+			state.NextOutputIdx++
 			tc := &r2aStreamToolCall{
-				CallID: block.ContentBlock.ID,
-				Name:   block.ContentBlock.Name,
+				CallID:    block.ContentBlock.ID,
+				Name:      block.ContentBlock.Name,
+				OutputIdx: oidx,
 			}
 			state.ToolCallAcc[block.ContentBlock.ID] = tc
 			writeResponsesSSE(&out, "response.output_item.added", map[string]any{
@@ -790,6 +1134,8 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 			Delta struct {
 				Type        string `json:"type"`
 				Text        string `json:"text,omitempty"`
+				Thinking    string `json:"thinking,omitempty"`
+				Signature   string `json:"signature,omitempty"`
 				PartialJSON string `json:"partial_json,omitempty"`
 			} `json:"delta"`
 		}
@@ -797,17 +1143,64 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 			return chunk, nil
 		}
 		switch delta.Delta.Type {
+		case "thinking_delta":
+			if delta.Delta.Thinking != "" {
+				state.ReasoningContent += delta.Delta.Thinking
+				// Ensure the reasoning item + summary part are registered.
+				if !state.ReasoningItemSent {
+					state.ReasoningItemSent = true
+					state.ReasoningItemID = state.ResponseID + "_reasoning_0"
+					state.ReasoningOutputIdx = state.NextOutputIdx
+					state.NextOutputIdx++
+					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+						"type":         "response.output_item.added",
+						"output_index": state.ReasoningOutputIdx,
+						"item": map[string]any{
+							"id":      state.ReasoningItemID,
+							"type":    "reasoning",
+							"status":  "in_progress",
+							"summary": []any{},
+						},
+					})
+				}
+				if !state.SummaryPartSent {
+					state.SummaryPartSent = true
+					writeResponsesSSE(&out, "response.reasoning_summary_part.added", map[string]any{
+						"type":          "response.reasoning_summary_part.added",
+						"item_id":       state.ReasoningItemID,
+						"output_index":  state.ReasoningOutputIdx,
+						"summary_index": state.NextSummaryIdx,
+						"part": map[string]any{
+							"type": "summary_text",
+							"text": "",
+						},
+					})
+				}
+				writeResponsesSSE(&out, "response.reasoning_summary_text.delta", map[string]any{
+					"type":          "response.reasoning_summary_text.delta",
+					"item_id":       state.ReasoningItemID,
+					"output_index":  state.ReasoningOutputIdx,
+					"summary_index": state.NextSummaryIdx,
+					"delta":         delta.Delta.Thinking,
+				})
+			}
+		case "signature_delta":
+			if delta.Delta.Signature != "" {
+				state.ReasoningSignature = delta.Delta.Signature
+			}
 		case "text_delta":
 			if delta.Delta.Text != "" {
 				state.TextContent += delta.Delta.Text
 				if !state.MessageItemSent {
 					state.MessageItemSent = true
-					msgID := state.ResponseID + "_msg_0"
+					state.MessageItemID = state.ResponseID + "_msg_0"
+					state._msgOutputIdx = state.NextOutputIdx
+					state.NextOutputIdx++
 					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 						"type":         "response.output_item.added",
-						"output_index": 0,
+						"output_index": state._msgOutputIdx,
 						"item": map[string]any{
-							"id":      msgID,
+							"id":      state.MessageItemID,
 							"type":    "message",
 							"status":  "in_progress",
 							"role":    "assistant",
@@ -819,9 +1212,9 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 					state.ContentPartSent = true
 					writeResponsesSSE(&out, "response.content_part.added", map[string]any{
 						"type":          "response.content_part.added",
-						"output_index":  0,
+						"output_index":  state.MessageOutputIdx(),
 						"content_index": 0,
-						"item_id":       state.ResponseID + "_msg_0",
+						"item_id":       state.MessageItemID,
 						"part": map[string]any{
 							"type":        "output_text",
 							"text":        "",
@@ -830,8 +1223,11 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 					})
 				}
 				writeResponsesSSE(&out, "response.output_text.delta", map[string]any{
-					"type":  "response.output_text.delta",
-					"delta": delta.Delta.Text,
+					"type":         "response.output_text.delta",
+					"item_id":      state.MessageItemID,
+					"output_index": state.MessageOutputIdx(),
+					"delta":        delta.Delta.Text,
+					"logprobs":     []any{},
 				})
 			}
 		case "input_json_delta":
@@ -842,7 +1238,7 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 						"type":         "response.function_call_arguments.delta",
 						"delta":        delta.Delta.PartialJSON,
 						"call_id":      tc.CallID,
-						"output_index": delta.Index + 1,
+						"output_index": tc.OutputIdx,
 					})
 					break
 				}
@@ -850,36 +1246,98 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 		}
 
 	case "content_block_stop":
-		for _, tc := range state.ToolCallAcc {
-			writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
-				"type":      "response.function_call_arguments.done",
-				"call_id":   tc.CallID,
-				"name":      tc.Name,
-				"arguments": tc.Arguments,
+		// Close reasoning item if it was the block that just stopped.
+		if state.ReasoningItemSent && state.SummaryPartSent {
+			writeResponsesSSE(&out, "response.reasoning_summary_text.done", map[string]any{
+				"type":          "response.reasoning_summary_text.done",
+				"item_id":       state.ReasoningItemID,
+				"output_index":  state.ReasoningOutputIdx,
+				"summary_index": state.NextSummaryIdx,
+				"text":          state.ReasoningContent,
 			})
-			writeResponsesSSE(&out, "response.output_item.done", map[string]any{
-				"type": "response.output_item.done",
-				"item": map[string]any{
-					"type":    "function_call",
-					"id":      tc.CallID,
-					"call_id": tc.CallID,
-					"status":  "completed",
+			writeResponsesSSE(&out, "response.reasoning_summary_part.done", map[string]any{
+				"type":          "response.reasoning_summary_part.done",
+				"item_id":       state.ReasoningItemID,
+				"output_index":  state.ReasoningOutputIdx,
+				"summary_index": state.NextSummaryIdx,
+				"part": map[string]any{
+					"type": "summary_text",
+					"text": state.ReasoningContent,
 				},
 			})
+			reasoningItem := map[string]any{
+				"id":      state.ReasoningItemID,
+				"type":    "reasoning",
+				"status":  "completed",
+				"summary": []any{},
+			}
+			if state.ReasoningSignature != "" {
+				reasoningItem["encrypted_content"] = state.ReasoningSignature
+			}
+			writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+				"type":         "response.output_item.done",
+				"output_index": state.ReasoningOutputIdx,
+				"item":         reasoningItem,
+			})
+			state.FinalItems[state.ReasoningOutputIdx] = reasoningItem
+			state.SummaryPartSent = false
+			state.ReasoningContent = ""
+			state.ReasoningSignature = ""
+			// Allow subsequent thinking blocks to register a new item.
+			state.ReasoningItemSent = false
+			state.NextSummaryIdx++
+		}
+		for _, tc := range state.ToolCallAcc {
+			writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
+				"type":         "response.function_call_arguments.done",
+				"item_id":      tc.CallID,
+				"call_id":      tc.CallID,
+				"name":         tc.Name,
+				"arguments":    tc.Arguments,
+				"output_index": tc.OutputIdx,
+			})
+			fnItem := map[string]any{
+				"type":      "function_call",
+				"id":        tc.CallID,
+				"call_id":   tc.CallID,
+				"status":    "completed",
+				"name":      tc.Name,
+				"arguments": tc.Arguments,
+			}
+			writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+				"type":         "response.output_item.done",
+				"output_index": tc.OutputIdx,
+				"item":         fnItem,
+			})
+			state.FinalItems[tc.OutputIdx] = fnItem
 		}
 		state.ToolCallAcc = make(map[string]*r2aStreamToolCall)
 		state.TextBlockOpen = false
 
 	case "message_delta":
+		var md struct {
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal(chunk.Data, &md); err == nil {
+			if md.Usage.InputTokens > 0 {
+				state.InputTokens = md.Usage.InputTokens
+			}
+			if md.Usage.OutputTokens > 0 {
+				state.OutputTokens = md.Usage.OutputTokens
+			}
+		}
 
 	case "message_stop":
 		if state.TextContent != "" {
 			if state.ContentPartSent {
 				writeResponsesSSE(&out, "response.content_part.done", map[string]any{
 					"type":          "response.content_part.done",
-					"output_index":  0,
+					"output_index":  state.MessageOutputIdx(),
 					"content_index": 0,
-					"item_id":       state.ResponseID + "_msg_0",
+					"item_id":       state.MessageItemID,
 					"part": map[string]any{
 						"type":        "output_text",
 						"text":        state.TextContent,
@@ -901,24 +1359,42 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 					"annotations": []any{},
 				})
 			}
+			msgItem := map[string]any{
+				"type":    "message",
+				"id":      state.MessageItemID,
+				"status":  "completed",
+				"role":    "assistant",
+				"content": msgContent,
+			}
 			writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 				"type":         "response.output_item.done",
-				"output_index": 0,
-				"item": map[string]any{
-					"type":    "message",
-					"id":      state.ResponseID + "_msg_0",
-					"status":  "completed",
-					"role":    "assistant",
-					"content": msgContent,
-				},
+				"output_index": state.MessageOutputIdx(),
+				"item":         msgItem,
 			})
+			state.FinalItems[state.MessageOutputIdx()] = msgItem
+		}
+		// Build the final `output` array in output_index order. The OpenAI
+		// Responses SDK takes the `response` payload inside `response.completed`
+		// as the source of truth for the final ParsedResponse — without an
+		// `output` array here, the SDK returns an empty response to the client
+		// even though the earlier streaming events were all correct.
+		output := make([]map[string]any, 0, len(state.FinalItems))
+		for i := 0; i < state.NextOutputIdx; i++ {
+			if item, ok := state.FinalItems[i]; ok {
+				output = append(output, item)
+			}
 		}
 		writeResponsesSSE(&out, "response.completed", map[string]any{
 			"type": "response.completed",
 			"response": map[string]any{
 				"id":     state.ResponseID,
 				"status": "completed",
-				"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+				"output": output,
+				"usage": map[string]any{
+					"input_tokens":  state.InputTokens,
+					"output_tokens": state.OutputTokens,
+					"total_tokens":  state.InputTokens + state.OutputTokens,
+				},
 			},
 		})
 
@@ -930,6 +1406,17 @@ func (t *Responses2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 		return engine.SSEChunk{}, nil
 	}
 	return engine.SSEChunk{Data: out.Bytes()}, nil
+}
+
+// MessageOutputIdx returns the output_index where the assistant message item
+// was registered. The message item is always opened before the first text
+// delta lands, so callers hitting the message_stop path before any text
+// arrived will get NextOutputIdx as a placeholder.
+func (s *r2aStreamState) MessageOutputIdx() int {
+	if !s.MessageItemSent {
+		return s.NextOutputIdx
+	}
+	return s._msgOutputIdx
 }
 
 // Ensure interface compliance.

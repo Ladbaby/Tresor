@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -2686,6 +2687,16 @@ func TestResponses2Anthropic_TransformStreamChunk_MessageStart(t *testing.T) {
 	if !strings.Contains(output, "response.in_progress") {
 		t.Fatal("expected response.in_progress event, got:", output)
 	}
+	// Cherry Studio / Vercel AI SDK requires response.created.response to
+	// include {id, created_at, model} for the Zod schema to validate. Without
+	// these, the SDK discards the chunk and the stream may terminate early
+	// (no body text shown to the user).
+	if !strings.Contains(output, `"created_at":`) {
+		t.Fatal("response.created must include created_at, got:", output)
+	}
+	if !strings.Contains(output, `"model":"claude-sonnet-4-20250514"`) {
+		t.Fatal("response.created must include model, got:", output)
+	}
 }
 
 func TestResponses2Anthropic_TransformStreamChunk_TextDelta(t *testing.T) {
@@ -2713,6 +2724,15 @@ func TestResponses2Anthropic_TransformStreamChunk_TextDelta(t *testing.T) {
 	if !strings.Contains(output, "Hello") {
 		t.Fatal("expected text 'Hello', got:", output)
 	}
+	// Vercel AI SDK Zod schema for response.output_text.delta requires
+	// item_id; without it, the SDK discards the chunk and the body text
+	// never reaches the renderer.
+	if !strings.Contains(output, `"item_id":"msg_123_msg_0"`) {
+		t.Fatalf("response.output_text.delta must include item_id, got: %s", output)
+	}
+	if !strings.Contains(output, `"output_index":`) {
+		t.Fatalf("response.output_text.delta must include output_index, got: %s", output)
+	}
 }
 
 func TestResponses2Anthropic_TransformStreamChunk_MessageStop(t *testing.T) {
@@ -2727,6 +2747,11 @@ func TestResponses2Anthropic_TransformStreamChunk_MessageStop(t *testing.T) {
 	p.TransformStreamChunk(engine.SSEChunk{
 		EventType: "content_block_delta",
 		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`),
+	}, ctx)
+	// message_delta carries upstream usage
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "message_delta",
+		Data:      []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":12,"output_tokens":37}}`),
 	}, ctx)
 
 	// message_stop
@@ -2744,6 +2769,412 @@ func TestResponses2Anthropic_TransformStreamChunk_MessageStop(t *testing.T) {
 	}
 	if !strings.Contains(output, "response.completed") {
 		t.Fatal("expected response.completed event, got:", output)
+	}
+	// Regression: response.completed must include the full `output` array;
+	// the OpenAI Responses SDK uses that payload as the source of truth for
+	// the final ParsedResponse and returns an empty response without it.
+	if !strings.Contains(output, `"output":[`) {
+		t.Fatalf("expected response.completed to include an output array, got: %s", output)
+	}
+	// Vercel AI SDK requires usage.{input_tokens, output_tokens} on
+	// response.completed. We pull real numbers from the upstream Anthropic
+	// message_delta event and surface them here.
+	if !strings.Contains(output, `"input_tokens":12`) {
+		t.Fatalf("expected input_tokens:12 in response.completed, got: %s", output)
+	}
+	if !strings.Contains(output, `"output_tokens":37`) {
+		t.Fatalf("expected output_tokens:37 in response.completed, got: %s", output)
+	}
+}
+
+func TestResponses2Anthropic_TransformStreamChunk_MessageStop_ThinkingPlusText_OutputArray(t *testing.T) {
+	// Cherry Studio repro: M2.5 returns a thinking block followed by a text
+	// block. The stream Tresor sends back must include both items inside the
+	// `response.completed.response.output` array — otherwise the OpenAI
+	// Responses SDK returns an empty ParsedResponse and the client shows no
+	// body text.
+	p := &Responses2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	combined := ""
+	capture := func(c engine.SSEChunk) {
+		result, err := p.TransformStreamChunk(c, ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		combined += string(result.Data)
+	}
+	capture(engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"msg_mix","model":"claude-sonnet-4-20250514"}}`),
+	})
+	// Thinking block 0
+	capture(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+	})
+	capture(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I should answer 4."}}`),
+	})
+	capture(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_xyz"}}`),
+	})
+	capture(engine.SSEChunk{
+		EventType: "content_block_stop",
+		Data:      []byte(`{"type":"content_block_stop","index":0}`),
+	})
+	// Text block 1
+	capture(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+	})
+	capture(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"4"}}`),
+	})
+	capture(engine.SSEChunk{
+		EventType: "content_block_stop",
+		Data:      []byte(`{"type":"content_block_stop","index":1}`),
+	})
+	// message_delta + message_stop
+	capture(engine.SSEChunk{
+		EventType: "message_delta",
+		Data:      []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`),
+	})
+	capture(engine.SSEChunk{
+		EventType: "message_stop",
+		Data:      []byte(`{"type":"message_stop"}`),
+	})
+
+	if !strings.Contains(combined, "response.completed") {
+		t.Fatal("expected response.completed in stream, got:", combined)
+	}
+	// Parse the response.completed data line and verify `output` has both
+	// items in order.
+	completedData := extractSSEData(combined, "response.completed")
+	if completedData == "" {
+		t.Fatal("could not find response.completed data line, got:", combined)
+	}
+	var completed map[string]any
+	if err := json.Unmarshal([]byte(completedData), &completed); err != nil {
+		t.Fatalf("response.completed not valid JSON: %v\n%s", err, completedData)
+	}
+	resp, ok := completed["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("response.completed.response missing: %s", completedData)
+	}
+	output, ok := resp["output"].([]any)
+	if !ok {
+		t.Fatalf("response.completed.response.output missing or wrong type: %s", completedData)
+	}
+	if len(output) != 2 {
+		t.Fatalf("expected 2 items in response.completed.output (reasoning + message), got %d: %s", len(output), completedData)
+	}
+	reasoning, _ := output[0].(map[string]any)
+	if reasoning["type"] != "reasoning" {
+		t.Fatalf("first output item should be reasoning, got: %v", output[0])
+	}
+	if reasoning["encrypted_content"] != "sig_xyz" {
+		t.Fatalf("reasoning item should carry signature under encrypted_content, got: %v", reasoning)
+	}
+	msg, _ := output[1].(map[string]any)
+	if msg["type"] != "message" {
+		t.Fatalf("second output item should be message, got: %v", output[1])
+	}
+	msgContent, _ := msg["content"].([]any)
+	if len(msgContent) == 0 {
+		t.Fatalf("message item should have content, got: %v", msg)
+	}
+	part, _ := msgContent[0].(map[string]any)
+	if part["type"] != "output_text" || part["text"] != "4" {
+		t.Fatalf("expected output_text=4, got: %v", part)
+	}
+}
+
+// extractSSEData scans an SSE stream for the first `data:` line that follows
+// an `event: <eventType>` and returns the payload. Used by streaming tests to
+// inspect the JSON of a specific event.
+func extractSSEData(stream, eventType string) string {
+	lines := strings.Split(stream, "\n")
+	wantEvent := false
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			ev := strings.TrimPrefix(line, "event: ")
+			wantEvent = (ev == eventType)
+		case strings.HasPrefix(line, "data: "):
+			if wantEvent {
+				return strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}
+	return ""
+}
+
+func TestResponses2Anthropic_TransformStreamChunk_ThinkingStart(t *testing.T) {
+	p := &Responses2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+	// Prime state with message_start
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"msg_thinking","model":"claude-sonnet-4-20250514"}}`),
+	}, ctx)
+
+	// content_block_start with type: thinking
+	startChunk := engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+	}
+	result, err := p.TransformStreamChunk(startChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "response.output_item.added") {
+		t.Fatal("expected response.output_item.added, got:", output)
+	}
+	// Must include a reasoning item (not message) at output_index 0
+	if !strings.Contains(output, `"type":"reasoning"`) {
+		t.Fatal("expected reasoning item type, got:", output)
+	}
+	if !strings.Contains(output, `"output_index":0`) {
+		t.Fatal("expected reasoning item at output_index 0, got:", output)
+	}
+	if strings.Contains(output, `"type":"message"`) {
+		t.Fatal("first item should be reasoning, not message, got:", output)
+	}
+}
+
+func TestResponses2Anthropic_TransformStreamChunk_ThinkingDelta(t *testing.T) {
+	p := &Responses2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"msg_thinking","model":"claude-sonnet-4-20250514"}}`),
+	}, ctx)
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+	}, ctx)
+
+	// thinking_delta
+	deltaChunk := engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me think..."}}`),
+	}
+	result, err := p.TransformStreamChunk(deltaChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "response.reasoning_summary_text.delta") {
+		t.Fatal("expected response.reasoning_summary_text.delta, got:", output)
+	}
+	if !strings.Contains(output, "let me think...") {
+		t.Fatal("expected thinking text content, got:", output)
+	}
+	if !strings.Contains(output, `"summary_index":0`) {
+		t.Fatal("expected summary_index:0, got:", output)
+	}
+}
+
+func TestResponses2Anthropic_TransformStreamChunk_SignatureDelta(t *testing.T) {
+	p := &Responses2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"msg_thinking","model":"claude-sonnet-4-20250514"}}`),
+	}, ctx)
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+	}, ctx)
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reasoning"}}`),
+	}, ctx)
+	// signature_delta should not emit a stream event of its own; it stores state
+	sigChunk := engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_abc"}}`),
+	}
+	result, err := p.TransformStreamChunk(sigChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Data) != 0 {
+		t.Fatal("signature_delta should produce no output, got:", string(result.Data))
+	}
+	// Stop the thinking block — the signature should appear in the done event.
+	stopChunk := engine.SSEChunk{
+		EventType: "content_block_stop",
+		Data:      []byte(`{"type":"content_block_stop","index":0}`),
+	}
+	result, err = p.TransformStreamChunk(stopChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, "response.output_item.done") {
+		t.Fatal("expected response.output_item.done after reasoning close, got:", output)
+	}
+	if !strings.Contains(output, `"encrypted_content":"sig_abc"`) {
+		t.Fatal("expected encrypted_content in reasoning done item, got:", output)
+	}
+}
+
+func TestResponses2Anthropic_TransformStreamChunk_ThinkingThenText_OutputIndices(t *testing.T) {
+	p := &Responses2Anthropic{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+	combined := ""
+	capture := func(c engine.SSEChunk) {
+		result, err := p.TransformStreamChunk(c, ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		combined += string(result.Data)
+	}
+	capture(engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"msg_xt","model":"claude-sonnet-4-20250514"}}`),
+	})
+	// Thinking block 0
+	capture(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+	})
+	capture(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I should answer 4."}}`),
+	})
+	capture(engine.SSEChunk{
+		EventType: "content_block_stop",
+		Data:      []byte(`{"type":"content_block_stop","index":0}`),
+	})
+	// Text block 1
+	capture(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+	})
+	capture(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"4"}}`),
+	})
+
+	// Both items must be present somewhere in the stream.
+	if !strings.Contains(combined, `"id":"msg_xt_reasoning_0"`) {
+		t.Fatal("expected reasoning item id msg_xt_reasoning_0 in stream, got:", combined)
+	}
+	if !strings.Contains(combined, `"id":"msg_xt_msg_0"`) {
+		t.Fatal("expected message item id msg_xt_msg_0 in stream, got:", combined)
+	}
+	// The reasoning item must be added before the thinking delta, and the
+	// message item before the text delta.
+	reasoningAddIdx := strings.Index(combined, `"id":"msg_xt_reasoning_0"`)
+	thinkingDeltaIdx := strings.Index(combined, `"I should answer 4."`)
+	if reasoningAddIdx < 0 || thinkingDeltaIdx < 0 || reasoningAddIdx > thinkingDeltaIdx {
+		t.Fatal("reasoning item must be added before thinking delta; got:", combined)
+	}
+	messageAddIdx := strings.Index(combined, `"id":"msg_xt_msg_0"`)
+	textDeltaIdx := strings.Index(combined, `"delta":"4"`)
+	if messageAddIdx < 0 || textDeltaIdx < 0 || messageAddIdx > textDeltaIdx {
+		t.Fatal("message item must be added before text delta; got:", combined)
+	}
+	// Reasoning must come before message (i.e., reasoning was opened first).
+	if reasoningAddIdx > messageAddIdx {
+		t.Fatal("reasoning item must be added before message item; got:", combined)
+	}
+	// Each add event carries an output_index; parse them and verify
+	// reasoning=0, message=1.
+	reasoningOI, reasoningOK := extractOutputIndexForID(combined, "msg_xt_reasoning_0")
+	if !reasoningOK || reasoningOI != 0 {
+		t.Fatalf("expected reasoning at output_index 0, got %d (ok=%v)", reasoningOI, reasoningOK)
+	}
+	messageOI, messageOK := extractOutputIndexForID(combined, "msg_xt_msg_0")
+	if !messageOK || messageOI != 1 {
+		t.Fatalf("expected message at output_index 1, got %d (ok=%v)", messageOI, messageOK)
+	}
+}
+
+// extractOutputIndexForID scans the SSE stream for a response.output_item.added
+// event whose data contains the given id, and returns the output_index it was
+// emitted with.
+func extractOutputIndexForID(stream, id string) (int, bool) {
+	for _, line := range strings.Split(stream, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if !strings.Contains(payload, `"response.output_item.added"`) {
+			continue
+		}
+		if !strings.Contains(payload, id) {
+			continue
+		}
+		// Find `"output_index":<int>`.
+		marker := `"output_index":`
+		idx := strings.Index(payload, marker)
+		if idx < 0 {
+			continue
+		}
+		rest := payload[idx+len(marker):]
+		end := 0
+		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+			end++
+		}
+		if end == 0 {
+			continue
+		}
+		n, err := strconv.Atoi(rest[:end])
+		if err != nil {
+			continue
+		}
+		return n, true
+	}
+	return 0, false
+}
+
+func TestResponses2Anthropic_TransformResponse_NonStreaming_Thinking(t *testing.T) {
+	p := &Responses2Anthropic{}
+	// Synthesize an Anthropic-style response with a thinking content block
+	body := []byte(`{
+		"id": "msg_99",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-sonnet-4-20250514",
+		"content": [
+			{"type": "thinking", "thinking": "Let me think...", "signature": "sig_zzz"},
+			{"type": "text", "text": "Hello world"}
+		],
+		"usage": {"input_tokens": 5, "output_tokens": 7}
+	}`)
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Type", "application/json")
+	out, err := p.TransformResponse(resp, body, &engine.PipelineContext{Variables: map[string]interface{}{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	output, _ := got["output"].([]any)
+	if len(output) != 2 {
+		t.Fatalf("expected 2 output items (reasoning + message), got %d: %s", len(output), string(out))
+	}
+	reasoning, _ := output[0].(map[string]any)
+	if reasoning["type"] != "reasoning" {
+		t.Fatalf("first item must be reasoning, got: %v", reasoning["type"])
+	}
+	if reasoning["encrypted_content"] != "sig_zzz" {
+		t.Fatalf("expected encrypted_content = sig_zzz, got: %v", reasoning["encrypted_content"])
+	}
+	msg, _ := output[1].(map[string]any)
+	if msg["type"] != "message" {
+		t.Fatalf("second item must be message, got: %v", msg["type"])
 	}
 }
 

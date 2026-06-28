@@ -855,6 +855,220 @@ downstreams:
 	}
 }
 
+// TestResponsesToAnthropicStreaming_ThinkingBlocks is a regression test for
+// the "empty response" bug observed when an OpenAI Responses client
+// (e.g. openai-python Responses SDK, Cherry Studio) targets an Anthropic-format
+// reasoning model (MiniMax-M2.5, DeepSeek-R1). The model emits a `thinking`
+// content block before the visible text block, and the Responses SDK requires
+// the gateway to surface it as a `type: reasoning` output item at
+// output_index 0 (followed by the message item at output_index 1) — otherwise
+// the SDK returns an empty response.
+func TestResponsesToAnthropicStreaming_ThinkingBlocks(t *testing.T) {
+	// --- Step 1: Start a mock Anthropic-format downstream ---
+	mockPort := 9301
+	mockServer := startMockAnthropicThinkingServer(t, mockPort)
+	defer mockServer.Close()
+
+	// --- Step 2: Configure Tresor ---
+	tmpDir, err := os.MkdirTemp("", "tresor-e2e-responses-thinking-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+
+	cfgContent := fmt.Sprintf(`
+bind_addr: 127.0.0.1:%d
+db_path: %s
+
+downstreams:
+  - id: mock-anthropic
+    name: Mock Anthropic
+    api_formats: [anthropic]
+    base_url: http://127.0.0.1:%d
+    api_key: sk-mock-key
+    output_model_ids:
+      - thinking-model
+`, tresorPort, dbPath, mockPort)
+
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// --- Step 3: Start Tresor daemon ---
+	binary, err := filepath.Abs("../tresor.exe")
+	if err != nil {
+		t.Fatalf("Failed to resolve binary path: %v", err)
+	}
+
+	cmd := exec.Command(binary, "run", "--config", cfgPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start daemon: %v", err)
+	}
+	defer cmd.Process.Kill()
+	time.Sleep(2 * time.Second)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/health", tresorPort))
+	if err != nil || resp.StatusCode != 200 {
+		cmd.Process.Kill()
+		t.Fatalf("Tresor not ready: err=%v, status=%d", err, safeStatus(resp))
+	}
+	resp.Body.Close()
+
+	// --- Step 4: Send Responses API streaming request ---
+	openAIReq := map[string]interface{}{
+		"model":  "thinking-model",
+		"input":  "Reply with PONG",
+		"stream": true,
+		"reasoning": map[string]interface{}{
+			"effort": "high",
+		},
+	}
+	body, _ := json.Marshal(openAIReq)
+	req, _ := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/v1/responses", tresorPort),
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected 200, got %d: %s", resp.StatusCode, respBody)
+	}
+	if !strings.EqualFold(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("Expected text/event-stream, got %s", resp.Header.Get("Content-Type"))
+	}
+
+	// --- Step 5: Parse the Responses SSE stream and verify both items appear ---
+	var events []responsesEvent
+	curType := ""
+	curData := strings.Builder{}
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if line == "" {
+			if curData.Len() > 0 {
+				events = append(events, responsesEvent{Type: curType, Data: curData.String()})
+				curData.Reset()
+			}
+			curType = ""
+			continue
+		}
+		if strings.HasPrefix(line, "event: ") {
+			curType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			curData.WriteString(strings.TrimPrefix(line, "data: "))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("Scanner error: %v", err)
+	}
+	t.Logf("Received %d SSE events from Tresor", len(events))
+
+	var reasoningOI, messageOI int
+	var reasoningOIOK, messageOIOK bool
+	var sawReasoningAdd, sawMessageAdd bool
+	var sawReasoningDelta, sawTextDelta bool
+	var sawReasoningDone, sawMessageDone bool
+	var sawCompleted bool
+
+	for _, e := range events {
+		switch e.Type {
+		case "response.output_item.added":
+			var ev struct {
+				OutputIndex int `json:"output_index"`
+				Item        struct {
+					ID   string `json:"id"`
+					Type string `json:"type"`
+				} `json:"item"`
+			}
+			if err := json.Unmarshal([]byte(e.Data), &ev); err != nil {
+				t.Errorf("Bad output_item.added data: %v data=%s", err, e.Data)
+				continue
+			}
+			switch ev.Item.Type {
+			case "reasoning":
+				sawReasoningAdd = true
+				reasoningOI = ev.OutputIndex
+				reasoningOIOK = true
+			case "message":
+				sawMessageAdd = true
+				messageOI = ev.OutputIndex
+				messageOIOK = true
+			}
+		case "response.reasoning_summary_text.delta":
+			sawReasoningDelta = true
+		case "response.output_text.delta":
+			sawTextDelta = true
+		case "response.output_item.done":
+			var ev struct {
+				Item struct {
+					Type string `json:"type"`
+				} `json:"item"`
+			}
+			if err := json.Unmarshal([]byte(e.Data), &ev); err != nil {
+				t.Errorf("Bad output_item.done data: %v", err)
+				continue
+			}
+			switch ev.Item.Type {
+			case "reasoning":
+				sawReasoningDone = true
+			case "message":
+				sawMessageDone = true
+			}
+		case "response.completed":
+			sawCompleted = true
+		}
+	}
+
+	if !sawReasoningAdd {
+		t.Fatal("expected response.output_item.added for a reasoning item (the original bug)")
+	}
+	if !sawReasoningDelta {
+		t.Fatal("expected at least one response.reasoning_summary_text.delta event")
+	}
+	if !sawReasoningDone {
+		t.Fatal("expected response.output_item.done for the reasoning item")
+	}
+	if !sawMessageAdd {
+		t.Fatal("expected response.output_item.added for a message item")
+	}
+	if !sawTextDelta {
+		t.Fatal("expected at least one response.output_text.delta event (the original bug)")
+	}
+	if !sawMessageDone {
+		t.Fatal("expected response.output_item.done for the message item")
+	}
+	if !sawCompleted {
+		t.Fatal("expected response.completed event")
+	}
+	if reasoningOIOK && messageOIOK {
+		if reasoningOI != 0 {
+			t.Fatalf("expected reasoning at output_index 0, got %d", reasoningOI)
+		}
+		if messageOI != 1 {
+			t.Fatalf("expected message at output_index 1, got %d", messageOI)
+		}
+	}
+}
+
+// responsesEvent is a typed SSE event (event line + data line) used by the
+// Responses API streaming tests.
+type responsesEvent struct {
+	Type string
+	Data string
+}
+
 // startMockAnthropicThinkingServer creates a mock downstream that speaks
 // the Anthropic Messages SSE protocol and emits a thinking block followed
 // by a text block — the pattern produced by reasoning models like
