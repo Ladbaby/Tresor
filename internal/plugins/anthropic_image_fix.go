@@ -132,24 +132,50 @@ func (t *FixAnthropicImages) TransformStreamChunk(chunk engine.SSEChunk, ctx *en
 	if t.insideThinking {
 		// content_block_start for tool_use while inside thinking = nested tool_use
 		if chunk.EventType == "content_block_start" && strings.Contains(data, `"type":"tool_use"`) {
+			// If a previous nested tool_use was already being tracked, flush it
+			// before starting on the new one. The previous tool_use's events
+			// have been accumulating in the buffer; without this flush they
+			// would be silently overwritten by the next iteration and lost.
+			// The previous tool_use's content_block_stop has not yet arrived,
+			// so we emit only the start + deltas — its stop will pass through
+			// when it eventually arrives (the index is no longer the buffered
+			// one, so the mismatch-stop branch handles it).
+			var prevFlush string
+			if t.trackingToolUse && len(t.bufferedToolUse) > 0 {
+				prevFlush = strings.Join(t.bufferedToolUse, "\n") + "\n"
+				t.bufferedToolUse = nil
+				t.trackingToolUse = false
+				t.bufferedToolUseIndex = 0
+			}
+
 			t.trackingToolUse = true
-			t.bufferedToolUse = nil
 			t.bufferedToolUseIndex = extractBlockIndex(data)
 			// Absorb this chunk — it will be re-emitted when the block completes
 			t.bufferedToolUse = append(t.bufferedToolUse, "event: content_block_start", "data: "+data, "")
+			if prevFlush != "" {
+				// Combine the previous tool_use flush with this absorbed event
+				// in one chunk so the engine writes both atomically.
+				return engine.SSEChunk{
+					EventType: "",
+					Data:      []byte(prevFlush),
+				}, nil
+			}
 			return engine.SSEChunk{EventType: "", Data: []byte{}}, nil
 		}
 
 		if t.trackingToolUse {
 			// content_block_stop — only flush if its index matches the buffered
 			// tool_use's index. Otherwise, this stop is for a sibling block
-			// (e.g. the outer thinking block) — buffer it and wait for the
-			// matching tool_use stop.
+			// (e.g. the outer thinking block, a text block, or an earlier
+			// tool_use whose events were already flushed) — pass it through
+			// immediately. Buffering these stops produces a malformed output
+			// where stop events arrive in arbitrary order with no preceding
+			// start, which the Anthropic SDK rejects with "Content block not
+			// found".
 			if chunk.EventType == "content_block_stop" {
 				stopIndex := extractBlockIndex(data)
 				if stopIndex != t.bufferedToolUseIndex {
-					t.bufferedToolUse = append(t.bufferedToolUse, "event: content_block_stop", "data: "+data, "")
-					return engine.SSEChunk{EventType: "", Data: []byte{}}, nil
+					return chunk, nil
 				}
 				t.bufferedToolUse = append(t.bufferedToolUse, "event: content_block_stop", "data: "+data, "")
 

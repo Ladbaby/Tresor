@@ -3,6 +3,7 @@ package plugins
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -723,8 +724,11 @@ func TestFixAnthropicImages_ResponseMultipleToolUseInThinkingText(t *testing.T) 
 }
 
 // F2: A content_block_stop with an index that does NOT match the buffered
-// tool_use's index (e.g. the outer thinking block's stop arriving first)
-// must NOT trigger the flush.
+// tool_use's index (e.g. the outer thinking block's stop, or a text block's
+// stop, or an earlier tool_use's stop) must pass through immediately.
+// Buffering these stops previously produced a malformed stream where the
+// buffer was flushed late, rearranging stop events with no matching start —
+// the Anthropic SDK rejected it with "Content block not found".
 func TestFixAnthropicImages_StreamToolUseStopIndexMismatch(t *testing.T) {
 	p := &FixAnthropicImages{}
 	ctx := &engine.PipelineContext{}
@@ -734,11 +738,11 @@ func TestFixAnthropicImages_StreamToolUseStopIndexMismatch(t *testing.T) {
 		{EventType: "content_block_delta", Data: []byte(`{"index":0,"delta":{"type":"text_delta","text":"Let me"}}`)},
 		{EventType: "content_block_start", Data: []byte(`{"index":1,"type":"tool_use","id":"tu_1","name":"read_file"}`)},
 		{EventType: "content_block_delta", Data: []byte(`{"index":1,"delta":{"input_json":"{\"path\""}}`)},
-		// Outer thinking stop arrives FIRST (out-of-order)
+		// Outer thinking stop arrives FIRST (out-of-order) — must pass through.
 		{EventType: "content_block_stop", Data: []byte(`{"index":0}`)},
-		// Then the actual tool_use stop
+		// Then the actual tool_use stop — triggers flush.
 		{EventType: "content_block_stop", Data: []byte(`{"index":1}`)},
-		// Finally the thinking stop (already past)
+		// Then the thinking stop again (already past) — must pass through.
 		{EventType: "content_block_stop", Data: []byte(`{"index":0}`)},
 	}
 
@@ -751,20 +755,27 @@ func TestFixAnthropicImages_StreamToolUseStopIndexMismatch(t *testing.T) {
 		results = append(results, out)
 	}
 
-	// Result 4 is the index=0 stop — must be absorbed (buffered), not flushed.
-	if len(results[4].Data) != 0 {
-		t.Errorf("chunk 4 (thinking stop, index mismatch): expected absorbed, got data=%q", string(results[4].Data))
+	// Result 4 is the index=0 stop — must pass through unchanged.
+	if results[4].EventType != "content_block_stop" {
+		t.Errorf("chunk 4 (thinking stop, index mismatch): expected pass-through, got event=%q", results[4].EventType)
+	}
+	if !bytes.Equal(results[4].Data, events[4].Data) {
+		t.Errorf("chunk 4 (thinking stop): expected data=%q, got %q", string(events[4].Data), string(results[4].Data))
 	}
 	// Result 5 is the index=1 stop — must trigger the flush with all buffered
-	// events including the absorbed index=0 stop.
+	// events for the tool_use.
 	if !strings.Contains(string(results[5].Data), "\n\n") {
 		t.Error("chunk 5 (matching tool_use stop): expected raw SSE flush")
 	}
 	if !strings.Contains(string(results[5].Data), "tu_1") {
 		t.Error("chunk 5: flush should contain tool_use id")
 	}
-	if !strings.Contains(string(results[5].Data), `"index":0`) {
-		t.Error("chunk 5: flush should include the absorbed index=0 stop event")
+	// Result 6 is a stray index=0 stop — must pass through (not buffered again).
+	if results[6].EventType != "content_block_stop" {
+		t.Errorf("chunk 6: expected pass-through, got event=%q", results[6].EventType)
+	}
+	if !bytes.Equal(results[6].Data, events[6].Data) {
+		t.Errorf("chunk 6: expected pass-through data, got %q", string(results[6].Data))
 	}
 }
 
@@ -1064,5 +1075,130 @@ func TestFixAnthropicImages_EmptyBase64Data(t *testing.T) {
 	part := content[0].(map[string]interface{})
 	if part["type"] != "tool_result" {
 		t.Fatalf("tool_result should be preserved for empty data, got type %v", part["type"])
+	}
+}
+
+// Regression test for the "Content block not found" bug observed in
+// Claude Code when fix_anthropic_images was enabled on a CoT backend that
+// emits multiple tool_use blocks inside a single thinking block.
+//
+// Pre-fix behavior: each new nested tool_use start silently overwrote the
+// previously buffered events (line 169 `t.bufferedToolUse = nil` ran while
+// trackingToolUse was still true). After 5 tool_uses, only the last one
+// (index 6) was buffered. The 7 content_block_stops that followed all got
+// buffered as "mismatch" until the matching stop (index 6) finally triggered
+// the flush — emitting the last tool_use along with 7 stale stops. The
+// earlier 4 tool_uses lost their starts and deltas entirely; Claude Code
+// saw stop events with no preceding starts and rejected the stream.
+//
+// Post-fix: each new tool_use start flushes the previous one, and stops for
+// non-matching indices pass through immediately. Every tool_use's start and
+// deltas reach the client.
+func TestFixAnthropicImages_StreamMultipleToolUsesInThinking(t *testing.T) {
+	p := &FixAnthropicImages{}
+	ctx := &engine.PipelineContext{}
+
+	// Mirror the upstream trace that triggered the bug: thinking block,
+	// then 5 tool_uses (indices 2-6), then all content_block_stops in
+	// order. Ends with [DONE] (engine synthesizes one because the upstream
+	// omits message_stop). Each tool_use's content_block_stop arrives after
+	// all tool_use starts, matching the upstream's actual emission order.
+	events := []engine.SSEChunk{
+		// Thinking block start
+		{EventType: "content_block_start", Data: []byte(`{"index":0,"content_block":{"type":"thinking","thinking":""}}`)},
+		// A handful of thinking deltas
+		{EventType: "content_block_delta", Data: []byte(`{"index":0,"delta":{"type":"thinking_delta","thinking":"The "}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":0,"delta":{"type":"thinking_delta","thinking":"user "}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":0,"delta":{"type":"thinking_delta","thinking":"wants X"}}`)},
+		// 5 nested tool_uses — start, delta pairs, all in a row with no stops between them
+		{EventType: "content_block_start", Data: []byte(`{"index":2,"content_block":{"type":"tool_use","id":"tu_2","name":"Read"}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}`)},
+		{EventType: "content_block_start", Data: []byte(`{"index":3,"content_block":{"type":"tool_use","id":"tu_3","name":"Glob"}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":3,"delta":{"type":"input_json_delta","partial_json":"{}"}}`)},
+		{EventType: "content_block_start", Data: []byte(`{"index":4,"content_block":{"type":"tool_use","id":"tu_4","name":"Grep"}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":4,"delta":{"type":"input_json_delta","partial_json":"{}"}}`)},
+		{EventType: "content_block_start", Data: []byte(`{"index":5,"content_block":{"type":"tool_use","id":"tu_5","name":"Bash"}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":5,"delta":{"type":"input_json_delta","partial_json":"{}"}}`)},
+		{EventType: "content_block_start", Data: []byte(`{"index":6,"content_block":{"type":"tool_use","id":"tu_6","name":"Write"}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"index":6,"delta":{"type":"input_json_delta","partial_json":"{}"}}`)},
+		// All content_block_stops arrive in order: thinking, then each tool_use.
+		{EventType: "content_block_stop", Data: []byte(`{"index":0}`)},
+		{EventType: "content_block_stop", Data: []byte(`{"index":2}`)},
+		{EventType: "content_block_stop", Data: []byte(`{"index":3}`)},
+		{EventType: "content_block_stop", Data: []byte(`{"index":4}`)},
+		{EventType: "content_block_stop", Data: []byte(`{"index":5}`)},
+		{EventType: "content_block_stop", Data: []byte(`{"index":6}`)},
+		// Engine synthesizes [DONE] after the upstream closes without one
+		{EventType: "", Data: []byte("[DONE]")},
+	}
+
+	var results []engine.SSEChunk
+	for _, ev := range events {
+		out, err := p.TransformStreamChunk(ev, ctx)
+		if err != nil {
+			t.Fatalf("transform chunk: %v", err)
+		}
+		results = append(results, out)
+	}
+
+	// Concatenate every output data field — both raw-SSE flushes and
+	// framed pass-throughs — into one blob we can search.
+	allOut := strings.Builder{}
+	for _, r := range results {
+		allOut.Write(r.Data)
+	}
+	combined := allOut.String()
+
+	// Each tool_use's id must appear in the output exactly once. If any of
+	// the 5 tool_use starts were silently swallowed (the pre-fix bug), at
+	// least one id would be missing entirely.
+	for _, id := range []string{"tu_2", "tu_3", "tu_4", "tu_5", "tu_6"} {
+		if c := strings.Count(combined, id); c != 1 {
+			t.Errorf("expected exactly 1 occurrence of %q in output, got %d. Combined output:\n%s", id, c, combined)
+		}
+	}
+
+	// Each tool_use must appear as both a content_block_start and a
+	// content_block_stop, with no orphan stops (the original bug's
+	// symptom). Count appearances of each index inside event/data frames.
+	for _, idx := range []int{2, 3, 4, 5, 6} {
+		// Each tool_use must contribute one start and one stop event to the
+		// output. The plugin's output for these events takes two forms:
+		//   - tool_use starts/deltas inside the buffer are flushed as raw SSE
+		//     "event: content_block_start\ndata: {...\"content_block\":{\"type\":\"tool_use\"...}}"
+		//   - tool_use stops that triggered the flush are appended as raw SSE
+		//     "event: content_block_stop\ndata: {\"index\":N}"
+		// For a tool_use that gets flushed via a later start (not its own
+		// stop), its stop is emitted later as a pass-through chunk whose data
+		// is just `{"index":N}` — the engine then wraps that as the SSE event
+		// when writing to the wire.
+		//
+		// Look for the tool_use start — must appear in raw-SSE flush form.
+		startMarker := fmt.Sprintf("\"index\":%d,\"content_block\":{\"type\":\"tool_use\"", idx)
+		startCount := strings.Count(combined, startMarker)
+		if startCount != 1 {
+			t.Errorf("index %d: expected 1 tool_use start, got %d", idx, startCount)
+		}
+
+		// The stop must appear at least once in the output. It can take
+		// either form (raw-SSE flush form for the matching stop, or just
+		// `{"index":N}` pass-through form for stops that arrive after the
+		// tool_use was already flushed). The matching stop for index 6
+		// triggers its flush and produces the raw-SSE form; stops for
+		// 2..5 are pass-throughs and appear as raw `{"index":N}`.
+		stopMarkerRaw := fmt.Sprintf("event: content_block_stop\ndata: {\"index\":%d}", idx)
+		stopMarkerPassThru := fmt.Sprintf("{\"index\":%d}", idx)
+		rawCount := strings.Count(combined, stopMarkerRaw)
+		passThruCount := strings.Count(combined, stopMarkerPassThru)
+		if rawCount+passThruCount < 1 {
+			t.Errorf("index %d: expected at least 1 tool_use stop in output, got raw=%d passthrough=%d", idx, rawCount, passThruCount)
+		}
+	}
+
+	// The thinking stop (index 0) is a pass-through (mismatch with the
+	// buffered tool_use index). It must reach the client as `{"index":0}`.
+	thinkingStopMarker := "{\"index\":0}"
+	if c := strings.Count(combined, thinkingStopMarker); c < 1 {
+		t.Errorf("expected thinking stop (index 0) in output, got %d occurrences", c)
 	}
 }
