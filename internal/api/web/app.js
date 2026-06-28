@@ -202,6 +202,21 @@ async function api(path, options = {}) {
 // ---- Plugin cache (for visual pipeline editor) ----
 let cachedPlugins = null;
 
+// ---- Format icon helper ----
+// Maps API format ids to the SVG icon file to display alongside the text label.
+const FORMAT_ICONS = {
+    openai: 'icons/openai-completions.svg',
+    openai_responses: 'icons/openai-responses.svg',
+    anthropic: 'icons/anthropic.svg',
+    google: 'icons/google.svg',
+};
+
+function formatIconHTML(formatId) {
+    const src = FORMAT_ICONS[formatId];
+    if (!src) return '';
+    return `<img class="format-icon icon-${esc(formatId)}" src="${esc(src)}" alt="" aria-hidden="true">`;
+}
+
 async function fetchPlugins() {
     if (cachedPlugins) return cachedPlugins;
     try {
@@ -243,13 +258,13 @@ async function loadRules() {
                 // Input format badges (blue for openai, amber for anthropic)
                 inputFmts.forEach(f => {
                     const cls = f === 'openai' ? 'format-openai' : f === 'openai_responses' ? 'format-openai_responses' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
-                    badges.push(`<span class="format-badge ${cls}">in:${esc(formatLabels[f] || f)}</span>`);
+                    badges.push(`<span class="format-badge ${cls}">in:${formatIconHTML(f)}${esc(formatLabels[f] || f)}</span>`);
                 });
 
                 // Downstream format badges (prefixed to distinguish from input)
                 dsFmts.forEach(f => {
                     const cls = f === 'openai' ? 'format-openai' : f === 'openai_responses' ? 'format-openai_responses' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
-                    badges.push(`<span class="format-badge ${cls}">out:${esc(formatLabels[f] || f)}</span>`);
+                    badges.push(`<span class="format-badge ${cls}">out:${formatIconHTML(f)}${esc(formatLabels[f] || f)}</span>`);
                 });
 
                 // Downstream ID badges (grey)
@@ -761,7 +776,7 @@ async function loadDownstreams() {
                 const formatLabels = { openai: 'OpenAI', openai_responses: 'OpenAI Responses', anthropic: 'Anthropic' };
                 const formatBadges = formats.map(f => {
                     const fClass = f === 'openai' ? 'format-openai' : f === 'openai_responses' ? 'format-openai_responses' : f === 'anthropic' ? 'format-anthropic' : 'format-unknown';
-                    return `<span class="format-badge ${fClass}">${esc(formatLabels[f] || f)}</span>`;
+                    return `<span class="format-badge ${fClass}">${formatIconHTML(f)}${esc(formatLabels[f] || f)}</span>`;
                 }).join(' ');
                 const formatCell = formatBadges || '<span class="format-badge format-unknown">—</span>';
                 return `

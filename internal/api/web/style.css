@@ -964,9 +964,27 @@ html[data-theme="light"] form select {
     margin-right: 0.4rem;
 }
 
-/* Format badges */
-.format-badge {
+/* Format icons (inline SVG used alongside format text) */
+.format-icon {
     display: inline-block;
+    width: 25px;
+    height: 25px;
+    vertical-align: -2px;
+    margin-right: 0.3rem;
+    border-radius: 8px;
+    background: #fff;
+}
+.format-icon.icon-openai { background: #0d1117; }
+.format-icon.icon-openai_responses { background: #fff; }
+.format-icon.icon-anthropic { background: #d1a47a; }
+.format-icon.icon-google { background: #fff; }
+[data-theme="dark"] .format-icon.icon-openai { background: #0d1117; }
+[data-theme="dark"] .format-icon.icon-openai_responses { background: #fff; }
+[data-theme="dark"] .format-icon.icon-google { background: #0d1117; }
+
+.format-badge {
+    display: inline-flex;
+    align-items: center;
     padding: 0.15rem 0.55rem;
     border-radius: 6px;
     font-size: 0.72rem;
@@ -994,7 +1012,7 @@ html[data-theme="light"] form select {
 .format-checkbox {
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: 0.4rem;
     padding: 0.25rem 0.6rem;
     background: var(--bg-tertiary);
     border: 1px solid var(--border-color);
