@@ -853,22 +853,24 @@ html[data-theme="light"] form select {
     box-shadow: 0 0 8px rgba(9, 105, 218, 0.3);
 }
 
+.alias-option-btn .option-model {
+    font-weight: 700;
+    font-size: 1rem;
+    margin-bottom: 0.25rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    word-break: break-all;
+}
+
 .alias-option-btn .option-downstream {
-    font-weight: 600;
-    font-size: 0.9rem;
+    font-size: 0.8rem;
+    opacity: 0.75;
     display: flex;
     align-items: center;
     gap: 0.3rem;
+    flex-wrap: wrap;
 }
 
-.alias-option-btn .option-model {
-    font-size: 0.8rem;
-    opacity: 0.75;
-    margin-top: 0.25rem;
-    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-}
-
-.alias-option-btn.active .option-model {
+.alias-option-btn.active .option-downstream {
     opacity: 0.9;
 }
 
@@ -970,7 +972,6 @@ html[data-theme="light"] form select {
     width: 25px;
     height: 25px;
     vertical-align: -2px;
-    margin-right: 0.3rem;
     border-radius: 8px;
     background: #fff;
 }
@@ -991,6 +992,7 @@ html[data-theme="light"] form select {
     font-weight: 600;
     font-family: 'SFMono-Regular', Consolas, monospace;
     text-transform: uppercase;
+    gap: 0.4rem;
 }
 .format-openai { background: #1c3d7a; color: #58a6ff; }
 .format-openai_responses { background: #1c3d7a; color: #58a6ff; }

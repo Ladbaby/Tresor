@@ -1254,34 +1254,12 @@ function renderAliasGroup(container, group) {
 
     const title = document.createElement('div');
     title.className = 'alias-group-title';
-    // Check if this group is regex
     const isRegexGroup = group.is_regex;
-    title.innerHTML = `<span class="group-icon">🎯</span> ${esc(group.input_model_id)}` +
+    title.innerHTML = esc(group.input_model_id) +
         (isRegexGroup ? '<span class="badge" style="background:#6e256d;color:#e879f9;margin-left:0.4rem;font-size:0.7rem;">regex</span>' : '');
 
     const actions = document.createElement('div');
     actions.className = 'alias-group-actions';
-
-    // Show active label if one exists
-    if (group.active_id) {
-        const activeOpt = group.options.find(o => o.id === group.active_id);
-        if (activeOpt) {
-            const badge = document.createElement('span');
-            badge.className = 'protocol-badge';
-            badge.style.background = '#1b4123';
-            badge.style.color = '#3fb950';
-            badge.textContent = `Active: ${esc(activeOpt.downstream_name)} / ${esc(activeOpt.output_model_id)}`;
-            actions.appendChild(badge);
-        } else {
-            // Stale active_id — no matching option (e.g. active alias was deleted)
-            const warning = document.createElement('span');
-            warning.className = 'protocol-badge';
-            warning.style.background = '#5d2600';
-            warning.style.color = '#d29922';
-            warning.textContent = 'No active mapping';
-            actions.appendChild(warning);
-        }
-    }
 
     // Add option button in header area
     const addBtn = document.createElement('button');
@@ -1310,17 +1288,19 @@ function renderAliasGroup(container, group) {
         btn.className = 'alias-option-btn' + (opt.is_active ? ' active' : '');
         btn.dataset.aliasId = opt.id;
 
-        // Downstream name line
-        const dsLabel = document.createElement('div');
-        dsLabel.className = 'option-downstream';
-        dsLabel.textContent = opt.downstream_name || opt.downstream_id;
-        btn.appendChild(dsLabel);
-
-        // Output model line
+        // Output model line (top, larger)
         const modelLabel = document.createElement('div');
         modelLabel.className = 'option-model';
         modelLabel.textContent = opt.output_model_id;
         btn.appendChild(modelLabel);
+
+        // Downstream name line with format icons (bottom, smaller)
+        const dsLabel = document.createElement('div');
+        dsLabel.className = 'option-downstream';
+        const formats = Array.isArray(opt.api_formats) ? opt.api_formats : [];
+        const icons = formats.map(formatIconHTML).join('');
+        dsLabel.innerHTML = icons + esc(opt.downstream_name || opt.downstream_id);
+        btn.appendChild(dsLabel);
 
         // Remove button (top-right corner)
         const removeBtn = document.createElement('button');

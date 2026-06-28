@@ -191,21 +191,27 @@ func (r *Router) handleReorderGroups(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reordered"})
 }
 
-// enrichAliasGroups fills in the downstream name for each option in every group.
+// enrichAliasGroups fills in the downstream name and api_formats for each option in every group.
 func enrichAliasGroups(s *store.Store, groups []store.AliasGroup) {
-	// Build a downstream ID -> name map
 	downstreams, err := s.ListDownstreams()
 	if err != nil {
 		return
 	}
-	dsMap := make(map[string]string)
+	type dsInfo struct {
+		Name    string
+		Formats []string
+	}
+	dsMap := make(map[string]dsInfo)
 	for _, d := range downstreams {
-		dsMap[d.ID] = d.Name
+		dsMap[d.ID] = dsInfo{Name: d.Name, Formats: d.ApiFormats}
 	}
 
 	for i := range groups {
 		for j := range groups[i].Options {
-			groups[i].Options[j].DownstreamName = dsMap[groups[i].Options[j].DownstreamID]
+			if info, ok := dsMap[groups[i].Options[j].DownstreamID]; ok {
+				groups[i].Options[j].DownstreamName = info.Name
+				groups[i].Options[j].APIFormats = info.Formats
+			}
 		}
 	}
 }

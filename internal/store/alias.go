@@ -24,6 +24,7 @@ type Alias struct {
 	DownstreamID    string    `json:"downstream_id"`
 	DownstreamName  string    `json:"downstream_name,omitempty"`
 	OutputModelID   string    `json:"output_model_id"`
+	APIFormats      []string  `json:"api_formats,omitempty"`
 	IsActive        bool      `json:"is_active"`
 	IsRegex         bool      `json:"is_regex"`
 	GroupOrder      int       `json:"group_order"`
