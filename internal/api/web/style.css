@@ -859,6 +859,10 @@ html[data-theme="light"] form select {
     margin-bottom: 0.25rem;
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
     word-break: break-all;
+    /* inline-flex + align-items:center so the brand chip and the model name
+       sit on the same vertical axis (no manual vertical-align heuristics). */
+    display: flex;
+    align-items: center;
 }
 
 .alias-option-btn .option-downstream {
@@ -984,20 +988,46 @@ html[data-theme="light"] form select {
 [data-theme="dark"] .format-icon.icon-google { background: #0d1117; }
 
 /* Model icons — fetched at runtime from a public CDN, cached on disk by the
-   daemon, served via /api/icons/{modelID}. Slightly smaller than format
-   icons to fit inside dense chips (.model-list li, .option-model). */
+   daemon, served via /api/icons/{modelID}. Rendered inside a soft rounded
+   chip so the (mostly-light-on-light) lobehub SVGs read clearly against any
+   card background, light or dark. */
 .model-icon {
     display: inline-block;
-    width: 16px;
-    height: 16px;
-    vertical-align: -2px;
-    margin-right: 0.3rem;
-    border-radius: 3px;
-    background: transparent;
+    width: 18px;
+    height: 18px;
+    padding: 2px;
+    box-sizing: border-box;
+    vertical-align: -4px;
+    margin-right: 0.35rem;
+    border-radius: 5px;
+    background: #f1f3f5;
+    border: 1px solid rgba(0, 0, 0, 0.06);
     flex-shrink: 0;
 }
 [data-theme="dark"] .model-icon {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(255, 255, 255, 0.10);
+    border-color: rgba(255, 255, 255, 0.14);
+}
+
+/* Aliases tab — flip the visual hierarchy so the model brand glyph is the
+   dominant element and the API format chips recede. The model icon grows
+   (more breathing room, easier to scan across many options), and the
+   format chips shrink to small inline indicators. Vertical alignment is
+   handled by the flex containers (.option-model, .option-downstream,
+   .model-list li) — no manual vertical-align heuristics here. */
+.alias-option-btn .model-icon {
+    width: 26px;
+    height: 26px;
+    padding: 3px;
+    border-radius: 7px;
+    margin-right: 0.5rem;
+    vertical-align: middle;
+}
+.alias-option-btn .format-icon {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    vertical-align: middle;
 }
 
 .format-badge {
@@ -1084,6 +1114,9 @@ html[data-theme="light"] form select {
     padding: 0.1rem 0.4rem;
     border-radius: 4px;
     font-size: 0.7rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
     color: var(--text-secondary);
 }
