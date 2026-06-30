@@ -24,8 +24,8 @@ var modelPatterns = []Pattern{
 	{regexp.MustCompile(`(?i)gpt-|o1-|o3-|o4-|chatgpt|dall-e|whisper|tts-|text-embedding-`), "openai"},
 	// Claude / Anthropic
 	{regexp.MustCompile(`(?i)claude|anthropic`), "claude-color"},
-	// Google — Gemini family + Gemma + Veo + Imagen
-	{regexp.MustCompile(`(?i)gemini|gemma|veo|imagen`), "gemini-color"},
+	// Google — Gemini family + Veo + Imagen
+	{regexp.MustCompile(`(?i)gemini|veo|imagen`), "gemini-color"},
 	// DeepSeek (lobehub ships its own deepseek icon)
 	{regexp.MustCompile(`(?i)deepseek`), "deepseek-color"},
 	// Meta — Llama has no dedicated slug, fall back to the meta provider icon

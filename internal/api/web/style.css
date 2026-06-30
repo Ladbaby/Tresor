@@ -867,7 +867,6 @@ html[data-theme="light"] form select {
 
 .alias-option-btn .option-downstream {
     font-size: 0.8rem;
-    opacity: 0.75;
     display: flex;
     align-items: center;
     gap: 0.3rem;
@@ -1425,14 +1424,15 @@ html[data-theme="light"] form select {
    card background, light or dark. */
 .model-icon {
     display: inline-block;
-    width: 18px;
-    height: 18px;
+    width: 24px;
+    height: 24px;
     padding: 2px;
     box-sizing: border-box;
     vertical-align: -4px;
     margin-right: 0.35rem;
     border-radius: 5px;
-    background: #f1f3f5;
+    /* background: #f1f3f5; */
+    background: #ffffff;
     border: 1px solid rgba(0, 0, 0, 0.06);
     flex-shrink: 0;
 }
@@ -1471,11 +1471,11 @@ html[data-theme="light"] form select {
    theme — the colored CDN icons paint their own strokes/backgrounds and
    are unaffected by this rule. */
 .alias-option-btn .option-downstream .model-icon {
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
     border-radius: 4px;
     vertical-align: middle;
-    padding: 0;
+    padding: 1px;
     margin-right: 0.25rem;
     color: var(--text-muted, #6c757d);
 }
