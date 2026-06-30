@@ -27,6 +27,12 @@ const (
 
 	// memCacheSize bounds the in-memory icon LRU.
 	memCacheSize = 100
+
+	// maxRetries is the maximum number of retries for transient HTTP errors.
+	maxRetries = 3
+
+	// retryBaseDelay is the initial delay before the first retry.
+	retryBaseDelay = 200 * time.Millisecond
 )
 
 // Fetcher resolves model IDs to SVG icon bytes, fetching from a public CDN on
@@ -226,6 +232,41 @@ func (f *Fetcher) singleflightDo(url string) ([]byte, string, bool, error) {
 }
 
 func (f *Fetcher) fetch(url string) ([]byte, string, bool, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := retryBaseDelay * time.Duration(1<<(attempt-1))
+			time.Sleep(delay)
+		}
+
+		data, ct, miss, err := f.doFetch(url)
+		if err == nil {
+			return data, ct, miss, nil
+		}
+
+		lastErr = err
+
+		// Retryable: network errors and 5xx server errors (except 503 which
+		// might mean the CDN is truly down for this specific resource)
+		isRetryable := false
+		if attempt < maxRetries {
+			if strings.Contains(err.Error(), "context deadline exceeded") {
+				isRetryable = true
+			} else if strings.Contains(err.Error(), "status 503") {
+				isRetryable = true
+			} else if strings.Contains(err.Error(), "status 5") { // 500-599
+				isRetryable = true
+			}
+		}
+
+		if !isRetryable {
+			return nil, "", false, err
+		}
+	}
+	return nil, "", false, lastErr
+}
+
+func (f *Fetcher) doFetch(url string) ([]byte, string, bool, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, "", false, fmt.Errorf("build request: %w", err)

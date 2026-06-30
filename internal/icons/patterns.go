@@ -13,6 +13,11 @@ type Pattern struct {
 	Slug  string
 }
 
+// versionSuffix matches a trailing version number (with optional dot-segments)
+// like "3", "3.5", "1.7.2", or "20250514" — used to strip "qwen3.5" → "qwen"
+// and "claude-sonnet-4-20250514" (when no -/: delimiter precedes it) cleanly.
+var versionSuffix = regexp.MustCompile(`[0-9]+(?:[\.-][0-9]+)*$`)
+
 // modelPatterns is the ordered list used to resolve a model ID into a CDN slug.
 // Adapted from cherry-studio's combined model+provider pattern tables
 // (packages/ui/src/components/icons/registry.ts), collapsed into one list
@@ -85,9 +90,7 @@ func Resolve(modelID string) string {
 //	"minimax-m2.5"        -> "minimax"
 //	"my-custom-model-xyz" -> "my"
 //	"gemma4:e4b"          -> "gemma"
-//	"qwen3.5:9b"          -> "qwen3."  (leading-digit-strip leaves a dot; the
-//	                                    CDN lookups fall through to whatever
-//	                                    the primary pattern already resolved)
+//	"qwen3.5:9b"          -> "qwen"   (trailing digits stripped, then non-alphanumeric chars)
 //	"qwen-max"            -> "qwen"
 //	"foo"                 -> "foo"
 //	"   -   "             -> ""
@@ -104,7 +107,19 @@ func firstSegmentFallback(modelID string) string {
 	if i := firstSegmentCut(s); i >= 0 {
 		s = s[:i]
 	}
-	s = strings.TrimRight(s, "0123456789")
+	// Strip any trailing version number (incl. dot-separated like "3.5").
+	// Examples: "qwen3" → "qwen", "qwen3.5" → "qwen", "gemma4:e4b" → "gemma4"
+	// (the ":e4b" was cut above, leaving "gemma4", which then becomes "gemma").
+	s = versionSuffix.ReplaceAllString(s, "")
+	// Strip any remaining trailing non-alphanumeric chars (e.g. a leftover
+	// "-" from the delimiter cut) so we don't produce malformed slugs.
+	for len(s) > 0 {
+		c := s[len(s)-1]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			break
+		}
+		s = s[:len(s)-1]
+	}
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" {
 		return ""

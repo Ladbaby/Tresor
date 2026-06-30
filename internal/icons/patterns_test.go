@@ -126,7 +126,7 @@ func TestFirstSegmentFallback(t *testing.T) {
 		// only first segments still get rejected by the letter check).
 		{"o3", "o"}, // v-digit strip → "o", letter check passes
 		{"4-bit-quantized", ""}, // hyphen split → "4", letter check fails
-		{"qwen3.5", "qwen3."},  // trailing dot preserved; primary pattern covers qwen anyway
+		{"qwen3.5", "qwen"},  // trailing dot stripped
 		{"", ""},
 		{"   bar-baz  ", "bar"},
 		{"🦀-something", ""}, // no a-z or 0-9 in first segment
