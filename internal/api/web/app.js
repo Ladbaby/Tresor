@@ -1690,12 +1690,14 @@ function renderAliasGroup(container, group) {
         modelLabel.innerHTML = modelIconHTML(opt.output_model_id) + esc(opt.output_model_id);
         btn.appendChild(modelLabel);
 
-        // Downstream name line with format icons (bottom, smaller)
+        // Downstream brand icon + name (bottom line, smaller). The icon is
+        // resolved through the same /api/icons endpoint used elsewhere; when
+        // no CDN slug matches, the endpoint returns the generic dummy icon
+        // (internal/api/icons.go) so this slot is never blank.
         const dsLabel = document.createElement('div');
         dsLabel.className = 'option-downstream';
-        const formats = Array.isArray(opt.api_formats) ? opt.api_formats : [];
-        const icons = formats.map(formatIconHTML).join('');
-        dsLabel.innerHTML = icons + esc(opt.downstream_name || opt.downstream_id);
+        const dsName = opt.downstream_name || opt.downstream_id;
+        dsLabel.innerHTML = modelIconHTML(dsName) + esc(dsName);
         btn.appendChild(dsLabel);
 
         // Remove button (top-right corner)

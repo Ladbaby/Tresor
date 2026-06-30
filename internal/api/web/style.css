@@ -1027,7 +1027,7 @@ html[data-theme="light"] form select {
     border-color: rgba(255, 255, 255, 0.4);
 }
 .downstreams-list li.selected .model-icon {
-    background: rgba(255, 255, 255, 0.85);
+    background: rgba(255, 255, 255, 0.9);
     border-color: rgba(255, 255, 255, 0.6);
 }
 
@@ -1437,7 +1437,7 @@ html[data-theme="light"] form select {
     flex-shrink: 0;
 }
 [data-theme="dark"] .model-icon {
-    background: rgba(255, 255, 255, 0.10);
+    background: rgba(255, 255, 255, 0.9);
     border-color: rgba(255, 255, 255, 0.14);
 }
 
@@ -1460,6 +1460,27 @@ html[data-theme="light"] form select {
     height: 16px;
     border-radius: 4px;
     vertical-align: middle;
+}
+/* Downstream brand icon in the option card's bottom row. Slot-sized to the
+   same 16px footprint the format chips used so swapping the row doesn't
+   shift the layout. The .option-model row above still uses the larger
+   26px .model-icon rule.
+
+   The inline SVG uses stroke="currentColor", so we set color explicitly so
+   the generic dummy (and any future monochrome CDN icons) tints to the
+   theme — the colored CDN icons paint their own strokes/backgrounds and
+   are unaffected by this rule. */
+.alias-option-btn .option-downstream .model-icon {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    vertical-align: middle;
+    padding: 0;
+    margin-right: 0.25rem;
+    color: var(--text-muted, #6c757d);
+}
+[data-theme="dark"] .alias-option-btn .option-downstream .model-icon {
+    color: var(--text-secondary, #adb5bd);
 }
 
 .format-badge {
