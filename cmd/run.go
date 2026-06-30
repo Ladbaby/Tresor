@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -86,6 +87,13 @@ func runDaemon(cfg *config.AppConfig) error {
 	if err != nil {
 		return fmt.Errorf("init icon fetcher: %w", err)
 	}
+
+	// Start the periodic icon-index sync in the background. The cancel
+	// func stops the goroutine on daemon shutdown; deferred so it
+	// always runs even when we return early via the error path below.
+	refreshCtx, stopRefresh := context.WithCancel(context.Background())
+	defer stopRefresh()
+	iconFetcher.StartPeriodicRefresh(refreshCtx)
 
 	// Initialize request logger
 	logger := engine.NewRequestLogger()

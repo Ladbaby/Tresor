@@ -166,6 +166,8 @@ func (r *Router) Handler() http.Handler {
 			r.handleFetchModels(w, req)
 		case path == "config":
 			r.handleConfig(w, req)
+		case path == "icons/refresh":
+			r.handleIconRefresh(w, req)
 		case path == "logs/stream":
 			StreamLogs(r.logger)(w, req)
 		case path == "logs":
@@ -185,6 +187,7 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/plugins", protected)
 	mux.Handle("/api/fetch-models", protected)
 	mux.Handle("/api/config", protected)
+	mux.Handle("/api/icons/refresh", protected)
 	mux.Handle("/api/logs/stream", protected)
 	mux.Handle("/api/logs", protected)
 
