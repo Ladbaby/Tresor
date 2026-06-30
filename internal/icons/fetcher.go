@@ -1,9 +1,11 @@
 package icons
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,6 +35,19 @@ const (
 
 	// retryBaseDelay is the initial delay before the first retry.
 	retryBaseDelay = 200 * time.Millisecond
+
+	// iconConcurrency caps how many in-flight icon fetches the fetcher
+	// will issue at once. Combined with the rate limiter in iconRate,
+	// this keeps the cold-start burst from hammering the CDN.
+	iconConcurrency = 4
+
+	// defaultRetryAfterFallback is the wait used when the CDN returns
+	// 503 without a Retry-After header. jsDelivr historically throttles
+	// to ~5s windows during incidents.
+	defaultRetryAfterFallback = 5 * time.Second
+
+	// maxRetryAfter caps any parsed Retry-After value.
+	maxRetryAfter = 60 * time.Second
 )
 
 // Fetcher resolves model IDs to SVG icon bytes, fetching from a public CDN on
@@ -52,6 +67,24 @@ type Fetcher struct {
 	// instead of issuing their own request.
 	sfMu  sync.Mutex
 	sfMap map[string]*inflight
+
+	// index is the local CDN slug catalog. When Ready(), the Icon() loop
+	// skips slugs not present in the index instead of fetching them.
+	index *Index
+
+	// iconRate is the steady-state + warm-start throttle.
+	iconRate *rateLimiter
+
+	// iconSem bounds concurrent fetches across all URLs (per-process).
+	iconSem chan struct{}
+
+	// proxyMode is captured so SetProxyMode can also rebuild the index's
+	// http.Client.
+	proxyMode proxy.Mode
+
+	// warmingOnce logs the "index not ready, falling back" warning at
+	// most once per process lifetime.
+	warmingOnce sync.Once
 }
 
 // inflight is the in-flight state of a single URL fetch.
@@ -77,12 +110,14 @@ func NewWithProxyMode(cacheDir string, mode proxy.Mode) (*Fetcher, error) {
 		Transport: transport,
 		Timeout:   defaultFetchTimeout,
 	}
-	return New(cacheDir, client)
+	return New(cacheDir, client, mode)
 }
 
 // New constructs a Fetcher with a pre-built HTTP client (useful for tests
-// that need a custom Transport).
-func New(cacheDir string, client *http.Client) (*Fetcher, error) {
+// that need a custom Transport). proxyMode defaults to none; pass an
+// explicit mode from NewWithProxyMode in production so live /api/config
+// PUTs can also rebuild the index's HTTP client.
+func New(cacheDir string, client *http.Client, proxyMode ...proxy.Mode) (*Fetcher, error) {
 	if cacheDir == "" {
 		return nil, fmt.Errorf("icons: cacheDir is required")
 	}
@@ -92,15 +127,40 @@ func New(cacheDir string, client *http.Client) (*Fetcher, error) {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("icons: create cache dir: %w", err)
 	}
-	return &Fetcher{
-		cacheDir: cacheDir,
-		client:   client,
-		log:      log.New(os.Stderr, "icons: ", log.LstdFlags|log.Lmicroseconds),
-		mem:      newMemLRU(memCacheSize),
-		miss:     newMemLRU(memCacheSize),
-		sfMap:    make(map[string]*inflight),
-		cdnURL:   CDNURL,
-	}, nil
+	mode := proxy.ModeNone
+	if len(proxyMode) > 0 {
+		mode = proxyMode[0]
+	}
+	logger := log.New(os.Stderr, "icons: ", log.LstdFlags|log.Lmicroseconds)
+	f := &Fetcher{
+		cacheDir:  cacheDir,
+		client:    client,
+		log:       logger,
+		mem:       newMemLRU(memCacheSize),
+		miss:      newMemLRU(memCacheSize),
+		sfMap:     make(map[string]*inflight),
+		cdnURL:    CDNURL,
+		iconRate:  newRateLimiter(),
+		iconSem:   make(chan struct{}, iconConcurrency),
+		proxyMode: mode,
+	}
+	// The index needs its own HTTP client (longer timeout) but should
+	// honor the same proxy mode.
+	idxClient := &http.Client{
+		Transport: &http.Transport{
+			Proxy:           proxy.ProxyFunc(mode),
+			IdleConnTimeout: 30 * time.Second,
+		},
+		Timeout: indexSyncTimeout,
+	}
+	f.index = newIndex(cacheDir, mode, idxClient, logger)
+	// Load any cached index synchronously (fast: ~100KB disk read).
+	if err := f.index.Load(); err != nil {
+		logger.Printf("icons: index load: %v", err)
+	}
+	// Kick off an async refresh if the loaded index is stale or missing.
+	f.index.MaybeSync()
+	return f, nil
 }
 
 // SetCDNURL overrides the CDN URL builder. Intended for tests; production
@@ -124,6 +184,34 @@ func (f *Fetcher) SetProxyMode(mode proxy.Mode) {
 		Transport: transport,
 		Timeout:   defaultFetchTimeout,
 	}
+	f.proxyMode = mode
+	if f.index != nil {
+		f.index.SetProxyMode(mode)
+	}
+}
+
+// RefreshIndex triggers an out-of-band index sync. Used by the
+// /api/icons/refresh admin endpoint.
+func (f *Fetcher) RefreshIndex(ctx context.Context) (string, int, error) {
+	if f.index == nil {
+		return "", 0, fmt.Errorf("icons: index not initialized")
+	}
+	v, n, err := f.index.Sync(ctx)
+	if err == nil {
+		// Reset the warm-start window so the next 30 fetches get paced.
+		f.iconRate.activateWarmStart()
+	}
+	return v, n, err
+}
+
+// StartPeriodicRefresh launches a background goroutine that syncs the
+// index on the configured interval. The returned function cancels the
+// goroutine; callers should defer it on shutdown.
+func (f *Fetcher) StartPeriodicRefresh(ctx context.Context) func() {
+	if f.index == nil {
+		return func() {}
+	}
+	return f.index.StartPeriodic(ctx)
 }
 
 // Icon returns the icon bytes and content type for the given model ID.
@@ -141,12 +229,49 @@ func (f *Fetcher) SetProxyMode(mode proxy.Mode) {
 // + fetch path. If a candidate 404s at the CDN, we fall through to the next
 // candidate WITHOUT caching the negative result — a transient gap in the CDN
 // catalog should not break icons permanently.
+//
+// Index integration: when the local Index is Ready, candidates not in the
+// index are skipped silently — no fetch, no log line. This eliminates the
+// 503-flood that occurs when the CDN is degraded, since "unknown slug"
+// never reaches the network. While the index is warming up (first start
+// before the first sync completes), candidates are tried unfiltered; a
+// one-shot warning is logged.
 func (f *Fetcher) Icon(modelID string) ([]byte, string, error) {
-	for _, slug := range CandidateSlugs(modelID) {
-		url := f.cdnURL(slug)
+	candidates := CandidateSlugs(modelID)
+	if len(candidates) == 0 {
+		return nil, "", nil
+	}
+
+	// Filter against the local index when it's ready. This is the main
+	// defense against CDN-outage log floods.
+	if f.index != nil && f.index.Ready() {
+		filtered := candidates[:0]
+		for _, s := range candidates {
+			if f.index.Contains(s) {
+				filtered = append(filtered, s)
+			}
+		}
+		candidates = filtered
+		if len(candidates) == 0 {
+			// Index says none of these slugs exist on the CDN. Quietly
+			// return no-icon; the HTTP handler will serve the dummy.
+			return nil, "", nil
+		}
+	} else if f.index != nil {
+		// Index exists but hasn't completed its first sync. Log once
+		// and fall through with unfiltered candidates so the user still
+		// sees icons during the warm-up window.
+		f.warmingOnce.Do(func() {
+			f.log.Printf("icons: index not ready, falling back to direct CDN fetches until first sync completes")
+		})
+		f.index.MaybeSync()
+	}
+
+	for _, slug := range candidates {
 		if slug == "" {
 			continue
 		}
+		url := f.cdnURL(slug)
 
 		// In-memory cache lookup
 		if data, ct, ok := f.mem.Get(url); ok {
@@ -157,9 +282,20 @@ func (f *Fetcher) Icon(modelID string) ([]byte, string, error) {
 			continue
 		}
 
-		// singleflight + disk + fetch. miss=true means the CDN has no file
-		// at this slug; we should try the next candidate instead of erroring.
+		// Token-bucket pacing — caps steady-state rate.
+		if err := f.iconRate.wait(context.Background()); err != nil {
+			return nil, "", err
+		}
+		// Concurrency cap — at most iconConcurrency fetches in flight.
+		select {
+		case f.iconSem <- struct{}{}:
+		default:
+			// All slots busy; wait for one. We can't return without a
+			// result, and we don't want to issue a free unbounded fetch.
+			f.iconSem <- struct{}{}
+		}
 		data, ct, miss, err := f.singleflightDo(url)
+		<-f.iconSem
 		if err != nil {
 			return nil, "", err
 		}
@@ -236,6 +372,12 @@ func (f *Fetcher) fetch(url string) ([]byte, string, bool, error) {
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			delay := retryBaseDelay * time.Duration(1<<(attempt-1))
+			if d := retryAfterFromErr(lastErr); d > delay {
+				delay = d
+			}
+			if delay > maxRetryAfter {
+				delay = maxRetryAfter
+			}
 			time.Sleep(delay)
 		}
 
@@ -246,8 +388,7 @@ func (f *Fetcher) fetch(url string) ([]byte, string, bool, error) {
 
 		lastErr = err
 
-		// Retryable: network errors and 5xx server errors (except 503 which
-		// might mean the CDN is truly down for this specific resource)
+		// Retryable: network errors and 5xx server errors.
 		isRetryable := false
 		if attempt < maxRetries {
 			if strings.Contains(err.Error(), "context deadline exceeded") {
@@ -264,6 +405,45 @@ func (f *Fetcher) fetch(url string) ([]byte, string, bool, error) {
 		}
 	}
 	return nil, "", false, lastErr
+}
+
+// errRetryAfter wraps an underlying error with the duration the CDN
+// asked us to wait. retryAfterFromErr extracts it; defaultRetryAfterFallback
+// is used when no header was sent.
+type errRetryAfter struct {
+	err error
+	d   time.Duration
+}
+
+func (e *errRetryAfter) Error() string { return e.err.Error() }
+func (e *errRetryAfter) Unwrap() error { return e.err }
+
+func retryAfterFromErr(err error) time.Duration {
+	var ra *errRetryAfter
+	if errors.As(err, &ra) {
+		return ra.d
+	}
+	return 0
+}
+
+// retryAfterWait parses an HTTP Retry-After header value and returns the
+// duration to wait. Returns 0 for missing/empty input (caller should NOT
+// sleep). Returns defaultRetryAfterFallback when the value can't be parsed
+// as integer seconds (matches the conservative behavior the spec suggests).
+func retryAfterWait(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	var secs int
+	if _, err := fmt.Sscanf(v, "%d", &secs); err != nil || secs < 0 {
+		return defaultRetryAfterFallback
+	}
+	d := time.Duration(secs) * time.Second
+	if d > maxRetryAfter {
+		d = maxRetryAfter
+	}
+	return d
 }
 
 func (f *Fetcher) doFetch(url string) ([]byte, string, bool, error) {
@@ -287,7 +467,11 @@ func (f *Fetcher) doFetch(url string) ([]byte, string, bool, error) {
 		return nil, "", true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", false, fmt.Errorf("fetch %s: status %d", url, resp.StatusCode)
+		baseErr := fmt.Errorf("fetch %s: status %d", url, resp.StatusCode)
+		if d := retryAfterWait(resp.Header.Get("Retry-After")); d > 0 {
+			return nil, "", false, &errRetryAfter{err: baseErr, d: d}
+		}
+		return nil, "", false, baseErr
 	}
 
 	ct := resp.Header.Get("Content-Type")
