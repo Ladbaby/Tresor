@@ -1655,7 +1655,10 @@ function renderAliasGroup(container, group) {
     const title = document.createElement('div');
     title.className = 'alias-group-title';
     const isRegexGroup = group.is_regex;
-    title.innerHTML = modelIconHTML(isRegexGroup ? '' : group.input_model_id) + esc(group.input_model_id) +
+    // For regex groups, the pattern itself often names the brand (e.g. "claude.*"),
+    // so we still pass the full pattern through the same /api/icons endpoint —
+    // the server's pattern table resolves the brand from the leading segment.
+    title.innerHTML = modelIconHTML(group.input_model_id) + esc(group.input_model_id) +
         (isRegexGroup ? '<span class="badge" style="background:#6e256d;color:#e879f9;margin-left:0.4rem;font-size:0.7rem;">regex</span>' : '');
     if (isRegexGroup) {
         title.appendChild(makeHelpIcon(tooltipTexts['alias.regex_badge']));

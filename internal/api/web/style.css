@@ -819,7 +819,7 @@ html[data-theme="light"] form select {
     align-items: center;
     gap: 0.5rem;
     font-size: 1rem;
-    font-weight: 600;
+    font-weight: 700;
     color: var(--text-heading);
 }
 
@@ -1454,6 +1454,11 @@ html[data-theme="light"] form select {
 [data-theme="dark"] .model-icon {
     background: rgba(255, 255, 255, 0.9);
     border-color: rgba(255, 255, 255, 0.14);
+}
+.alias-group-title .model-icon {
+    width: 26px;
+    height: 26px;
+    margin-right: 0;
 }
 
 /* Aliases tab — flip the visual hierarchy so the model brand glyph is the
