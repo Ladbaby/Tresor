@@ -125,7 +125,11 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
-		if ds.APIKey != "" {
+		// Mask the API key unless the caller explicitly opts in via ?reveal=1.
+		// The admin web UI uses this to populate the "Reveal" button in the
+		// downstream detail pane; the endpoint is admin-only (auth-protected)
+		// so revealing the key here is safe.
+		if req.URL.Query().Get("reveal") != "1" && ds.APIKey != "" {
 			ds.APIKey = "***"
 		}
 		writeJSON(w, http.StatusOK, ds)
@@ -222,6 +226,9 @@ func (r *Router) handleDownstreamModels(w http.ResponseWriter, req *http.Request
 }
 
 // handleDownstreamFetchModels handles POST /api/downstreams/{id}/fetch-models.
+// It returns the list of models discovered from the upstream provider without
+// auto-persisting them — callers decide which models to add via the
+// per-row POST /api/downstreams/{id}/models endpoints.
 func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Request, id string) {
 	ds, err := r.store.GetDownstream(id)
 	if err != nil {
@@ -235,24 +242,10 @@ func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Re
 		return
 	}
 
-	for _, m := range models {
-		if err := r.store.AddOutputModelID(id, m); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	if models == nil {
+		models = []string{}
 	}
-
-	// Reload to return updated downstream
-	ds, err = r.store.GetDownstream(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if ds.APIKey != "" {
-		ds.APIKey = "***"
-	}
-	r.requestConfigWrite()
-	writeJSON(w, http.StatusOK, ds)
+	writeJSON(w, http.StatusOK, map[string][]string{"model_ids": models})
 }
 
 // fetchModels calls the downstream provider's /models endpoint to discover available models.

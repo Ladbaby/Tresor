@@ -956,6 +956,438 @@ html[data-theme="light"] form select {
 }
 
 /* ============================================================
+   Downstreams Tab — sidebar + detail pane (cherry-studio style)
+   ============================================================ */
+
+.downstreams-layout {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 1rem;
+    height: calc(100vh - 180px);
+    min-height: 480px;
+    margin-top: 0.5rem;
+}
+
+.downstreams-sidebar {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    overflow: hidden;
+    min-height: 0;
+}
+
+.downstreams-search {
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+.downstreams-search input {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--text-primary);
+    padding: 0.7rem 0.85rem;
+    font-size: 0.875rem;
+    outline: none;
+    box-sizing: border-box;
+}
+.downstreams-search input::placeholder { color: var(--text-secondary); }
+.downstreams-search input:focus { background: var(--bg-tertiary); }
+
+.downstreams-list {
+    list-style: none;
+    margin: 0;
+    padding: 0.35rem;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+}
+
+.downstreams-list li {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.55rem 0.7rem;
+    border-radius: 7px;
+    cursor: pointer;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    margin-bottom: 2px;
+    transition: background-color 0.1s;
+}
+.downstreams-list li:hover { background: var(--bg-hover); }
+.downstreams-list li.selected {
+    background: var(--accent);
+    color: #fff;
+}
+.downstreams-list li.selected .ds-on-pill {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.4);
+}
+.downstreams-list li.selected .model-icon {
+    background: rgba(255, 255, 255, 0.85);
+    border-color: rgba(255, 255, 255, 0.6);
+}
+
+.downstreams-list .ds-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+}
+.downstreams-list .ds-on-pill {
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    padding: 0.12rem 0.5rem;
+    border-radius: 999px;
+    background: transparent;
+    border: 1px solid var(--success-text);
+    color: var(--success-text);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+.downstreams-list li.selected .ds-on-pill {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.5);
+}
+
+.btn-add-downstream-sidebar {
+    margin: 0.5rem;
+    padding: 0.55rem;
+    border: 1px dashed var(--border-color);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: all 0.1s;
+    flex-shrink: 0;
+}
+.btn-add-downstream-sidebar:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+
+/* ---- Detail pane (right) ---- */
+.downstreams-detail {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    overflow-y: auto;
+    padding: 1.5rem 1.75rem;
+    min-height: 0;
+}
+.downstreams-detail-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    padding: 4rem 1rem;
+    text-align: center;
+}
+
+.detail-header {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+.detail-header .model-icon {
+    width: 36px;
+    height: 36px;
+    padding: 4px;
+    border-radius: 9px;
+}
+.detail-header h2 {
+    margin: 0;
+    font-size: 1.4rem;
+    color: var(--text-heading);
+}
+.detail-header .header-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.detail-section { margin-bottom: 1.5rem; }
+.detail-section > label {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.4rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+}
+
+.detail-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+.detail-row code {
+    flex: 1;
+    padding: 0.55rem 0.75rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+.preview-hint {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 0.35rem;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    word-break: break-all;
+}
+
+.detail-format-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+.detail-format-row .format-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0.65rem;
+}
+
+.detail-models-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.4rem;
+    max-height: 340px;
+    overflow-y: auto;
+    padding-right: 0.25rem;
+}
+.detail-models-list li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.7rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+.detail-models-list li .model-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+.detail-footer {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 2rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border-color);
+}
+.detail-footer .btn-danger { margin-left: auto; }
+
+/* ---- Inline-editable detail pane ---- */
+.detail-edit-name {
+    width: 100%;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-heading);
+    font-size: 1.4rem;
+    font-weight: 600;
+    padding: 0.35rem 0.5rem;
+    margin: 0;
+    border-radius: 6px;
+    font-family: inherit;
+    box-sizing: border-box;
+}
+.detail-edit-name:hover { border-color: var(--border-color); background: var(--bg-tertiary); }
+.detail-edit-name:focus { outline: none; border-color: var(--accent); background: var(--bg-tertiary); }
+.detail-edit-name::placeholder { color: var(--text-secondary); font-style: italic; }
+
+.detail-edit-url,
+.detail-edit-key {
+    flex: 1;
+    padding: 0.55rem 0.75rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    outline: none;
+    min-width: 0;
+    box-sizing: border-box;
+}
+.detail-edit-url:focus,
+.detail-edit-key:focus { border-color: var(--accent); }
+.detail-edit-url::placeholder,
+.detail-edit-key::placeholder { color: var(--text-secondary); font-style: italic; }
+
+.detail-edit-key-wrap {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+}
+.eye-toggle {
+    flex-shrink: 0;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    width: 36px;
+    height: 36px;
+    cursor: pointer;
+    font-size: 1rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    line-height: 1;
+    color: var(--text-secondary);
+    transition: all 0.1s;
+}
+.eye-toggle:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+.eye-toggle.shown {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.detail-edit-models-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+    margin-bottom: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.detail-edit-add-model-row {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+    align-items: center;
+}
+.detail-edit-add-model-row input {
+    flex: 1;
+    padding: 0.45rem 0.65rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    outline: none;
+}
+.detail-edit-add-model-row input:focus { border-color: var(--accent); }
+
+.detail-empty-models {
+    color: var(--text-secondary);
+    font-style: italic;
+    font-size: 0.85rem;
+    padding: 0.4rem 0;
+}
+
+/* Inline editing state on the model chip — give the × button a clearer hit target */
+.detail-models-list li .model-id-remove {
+    margin-left: auto;
+    background: transparent;
+    border: 0;
+    color: var(--text-secondary);
+    font-size: 1rem;
+    line-height: 1;
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.detail-models-list li .model-id-remove:hover {
+    background: var(--danger);
+    color: #fff;
+}
+
+/* Header Delete icon button (replaces the old footer Delete + Copy ID) */
+.detail-header-delete {
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    width: 36px;
+    height: 36px;
+    cursor: pointer;
+    font-size: 1rem;
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    line-height: 1;
+    transition: all 0.1s;
+}
+.detail-header-delete:hover {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+}
+
+.toast {
+    position: fixed;
+    bottom: 1.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    padding: 0.55rem 1.1rem;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    font-size: 0.875rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    z-index: 9999;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+}
+.toast.visible { opacity: 1; }
+
+@media (max-width: 900px) {
+    .downstreams-layout {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(180px, 240px) 1fr;
+        height: auto;
+    }
+    .downstreams-sidebar { max-height: 240px; }
+    .downstreams-detail { min-height: 60vh; }
+}
+
+/* ============================================================
    Downstream Model Editor Styles
    ============================================================ */
 
@@ -1135,21 +1567,53 @@ html[data-theme="light"] form select {
     text-decoration: underline;
 }
 
-.model-ids-container {
+.model-ids-display {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
     margin-top: 0.3rem;
-    padding: 0.5rem;
+    padding: 0.4rem;
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 6px;
-    max-height: 200px;
-    overflow-y: auto;
+    min-height: 1.5rem;
+}
+
+.model-ids-display:empty::before {
+    content: 'No models added yet — use "Fetch from Provider" to populate this list.';
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-style: italic;
 }
 
 .model-id-row {
-    display: flex;
-    gap: 0.4rem;
+    display: inline-flex;
     align-items: center;
-    margin-bottom: 0.3rem;
+    gap: 0.35rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    color: var(--text-secondary);
+}
+
+.model-id-icon {
+    display: inline-flex;
+    align-items: center;
+}
+
+.model-id-icon .model-icon {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    margin: 0;
+    vertical-align: middle;
+}
+
+.model-id-label {
+    color: var(--text-primary);
 }
 
 .model-id-input {

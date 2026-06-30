@@ -57,57 +57,30 @@
                 <section id="tab-downstreams" class="tab-content">
                     <div class="header-actions">
                         <h2>Downstream Providers<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Manage the LLM providers and your API keys here (e.g., OpenAI, Claude, Deepseek.).">?</span></h2>
-                        <button id="btn-new-downstream" class="btn-primary">+ New Downstream</button>
                     </div>
-                    <table id="downstreams-table">
-                        <thead>
-                            <tr>
-                                <th>Name</th>
-                                <th>Format</th>
-                                <th>Base URL</th>
-                                <th>Models</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="downstreams-body">
-                            <tr><td colspan="5" class="loading">Loading...</td></tr>
-                        </tbody>
-                    </table>
-
-                    <!-- Downstream Editor Modal -->
-                    <div id="downstream-modal" class="modal hidden">
-                        <div class="modal-content">
-                            <span class="close">&times;</span>
-                            <h3 id="downstream-modal-title">New Downstream</h3>
-                            <form id="downstream-form">
-                                <input type="hidden" id="downstream-id">
-                                <label>Name: <input type="text" id="downstream-name" required></label>
-                                <label>Base URL:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Endpoint of the provider&apos;s API. Must include the path">?</span> <input type="text" id="downstream-url" placeholder="https://api.openai.com/v1"></label>
-                                <label>API Key: <input type="password" id="downstream-key"></label>
-                                <label>API Formats:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Which protocols this provider accepts. (e.g., Claude Code uses 'Anthropic', Codex uses 'OpenAI Responses', and llama.cpp accepts both 'OpenAI' and 'Anthropic'.)">?</span></label>
-                                <div class="format-checkboxes" id="format-checkboxes">
-                                    <label class="format-checkbox"><input type="checkbox" name="format" value="openai"><img class="format-icon icon-openai" src="icons/openai-completions.svg" alt="" aria-hidden="true"> OpenAI</label>
-                                    <label class="format-checkbox"><input type="checkbox" name="format" value="openai_responses"><img class="format-icon icon-openai_responses" src="icons/openai-responses.svg" alt="" aria-hidden="true"> OpenAI Responses</label>
-                                    <label class="format-checkbox"><input type="checkbox" name="format" value="anthropic"><img class="format-icon icon-anthropic" src="icons/anthropic.svg" alt="" aria-hidden="true"> Anthropic</label>
-                                </div>
-                                <label>Output Model IDs:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Models client apps can access from this provider. Add IDs manually or use 'Fetch from Provider' button (appears after filling out provider's information in above fields).">?</span>
-                                    <div id="model-ids-container"></div>
-                                    <button type="button" class="btn-small" id="btn-add-model-id" style="margin-top:0.3rem">+ Add Model</button>
-                                    <button type="button" class="btn-small" id="btn-fetch-models" style="margin-top:0.3rem">⟳ Fetch from Provider</button>
-                                </label>
-                                <button type="submit" class="btn-primary">Save</button>
-                            </form>
-                        </div>
+                    <div class="downstreams-layout">
+                        <aside class="downstreams-sidebar">
+                            <div class="downstreams-search">
+                                <input type="search" id="downstreams-search" placeholder="Search providers…" autocomplete="off">
+                            </div>
+                            <ul class="downstreams-list" id="downstreams-list"></ul>
+                            <button type="button" class="btn-add-downstream-sidebar" id="btn-add-downstream">＋ Add Provider</button>
+                        </aside>
+                        <section class="downstreams-detail" id="downstreams-detail">
+                            <div class="downstreams-detail-empty">No providers yet. Click ＋ Add Provider.</div>
+                        </section>
                     </div>
 
-                    <!-- Fetch Models Popup -->
+                    <!-- Fetch Models Popup — shown when user clicks "⟳ Fetch Models" in the detail pane.
+                         Each row has a + Add button that commits immediately to the underlying
+                         downstream. Closing the popup (via ×, background click, or Esc) commits
+                         nothing else — only the explicit + Add selections persist. -->
                     <div id="fetch-models-modal" class="modal hidden">
                         <div class="modal-content" style="max-width:500px;">
                             <span class="close">&times;</span>
                             <h3>Fetch Models from Provider</h3>
-                            <p class="text-muted" style="margin-bottom:1rem;">Click <strong>+ Add</strong> next to a model to add it to the output model IDs list.</p>
+                            <p class="text-muted" style="margin-bottom:1rem;">Click <strong>+ Add</strong> next to a model to add it to the output model IDs list. Click × to close without adding more.</p>
                             <div id="fetch-models-list" class="fetch-models-list"></div>
-                            <button type="button" class="btn-small" id="btn-fetch-models-close" style="width:100%;margin-top:0.75rem;">Done</button>
                         </div>
                     </div>
                 </section>
