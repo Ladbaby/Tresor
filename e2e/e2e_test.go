@@ -53,6 +53,12 @@ downstreams:
     api_key: azure-test-key
     output_model_ids:
       - gpt-4o
+  - id: minimax-test
+    name: MiniMax Test
+    base_url: https://example.invalid
+    api_key: sk-noop
+    output_model_ids:
+      - MiniMax-M2.5
 
 rules:
   - id: default
@@ -145,8 +151,8 @@ aliases:
 		if err := json.Unmarshal(body, &ds); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if len(ds) != 3 {
-			t.Fatalf("expected 3 downstreams, got %d", len(ds))
+		if len(ds) != 4 {
+			t.Fatalf("expected 4 downstreams, got %d", len(ds))
 		}
 	})
 
@@ -368,6 +374,73 @@ aliases:
 				t.Fatalf("%s: status %d, %d bytes", asset, resp.StatusCode, len(body))
 			}
 			t.Logf("%s: %d bytes", asset, len(body))
+		}
+	})
+
+	// Test 11: Icon endpoint is public and returns 404 for unknown model IDs.
+	// This is the only icon test that always runs — the success path requires
+	// network access to the icon CDN.
+	t.Run("IconEndpoint_UnknownModel404", func(t *testing.T) {
+		resp, err := client.Get(apiBase + "/api/icons/totally-unknown-model-xyz-12345")
+		if err != nil {
+			t.Fatalf("icon: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 404 {
+			t.Fatalf("expected 404 for unknown model, got %d", resp.StatusCode)
+		}
+	})
+
+	// Test 12: Icon endpoint returns SVG for a known model. Requires network.
+	t.Run("IconEndpoint_KnownModel", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("requires network access to icon CDN")
+		}
+		resp, err := client.Get(apiBase + "/api/icons/gpt-4o")
+		if err != nil {
+			t.Fatalf("icon: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			t.Fatalf("expected 200 for known model, got %d (body=%q)", resp.StatusCode, body)
+		}
+		if !bytes.HasPrefix(body, []byte("<?xml")) && !bytes.HasPrefix(body, []byte("<svg")) {
+			t.Fatalf("expected SVG content, got %q", body[:min(50, len(body))])
+		}
+		ct := resp.Header.Get("Content-Type")
+		if !bytes.HasPrefix([]byte(ct), []byte("image/svg")) {
+			t.Fatalf("expected image/svg+xml, got %q", ct)
+		}
+	})
+
+	// Test 13: First-segment fallback resolves model IDs the pattern table
+	// does not cover. We use "MiniMax-M2.5" which does NOT match any pattern
+	// (no gpt, claude, gemini, deepseek, llama, mistral, etc. inside). The
+	// daemon should derive the slug "minimax" from the first segment and
+	// either return the SVG (if the CDN has it) or 404 (if it does not).
+	// Either way, the endpoint must be reachable and return a final answer
+	// rather than erroring out.
+	t.Run("IconEndpoint_FirstSegmentFallback", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("requires network access to icon CDN")
+		}
+		resp, err := client.Get(apiBase + "/api/icons/MiniMax-M2.5")
+		if err != nil {
+			t.Fatalf("icon: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 && resp.StatusCode != 404 {
+			t.Fatalf("expected 200 or 404, got %d", resp.StatusCode)
+		}
+		if resp.StatusCode == 200 {
+			body, _ := io.ReadAll(resp.Body)
+			if !bytes.HasPrefix(body, []byte("<?xml")) && !bytes.HasPrefix(body, []byte("<svg")) {
+				t.Fatalf("expected SVG content, got %q", body[:min(50, len(body))])
+			}
+			t.Logf("fallback resolved minimax.svg: %d bytes", len(body))
+		} else {
+			t.Log("fallback 404'd (CDN lacks minimax.svg — expected on first deploy)")
 		}
 	})
 }

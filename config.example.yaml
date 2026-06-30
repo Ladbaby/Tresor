@@ -29,6 +29,11 @@ default_tab: "downstreams"
 # Request log verbosity: debug, info, warn, error (default: info)
 # log_level: "info"
 
+# Directory for cached model icon SVGs (fetched at runtime from a public CDN).
+# If empty/unset, defaults to <db_dir>/tresor-icons (e.g. ~/.config/tresor/tresor-icons/).
+# Tilde (~) is expanded to the user's home directory.
+# icon_cache_dir: "~/.config/tresor/tresor-icons/"
+
 # Downstream LLM providers
 downstreams:
   - id: openai

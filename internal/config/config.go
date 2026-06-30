@@ -35,6 +35,11 @@ type AppConfig struct {
 	// Entries below the selected level are filtered out. Default: info.
 	LogLevel string `yaml:"log_level,omitempty"`
 
+	// IconCacheDir is the directory where downloaded model icon SVGs are
+	// stored. If empty, defaults to <db_dir>/tresor-icons/ (the directory
+	// holding the SQLite DB). Tilde (~) is expanded to the user's home dir.
+	IconCacheDir string `yaml:"icon_cache_dir,omitempty"`
+
 	// Routing data (loaded into SQLite at startup via upsert)
 	Downstreams []DownstreamCfg   `yaml:"downstreams"`
 	Rules       []RuleCfg         `yaml:"rules"`
@@ -134,6 +139,9 @@ func Load(configPath string) (*AppConfig, error) {
 	// Expand tildes in paths
 	if cfg.SocketPath != "" {
 		cfg.SocketPath = expandTilde(cfg.SocketPath)
+	}
+	if cfg.IconCacheDir != "" {
+		cfg.IconCacheDir = expandTilde(cfg.IconCacheDir)
 	}
 
 	// Initialize empty slices to avoid nil

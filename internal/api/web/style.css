@@ -983,6 +983,23 @@ html[data-theme="light"] form select {
 [data-theme="dark"] .format-icon.icon-openai_responses { background: #fff; }
 [data-theme="dark"] .format-icon.icon-google { background: #0d1117; }
 
+/* Model icons — fetched at runtime from a public CDN, cached on disk by the
+   daemon, served via /api/icons/{modelID}. Slightly smaller than format
+   icons to fit inside dense chips (.model-list li, .option-model). */
+.model-icon {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    vertical-align: -2px;
+    margin-right: 0.3rem;
+    border-radius: 3px;
+    background: transparent;
+    flex-shrink: 0;
+}
+[data-theme="dark"] .model-icon {
+    background: rgba(255, 255, 255, 0.04);
+}
+
 .format-badge {
     display: inline-flex;
     align-items: center;

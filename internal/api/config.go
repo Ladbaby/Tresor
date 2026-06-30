@@ -136,6 +136,9 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		// Push the change to the running engine live.
 		r.engine.SetProxyMode(mode)
 		r.engine.SetProxyAuthKeys(incoming.ProxyAPIKeys)
+		if r.iconFetcher != nil {
+			r.iconFetcher.SetProxyMode(mode)
+		}
 
 		// Update auth middleware password live (only when explicitly provided).
 		if passwordProvided {

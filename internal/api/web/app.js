@@ -217,6 +217,17 @@ function formatIconHTML(formatId) {
     return `<img class="format-icon icon-${esc(formatId)}" src="${esc(src)}" alt="" aria-hidden="true">`;
 }
 
+// ---- Model icon helper ----
+// Returns an <img> tag pointing at /api/icons/{modelID}. The daemon looks up
+// the model name against its pattern table, lazily fetches the matching SVG
+// from a public CDN on first miss, and serves it back. If the model doesn't
+// match any pattern the endpoint returns 404 and the onerror handler hides
+// the broken image — so it's safe to call for any model ID.
+function modelIconHTML(modelID) {
+    if (!modelID) return '';
+    return `<img class="model-icon" src="/api/icons/${encodeURIComponent(modelID)}" alt="" loading="lazy" onerror="this.style.display='none'">`;
+}
+
 async function fetchPlugins() {
     if (cachedPlugins) return cachedPlugins;
     try {
@@ -790,7 +801,7 @@ async function loadDownstreams() {
                             const visible = models.slice(0, 3);
                             const extra = models.length - 3;
                             const id = esc(d.id);
-                            const lis = visible.map(m => '<li>' + m + '</li>').join('');
+                            const lis = visible.map(m => '<li>' + modelIconHTML(m) + esc(m) + '</li>').join('');
                             if (extra > 0) {
                                 return '<ul class="model-list">' + lis + '</ul>'
                                     + '<span class="model-extra" data-id="' + id + '">+ ' + extra + ' more</span>';
@@ -955,7 +966,7 @@ function showFetchModelsPopup(modelIds) {
 
         const name = document.createElement('span');
         name.className = 'fetch-model-name';
-        name.textContent = m;
+        name.innerHTML = modelIconHTML(m) + esc(m);
         row.appendChild(name);
 
         const addBtn = document.createElement('button');
@@ -1358,7 +1369,7 @@ function renderAliasGroup(container, group) {
     const title = document.createElement('div');
     title.className = 'alias-group-title';
     const isRegexGroup = group.is_regex;
-    title.innerHTML = esc(group.input_model_id) +
+    title.innerHTML = modelIconHTML(isRegexGroup ? '' : group.input_model_id) + esc(group.input_model_id) +
         (isRegexGroup ? '<span class="badge" style="background:#6e256d;color:#e879f9;margin-left:0.4rem;font-size:0.7rem;">regex</span>' : '');
     if (isRegexGroup) {
         title.appendChild(makeHelpIcon(tooltipTexts['alias.regex_badge']));
@@ -1398,10 +1409,10 @@ function renderAliasGroup(container, group) {
         btn.className = 'alias-option-btn' + (opt.is_active ? ' active' : '');
         btn.dataset.aliasId = opt.id;
 
-        // Output model line (top, larger)
+        // Output model line (top, larger) with model icon
         const modelLabel = document.createElement('div');
         modelLabel.className = 'option-model';
-        modelLabel.textContent = opt.output_model_id;
+        modelLabel.innerHTML = modelIconHTML(opt.output_model_id) + esc(opt.output_model_id);
         btn.appendChild(modelLabel);
 
         // Downstream name line with format icons (bottom, smaller)

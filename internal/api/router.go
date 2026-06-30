@@ -11,6 +11,7 @@ import (
 
 	"tresor/internal/config"
 	"tresor/internal/engine"
+	"tresor/internal/icons"
 	"tresor/internal/middleware"
 	"tresor/internal/store"
 )
@@ -32,6 +33,7 @@ type Router struct {
 	logger    *engine.RequestLogger
 	cfg       *config.AppConfig
 	authMW    *middleware.AuthMiddleware
+	iconFetcher *icons.Fetcher
 	version   string
 	buildTime string
 
@@ -43,7 +45,8 @@ type Router struct {
 
 // NewRouter creates an admin API router with all API endpoints.
 // It wires up session token persistence so all auth cookies survive daemon restarts.
-func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger, cfg *config.AppConfig, version, buildTime string) *Router {
+// iconFetcher may be nil in tests; when nil, /api/icons/ responds with 404.
+func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger, iconFetcher *icons.Fetcher, cfg *config.AppConfig, version, buildTime string) *Router {
 	authMW := middleware.NewAuthMiddleware(cfg.AdminPassword)
 
 	// Wire persistence hooks so every session token is saved to SQLite,
@@ -62,13 +65,14 @@ func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger,
 	}
 
 	return &Router{
-		store:     s,
-		engine:    eng,
-		logger:    logger,
-		cfg:       cfg,
-		authMW:    authMW,
-		version:   version,
-		buildTime: buildTime,
+		store:       s,
+		engine:      eng,
+		logger:      logger,
+		cfg:         cfg,
+		authMW:      authMW,
+		iconFetcher: iconFetcher,
+		version:     version,
+		buildTime:   buildTime,
 	}
 }
 
@@ -121,6 +125,10 @@ func (r *Router) Handler() http.Handler {
 			"build_time": r.buildTime,
 		})
 	})
+
+	// Public icon endpoint — no auth required, hits in <img> tags. Trailing
+	// slash is required so ServeMux dispatches /api/icons/{modelID} here.
+	mux.HandleFunc("/api/icons/", r.handleIcon)
 
 	mux.Handle("/api/log_level", r.authMW.Protect(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodGet {

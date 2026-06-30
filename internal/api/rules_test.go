@@ -31,7 +31,9 @@ func newTestRouter(t *testing.T) *Router {
 	cfg := &config.AppConfig{DBPath: f.Name()}
 	eng := engine.New(s)
 	logger := engine.NewRequestLogger()
-	return NewRouter(s, eng, logger, cfg, "test", "unknown")
+	// Pass nil for iconFetcher — the rules tests don't exercise /api/icons/,
+	// and the handler returns 404 when the fetcher is nil.
+	return NewRouter(s, eng, logger, nil, cfg, "test", "unknown")
 }
 
 // --- New extended tests below ---

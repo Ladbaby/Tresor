@@ -1,4 +1,5 @@
 .agents/*
+tresor-icons/*
 config.yaml
 notes.md
 *.db

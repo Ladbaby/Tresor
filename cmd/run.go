@@ -6,11 +6,13 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"tresor/internal/api"
 	"tresor/internal/config"
 	"tresor/internal/engine"
+	"tresor/internal/icons"
 	"tresor/internal/plugins"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
@@ -69,8 +71,21 @@ func runDaemon(cfg *config.AppConfig) error {
 	// Configure outbound proxy for downstream requests
 	eng.SetProxyMode(proxy.Mode(cfg.ProxyMode))
 
-	// Configure incoming proxy request authentication
+	// Configure inbound proxy request authentication
 	eng.SetProxyAuthKeys(cfg.ProxyAPIKeys)
+
+	// Build icon fetcher — resolves model IDs to SVG icons, lazily fetching
+	// from a public CDN on first miss and caching to disk beside the DB.
+	// Default cache dir is <db_dir>/tresor-icons unless icon_cache_dir is set
+	// in the YAML.
+	iconCacheDir := cfg.IconCacheDir
+	if iconCacheDir == "" {
+		iconCacheDir = filepath.Join(filepath.Dir(cfg.DBPath), "tresor-icons")
+	}
+	iconFetcher, err := icons.NewWithProxyMode(iconCacheDir, proxy.Mode(cfg.ProxyMode))
+	if err != nil {
+		return fmt.Errorf("init icon fetcher: %w", err)
+	}
 
 	// Initialize request logger
 	logger := engine.NewRequestLogger()
@@ -86,7 +101,7 @@ func runDaemon(cfg *config.AppConfig) error {
 	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel)
 
 	// Build admin API router
-	adminRouter := api.NewRouter(s, eng, logger, cfg, Version, BuildTime)
+	adminRouter := api.NewRouter(s, eng, logger, iconFetcher, cfg, Version, BuildTime)
 	webHandler := api.WebHandler()
 
 	// Start listening
