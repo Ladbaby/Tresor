@@ -26,6 +26,13 @@ func TestResolve(t *testing.T) {
 		// Gemini → color twin
 		{"gemini-2.5-pro", "gemini-color"},
 		{"gemini-2.5-flash-image", "gemini-color"},
+		// Gemma (Google open family) — no hard-coded pattern; falls through
+		// to the first-segment fallback (after the v-digit strip), which
+		// in CandidateSlugs becomes "gemma-color" then "gemma".
+		// Resolved primary is therefore "" for the bare-gemma cases.
+		{"gemma4:e4b", ""},
+		{"gemma-7b", ""},
+		{"Gemma-2-9b-it", ""},
 		// DeepSeek → color twin
 		{"deepseek-chat", "deepseek-color"},
 		{"deepseek-reasoner", "deepseek-color"},
@@ -102,6 +109,24 @@ func TestFirstSegmentFallback(t *testing.T) {
 		{"foo-", "foo"},
 		{"-foo", ""},
 		{"---", ""},
+		// Colon-separated (e.g. Ollama-style model:tag forms) — split on
+		// ":" the same as "-". Trailing digits on the first segment
+		// (version numbers like gemma4, qwen3) get stripped so the bare
+		// vendor name is tried as the fallback slug.
+		{"gemma4:e4b", "gemma"},
+		{"qwen3:8b", "qwen"},
+		{":tag-only", ""},
+		{":::---", ""},
+		// Plain (no delimiter) versioned names also collapse to the bare
+		// vendor.
+		{"gemma4", "gemma"},
+		{"qwen3", "qwen"},
+		{"llama3", "llama"},
+		// Leading digits are kept if a letter is also present (digits-
+		// only first segments still get rejected by the letter check).
+		{"o3", "o"}, // v-digit strip → "o", letter check passes
+		{"4-bit-quantized", ""}, // hyphen split → "4", letter check fails
+		{"qwen3.5", "qwen3."},  // trailing dot preserved; primary pattern covers qwen anyway
 		{"", ""},
 		{"   bar-baz  ", "bar"},
 		{"🦀-something", ""}, // no a-z or 0-9 in first segment
@@ -146,6 +171,13 @@ func TestCandidateSlugs(t *testing.T) {
 		{"", nil, "empty input"},
 		// No "-" delimiter, primary empty → single segment as fallback (with color variant).
 		{"singleVendor", []string{"singlevendor-color", "singlevendor"}, "no primary, single segment"},
+		// Gemma has no hard-coded pattern; the v-digit-strip fallback
+		// collapses "gemma4" → "gemma", so "gemma-color" then "gemma"
+		// are tried in order (no primary to dedupe against).
+		{"gemma4:e4b", []string{"gemma-color", "gemma"}, "no primary; v-digit strip yields 'gemma'"},
+		// A non-versioned colon name with no primary still passes the letter
+		// check and degrades to the bare vendor + the -color twin.
+		{"some:future:model-xyz", []string{"some-color", "some"}, "no primary; fb='some'"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {

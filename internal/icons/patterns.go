@@ -71,44 +71,65 @@ func Resolve(modelID string) string {
 }
 
 // firstSegmentFallback extracts the substring of modelID up to (but not
-// including) the first "-" character. If no "-" is present, the whole string
-// (trimmed of leading/trailing whitespace) is used. The result is lowercased.
+// including) the first "-" or ":" delimiter. If no delimiter is present,
+// the whole string (trimmed of leading/trailing whitespace) is used.
+//
+// Then any trailing ASCII digits are stripped from that first segment so
+// versioned vendor names ("gemma4", "qwen3.5", "claude3", "llama3") collapse
+// to the bare vendor ("gemma", "qwen", "claude", "llama") before being
+// used as a CDN slug. The result is lowercased.
 //
 // Examples:
 //
 //	"MiniMax-M2.5"        -> "minimax"
 //	"minimax-m2.5"        -> "minimax"
 //	"my-custom-model-xyz" -> "my"
+//	"gemma4:e4b"          -> "gemma"
+//	"qwen3.5:9b"          -> "qwen3."  (leading-digit-strip leaves a dot; the
+//	                                    CDN lookups fall through to whatever
+//	                                    the primary pattern already resolved)
+//	"qwen-max"            -> "qwen"
 //	"foo"                 -> "foo"
 //	"   -   "             -> ""
 //	""                    -> ""
 //
-// We only return a non-empty slug when at least one ASCII letter or digit
-// is present, so a bare "-" or whitespace doesn't accidentally hit a CDN
-// root path.
+// We only return a non-empty slug when at least one ASCII letter (not
+// just digits) is present in the first segment, so a bare "4" or
+// whitespace doesn't accidentally hit a CDN root path.
 func firstSegmentFallback(modelID string) string {
 	s := strings.TrimSpace(modelID)
 	if s == "" {
 		return ""
 	}
-	if i := strings.Index(s, "-"); i >= 0 {
+	if i := firstSegmentCut(s); i >= 0 {
 		s = s[:i]
 	}
+	s = strings.TrimRight(s, "0123456789")
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" {
 		return ""
 	}
-	hasAlnum := false
+	hasLetter := false
 	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			hasAlnum = true
+		if r >= 'a' && r <= 'z' {
+			hasLetter = true
 			break
 		}
 	}
-	if !hasAlnum {
+	if !hasLetter {
 		return ""
 	}
 	return s
+}
+
+// firstSegmentCut returns the byte index of the first "-" or ":" in s, or
+// -1 if neither is present.
+func firstSegmentCut(s string) int {
+	i := strings.IndexAny(s, "-:")
+	if i < 0 {
+		return -1
+	}
+	return i
 }
 
 // CandidateSlugs returns the ordered list of slug candidates to try for a
