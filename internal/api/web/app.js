@@ -255,6 +255,10 @@ async function fetchDownstreams() {
 async function loadRules() {
     const tbody = document.getElementById('rules-body');
     try {
+        // Ensure downstream cache is populated so match badges can resolve
+        // friendly names instead of falling back to raw IDs on a race with
+        // loadDownstreams() (which also fires from showDashboard()).
+        await fetchDownstreams();
         const rules = await api('/rules');
         tbody.innerHTML = rules.length === 0
             ? '<tr><td colspan="7" class="loading">No rules configured</td></tr>'
@@ -278,11 +282,18 @@ async function loadRules() {
                     badges.push(`<span class="format-badge ${cls}">out:${formatIconHTML(f)}${esc(formatLabels[f] || f)}</span>`);
                 });
 
-                // Downstream ID badges (grey)
+                // Downstream ID badges (grey). When an ID doesn't resolve to a
+                // known downstream (e.g. it was deleted without a cascade
+                // cleanup, or loaded from a stale YAML), flag it as missing so
+                // the user can tell the rule has a dangling reference — the
+                // engine never matches against unknown IDs anyway.
                 dsIds.forEach(id => {
                     const ds = (cachedDownstreams || []).find(d => d.id === id);
-                    const label = ds ? ds.name : id;
-                    badges.push(`<span class="badge">ds:${esc(label)}</span>`);
+                    if (ds) {
+                        badges.push(`<span class="badge">ds:${esc(ds.name)}</span>`);
+                    } else {
+                        badges.push(`<span class="badge badge-missing" title="Downstream ${esc(id)} no longer exists — this rule will never match">ds:${esc(id)} (missing)</span>`);
+                    }
                 });
 
                 const matchCell = badges.length > 0

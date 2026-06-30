@@ -355,6 +355,18 @@ tr:hover {
     border: 1px solid var(--border-color);
 }
 
+/* Downstream ID badge rendered when the referenced downstream doesn't exist
+   in the cache. Visually distinct (danger-tinted) and shows the raw ID plus a
+   "(missing)" suffix so the user can tell at a glance that the rule's match
+   filter will never fire. */
+.badge-missing {
+    color: var(--danger-hover);
+    border-color: var(--danger);
+    background: var(--danger-bg);
+    text-decoration: line-through;
+    text-decoration-color: var(--danger);
+}
+
 /* Log level indicator bar */
 .log-level-bar {
     display: inline-block;
@@ -615,7 +627,10 @@ html[data-theme="light"] form select {
 }
 
 .pipeline-step-header select {
-    background: var(--input-bg);
+    /* background (not background-color) here would clobber the custom SVG
+       arrow set by the global `select` rule, letting the native chevron
+       leak through and render as a stack of triangles in Chromium/Edge. */
+    background-color: var(--input-bg);
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
