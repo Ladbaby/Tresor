@@ -1907,10 +1907,17 @@ function populateOutputModelSelect(containerEl, downstreamId, excludeModels) {
         cb.style.display = 'none';
         tag.appendChild(cb);
 
-        const icon = document.createElement('span');
-        icon.className = 'model-tag-icon';
-        icon.textContent = '☐';
-        tag.appendChild(icon);
+        // Render the provider's model icon (CDN-backed SVG), hidden gracefully
+        // on miss via onerror in modelIconHTML.
+        const iconWrap = document.createElement('span');
+        iconWrap.className = 'model-tag-model-icon';
+        iconWrap.innerHTML = modelIconHTML(m);
+        tag.appendChild(iconWrap);
+
+        const checkGlyph = document.createElement('span');
+        checkGlyph.className = 'model-tag-icon';
+        checkGlyph.textContent = '☐';
+        tag.appendChild(checkGlyph);
 
         const name = document.createElement('span');
         name.className = 'model-tag-name';
@@ -1920,7 +1927,7 @@ function populateOutputModelSelect(containerEl, downstreamId, excludeModels) {
         tag.addEventListener('click', () => {
             cb.checked = !cb.checked;
             tag.classList.toggle('selected', cb.checked);
-            icon.textContent = cb.checked ? '☑' : '☐';
+            checkGlyph.textContent = cb.checked ? '☑' : '☐';
         });
 
         wrap.appendChild(tag);

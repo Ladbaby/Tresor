@@ -1718,6 +1718,20 @@ html[data-theme="light"] form select {
     color: var(--accent);
 }
 
+/* Provider/model glyph inside the tag chip — shrink from the default 24px
+   (used by downstream cards) to match the compact pill height. */
+.model-tag .model-icon {
+    width: 22px;
+    height: 22px;
+    padding: 1px;
+    margin-right: 0;
+    border-radius: 6px;
+    border-width: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border-color: transparent;
+    vertical-align: middle;
+}
+
 .model-tag-icon {
     font-size: 0.7rem;
     line-height: 1;
@@ -1730,7 +1744,7 @@ html[data-theme="light"] form select {
 
 .model-tag-name {
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-    font-size: 0.75rem;
+    font-size: 0.85rem;
 }
 
 .model-multi-empty {
