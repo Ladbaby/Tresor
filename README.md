@@ -68,6 +68,7 @@ Tresor is a single binary with two modes:
 - 🔌 **Plugin Pipeline** — Chain transformation plugins per rule (header injection, image fix, format conversion, and more). Eight built-in plugins cover all common format combinations.
 - 🛤️ **Per-Path Routing** — Route different API paths (and models) to different providers based on configurable rules.
 - 🌐 **Embedded Web UI** — Manage everything from a browser dashboard. No separate frontend deployment.
+- 🖼️ **Model & Provider Icons** — Visual icons for models and providers in the web UI, auto-matched based on provider patterns.
 - 📝 **Single Config File** — All settings in one portable YAML file. Changes via the web UI write back automatically.
 - 🔑 **Proxy Authentication** — Require clients to authenticate via `Authorization: Bearer` or `x-api-key` headers (supports Anthropic-format clients like Claude Office plugin).
 - 📋 **Aggregated Model Listing** — Gateway exposes `/v1/models` listing all known models from every downstream and alias, formatted as an OpenAI-compatible response.
@@ -195,6 +196,9 @@ Full documentation is available at **[ladbaby.github.io/Tresor-docs/](https://la
 
 ## 📜 Acknowledgement
 
+- [codex-proxy](https://github.com/icebear0828/codex-proxy): API translation reference.
+- [Cherry Studio](https://github.com/CherryHQ/cherry-studio): API endpoint testing utility and UI design reference.
+- [LobeHub](https://github.com/lobehub/lobehub): Icons for models and providers.
 - [llama.cpp](https://github.com/ggml-org/llama.cpp): Memory saving LLM inference.
 - [Qwen & Unsloth](https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF): High quality local LLM.
 - [Google Gemini](https://gemini.google.com/): Icon creation.
