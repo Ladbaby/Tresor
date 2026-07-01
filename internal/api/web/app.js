@@ -2305,6 +2305,19 @@ async function fetchLogs() {
 }
 
 /**
+ * Find the insertion index for a new entry in the descending-id logEntries array.
+ */
+function findLogInsertIndex(id) {
+    let lo = 0, hi = logEntries.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (logEntries[mid].id > id) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/**
  * Connect to the SSE log stream. Called when the Logs tab becomes active.
  */
 function connectLogStream() {
@@ -2335,11 +2348,14 @@ function connectLogStream() {
         try { entry = JSON.parse(e.data); } catch { return; }
         // Skip if already in memory (e.g. from REST fetch)
         if (logEntries.some(function (e2) { return e2.id === entry.id; })) return;
-        // Prepend to in-memory array (newest first)
-        logEntries.unshift(entry);
+        // Insert at sorted position (descending by id) so out-of-order arrivals
+        // (e.g. after EventSource auto-reconnect while window was minimized)
+        // don't corrupt the display order.
+        const idx = findLogInsertIndex(entry.id);
+        logEntries.splice(idx, 0, entry);
         if (logEntries.length > 500) logEntries.pop();
         if (logPaused) return; // skip rendering while paused
-        prependLogEntry(entry, true);
+        prependLogEntry(entry, true, idx);
     });
 
     logSSE.addEventListener('config', function (e) {
@@ -2355,7 +2371,18 @@ function connectLogStream() {
     });
 
     logSSE.addEventListener('error', function () {
-        if (badge) { badge.textContent = '✗ Offline'; badge.style.background = 'var(--color-danger)'; }
+        if (!logSSE) return;
+        if (logSSE.readyState === EventSource.CLOSED) {
+            // Browser has given up reconnecting; rebuild so the initial batch
+            // re-establishes correct ordering after long disconnects (e.g. window
+            // minimized for a while).
+            logSSE.close();
+            logSSE = null;
+            fetchLogs();
+            connectLogStream();
+            return;
+        }
+        if (badge) { badge.textContent = '⟳ Reconnecting'; badge.style.background = '#d49e00'; }
     });
 
     // When tab becomes inactive, close SSE to save resources
@@ -2535,15 +2562,23 @@ function buildLogEntry(entry, isNew) {
 /**
  * Prepend a log entry (newest at top).
  */
-function prependLogEntry(entry, isNew) {
+function prependLogEntry(entry, isNew, insertIndex) {
     const container = document.getElementById('logs-stream');
     if (!container) return;
 
     const div = buildLogEntry(entry, isNew);
-    if (container.firstChild) {
-        container.insertBefore(div, container.firstChild);
+    if (insertIndex == null || insertIndex >= container.children.length) {
+        // Default: prepend to top (newest-first when entries arrive in order)
+        if (container.firstChild) {
+            container.insertBefore(div, container.firstChild);
+        } else {
+            container.appendChild(div);
+        }
     } else {
-        container.appendChild(div);
+        // Out-of-order arrival: place at the matching DOM position so the
+        // rendered order matches the sorted logEntries array.
+        const ref = container.children[insertIndex];
+        container.insertBefore(div, ref);
     }
 
     // Remove oldest entries from bottom if exceeding 500
