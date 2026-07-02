@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -156,12 +155,6 @@ func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool 
 	}
 
 	if _, ok := e.proxyAuth.keys[token]; !ok {
-		if os.Getenv("TRESOR_DEBUG_PROXY") != "" {
-			log.Printf("=== TRESOR_DEBUG_PROXY auth FAILED ===")
-			log.Printf("  Token seen in headers (length %d, first 8 chars): %q", len(token), redactToken(token))
-			log.Printf("  Allow-list size: %d", len(e.proxyAuth.keys))
-			log.Printf("=== TRESOR_DEBUG_PROXY end ===")
-		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -169,9 +162,6 @@ func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool 
 			"message": "invalid or missing proxy API key",
 		})
 		return false
-	}
-	if os.Getenv("TRESOR_DEBUG_PROXY") != "" {
-		log.Printf("=== TRESOR_DEBUG_PROXY auth OK (token matched, via %s) ===", authSource(r, queryHadKey))
 	}
 
 	// Strip the client's auth header so it doesn't leak to downstream.
@@ -187,34 +177,6 @@ func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool 
 	}
 
 	return true
-}
-
-// authSource returns a short human label for which header/query carried the
-// matched token, used only when TRESOR_DEBUG_PROXY is set.
-func authSource(r *http.Request, queryHadKey bool) string {
-	if queryHadKey {
-		return "query ?key="
-	}
-	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
-		return "Authorization: Bearer"
-	}
-	if r.Header.Get("x-api-key") != "" {
-		return "x-api-key"
-	}
-	if r.Header.Get("x-goog-api-key") != "" {
-		return "x-goog-api-key"
-	}
-	return "unknown"
-}
-
-// redactToken returns a short, non-secret prefix of a token for debug logs.
-// Long enough to disambiguate "starts with sk-" vs "starts with nvapi-" vs
-// bare alphanumeric, but never the full secret.
-func redactToken(t string) string {
-	if len(t) <= 8 {
-		return t
-	}
-	return t[:8] + "...(" + strconv.Itoa(len(t)) + " chars)"
 }
 
 // Registry returns the current plugin registry.
@@ -462,46 +424,8 @@ func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store
 	return pipeline, rules, nil
 }
 
-// dumpIncomingRequest logs the method, path, all headers, and the (possibly
-// truncated) body of an incoming request. Enabled only when the
-// TRESOR_DEBUG_PROXY env var is non-empty, to avoid noise during normal runs.
-func dumpIncomingRequest(r *http.Request) {
-	if os.Getenv("TRESOR_DEBUG_PROXY") == "" {
-		return
-	}
-	log.Printf("=== TRESOR_DEBUG_PROXY incoming request ===")
-	log.Printf("  Method: %s", r.Method)
-	log.Printf("  URL:    %s", r.URL.String())
-	log.Printf("  Host:   %s", r.Host)
-	log.Printf("  RemoteAddr: %s", r.RemoteAddr)
-	log.Printf("  Headers:")
-	keys := make([]string, 0, len(r.Header))
-	for k := range r.Header {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		for _, v := range r.Header[k] {
-			log.Printf("    %s: %s", k, v)
-		}
-	}
-	if r.Body != nil {
-		const maxBody = 4096
-		body, _ := io.ReadAll(io.LimitReader(r.Body, maxBody))
-		if len(body) == maxBody {
-			log.Printf("  Body:   (%d+ bytes, truncated to first %d): %s", len(body), maxBody, string(body))
-		} else {
-			log.Printf("  Body:   (%d bytes): %s", len(body), string(body))
-		}
-		// Restore body so downstream code can re-read it.
-		r.Body = io.NopCloser(bytes.NewReader(body))
-	}
-	log.Printf("=== TRESOR_DEBUG_PROXY end ===")
-}
-
 // HandleProxy is the main proxy handler for LLM requests.
 func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
-	dumpIncomingRequest(r)
 	corsHeaders(w)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
