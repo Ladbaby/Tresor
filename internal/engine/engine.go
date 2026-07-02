@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -117,7 +118,8 @@ func (e *Engine) SetProxyAuthKeys(keys []string) {
 
 // validateProxyAuth checks the proxy API key sent by the client, supporting
 // Authorization: Bearer <key>, x-api-key: <key>, and x-goog-api-key: <key> headers
-// (the latter two are used by Anthropic- and Gemini-format clients respectively).
+// (the latter two are used by Anthropic- and Gemini-format clients respectively),
+// and the ?key=<key> query parameter on Gemini paths (/v1beta/*).
 // If auth is enabled and the key is invalid, it writes a 401 response and returns false.
 // On success (or when auth is disabled), it returns true and strips the auth header
 // from the request so the downstream's own API key can be injected cleanly.
@@ -142,8 +144,24 @@ func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool 
 			token = xgak
 		}
 	}
+	// Gemini paths also accept the key via the ?key=<token> query parameter.
+	// Cherry Studio (and Google's own SDKs) use this form. Only honor it on
+	// Gemini paths so other formats can't smuggle credentials through the URL.
+	queryHadKey := false
+	if token == "" && strings.HasPrefix(r.URL.Path, "/v1beta/") {
+		if qk := r.URL.Query().Get("key"); qk != "" {
+			token = qk
+			queryHadKey = true
+		}
+	}
 
 	if _, ok := e.proxyAuth.keys[token]; !ok {
+		if os.Getenv("TRESOR_DEBUG_PROXY") != "" {
+			log.Printf("=== TRESOR_DEBUG_PROXY auth FAILED ===")
+			log.Printf("  Token seen in headers (length %d, first 8 chars): %q", len(token), redactToken(token))
+			log.Printf("  Allow-list size: %d", len(e.proxyAuth.keys))
+			log.Printf("=== TRESOR_DEBUG_PROXY end ===")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -152,14 +170,51 @@ func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool 
 		})
 		return false
 	}
+	if os.Getenv("TRESOR_DEBUG_PROXY") != "" {
+		log.Printf("=== TRESOR_DEBUG_PROXY auth OK (token matched, via %s) ===", authSource(r, queryHadKey))
+	}
 
 	// Strip the client's auth header so it doesn't leak to downstream.
 	// The downstream will receive its own API key from config.
 	r.Header.Del("Authorization")
 	r.Header.Del("x-api-key")
 	r.Header.Del("x-goog-api-key")
+	// Strip ?key= from the URL so the proxy key isn't forwarded to the downstream.
+	if queryHadKey {
+		q := r.URL.Query()
+		q.Del("key")
+		r.URL.RawQuery = q.Encode()
+	}
 
 	return true
+}
+
+// authSource returns a short human label for which header/query carried the
+// matched token, used only when TRESOR_DEBUG_PROXY is set.
+func authSource(r *http.Request, queryHadKey bool) string {
+	if queryHadKey {
+		return "query ?key="
+	}
+	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		return "Authorization: Bearer"
+	}
+	if r.Header.Get("x-api-key") != "" {
+		return "x-api-key"
+	}
+	if r.Header.Get("x-goog-api-key") != "" {
+		return "x-goog-api-key"
+	}
+	return "unknown"
+}
+
+// redactToken returns a short, non-secret prefix of a token for debug logs.
+// Long enough to disambiguate "starts with sk-" vs "starts with nvapi-" vs
+// bare alphanumeric, but never the full secret.
+func redactToken(t string) string {
+	if len(t) <= 8 {
+		return t
+	}
+	return t[:8] + "...(" + strconv.Itoa(len(t)) + " chars)"
 }
 
 // Registry returns the current plugin registry.
@@ -407,8 +462,46 @@ func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store
 	return pipeline, rules, nil
 }
 
+// dumpIncomingRequest logs the method, path, all headers, and the (possibly
+// truncated) body of an incoming request. Enabled only when the
+// TRESOR_DEBUG_PROXY env var is non-empty, to avoid noise during normal runs.
+func dumpIncomingRequest(r *http.Request) {
+	if os.Getenv("TRESOR_DEBUG_PROXY") == "" {
+		return
+	}
+	log.Printf("=== TRESOR_DEBUG_PROXY incoming request ===")
+	log.Printf("  Method: %s", r.Method)
+	log.Printf("  URL:    %s", r.URL.String())
+	log.Printf("  Host:   %s", r.Host)
+	log.Printf("  RemoteAddr: %s", r.RemoteAddr)
+	log.Printf("  Headers:")
+	keys := make([]string, 0, len(r.Header))
+	for k := range r.Header {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, v := range r.Header[k] {
+			log.Printf("    %s: %s", k, v)
+		}
+	}
+	if r.Body != nil {
+		const maxBody = 4096
+		body, _ := io.ReadAll(io.LimitReader(r.Body, maxBody))
+		if len(body) == maxBody {
+			log.Printf("  Body:   (%d+ bytes, truncated to first %d): %s", len(body), maxBody, string(body))
+		} else {
+			log.Printf("  Body:   (%d bytes): %s", len(body), string(body))
+		}
+		// Restore body so downstream code can re-read it.
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	log.Printf("=== TRESOR_DEBUG_PROXY end ===")
+}
+
 // HandleProxy is the main proxy handler for LLM requests.
 func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
+	dumpIncomingRequest(r)
 	corsHeaders(w)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -434,6 +527,18 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	if r.URL.Path == "/v1/models" || r.URL.Path == "/models" {
 		e.handleModels(cw)
+		entry.Status = cw.status
+		entry.Duration = DurationMs(time.Since(start))
+		e.logger.Record(entry)
+		return
+	}
+
+	// Gemini-format model listing: GET /v1beta/models (no model suffix).
+	// Cherry Studio and Google's SDKs call this to discover available models.
+	// Returns a Gemini-style {models: [...], nextPageToken} response aggregated
+	// from downstreams that support the gemini API format.
+	if r.URL.Path == "/v1beta/models" {
+		e.handleGeminiModels(r, cw)
 		entry.Status = cw.status
 		entry.Duration = DurationMs(time.Since(start))
 		e.logger.Record(entry)
@@ -1046,5 +1151,145 @@ func (e *Engine) handleModels(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"object": "list",
 		"data":   deduped,
+	})
+}
+
+// geminiModelRecord is one entry in the Gemini-format /v1beta/models listing.
+// Google's schema is documented at
+// https://ai.google.dev/api/models#method:-models.list — we emit the fields
+// that Gemini-format clients (e.g. Cherry Studio) actually consume, namely
+// `name` (the model identifier, e.g. "models/gemini-2.5-pro") and `displayName`.
+type geminiModelRecord struct {
+	Name                     string   `json:"name"`
+	DisplayName              string   `json:"displayName,omitempty"`
+	Description              string   `json:"description,omitempty"`
+	Version                  string   `json:"version,omitempty"`
+	InputTokenLimit          int      `json:"inputTokenLimit,omitempty"`
+	OutputTokenLimit         int      `json:"outputTokenLimit,omitempty"`
+	SupportedGenerationMethods []string `json:"supportedGenerationMethods,omitempty"`
+}
+
+// handleGeminiModels responds to GET /v1beta/models with a Gemini-format list
+// of available models. We surface every downstream model regardless of the
+// downstream's configured `api_formats`: when a Gemini-format request comes
+// in for a downstream that speaks OpenAI or Anthropic, the engine auto-
+// inserts the appropriate Gemini->OpenAI or Gemini->Anthropic transformer
+// (see buildPipeline). Hiding those models here would be a lie about what's
+// reachable.
+//
+// Alias inputs (the model name the client uses to talk to the gateway) are
+// also surfaced so human-friendly alias names appear in the picker.
+//
+// Query parameters honored:
+//   - pageSize:  cap on returned entries (default 1000, max 1000 to match Google's behavior)
+//   - pageToken: opaque cursor returned in the previous response; we don't paginate
+//                (all results fit in one page unless the catalog grows huge), so we
+//                accept and ignore it but never emit one.
+//
+// Proxy auth is validated by HandleProxy before reaching this function.
+func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
+	const maxPageSize = 1000
+	const defaultPageSize = 1000
+	pageSize := defaultPageSize
+	if ps := r.URL.Query().Get("pageSize"); ps != "" {
+		if n, err := strconv.Atoi(ps); err == nil && n > 0 {
+			if n > maxPageSize {
+				n = maxPageSize
+			}
+			pageSize = n
+		}
+	}
+
+	downstreams, err := e.store.ListDownstreams()
+	if err != nil {
+		log.Printf("Error listing downstreams for gemini models: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	aliases, err := e.store.ListAliases()
+	if err != nil {
+		log.Printf("Error listing aliases for gemini models: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Build a downstream-id -> name map so we can attribute models to their
+	// upstream in the description field.
+	dsName := make(map[string]string, len(downstreams))
+	for _, ds := range downstreams {
+		dsName[ds.ID] = ds.Name
+	}
+
+	geminiMethods := []string{"generateContent", "streamGenerateContent", "countTokens"}
+	seen := make(map[string]struct{})
+	out := make([]geminiModelRecord, 0)
+
+	// Surface every model that any downstream advertises. Google's convention
+	// is for `name` to be prefixed with "models/", so we add the prefix if
+	// the downstream's output_model_id doesn't already include it. This
+	// matches what Google's own /v1beta/models returns and what Cherry
+	// Studio's parser (listModels.ts line 192) handles via
+	// `m.name.startsWith('models/') ? m.name.slice(7) : m.name`.
+	//
+	// We include models from every downstream — not just Gemini-format ones
+	// — because the engine can auto-translate Gemini->OpenAI/Anthropic. See
+	// the function-level comment for the rationale.
+	for _, ds := range downstreams {
+		for _, m := range ds.OutputModelIDs {
+			name := m
+			if !strings.HasPrefix(name, "models/") {
+				name = "models/" + name
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, geminiModelRecord{
+				Name:                     name,
+				DisplayName:              m,
+				Description:              "via " + ds.Name,
+				SupportedGenerationMethods: geminiMethods,
+			})
+		}
+	}
+
+	// Also surface alias inputs so users see their human-friendly alias
+	// names in the model picker rather than only the upstream IDs. We include
+	// aliases regardless of the downstream's api_formats for the same reason
+	// as above (auto-translation makes any of them reachable).
+	for _, a := range aliases {
+		if a.IsRegex {
+			// Skip regex patterns — they aren't concrete model IDs.
+			continue
+		}
+		ds, err := e.store.GetDownstream(a.DownstreamID)
+		if err != nil || ds == nil {
+			continue
+		}
+		name := "models/" + a.InputModelID
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, geminiModelRecord{
+			Name:                     name,
+			DisplayName:              a.InputModelID,
+			Description:              "via " + dsName[ds.ID] + " (alias for " + a.OutputModelID + ")",
+			SupportedGenerationMethods: geminiMethods,
+		})
+	}
+
+	// Sort by name for deterministic output.
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+
+	// Apply pageSize cap.
+	if len(out) > pageSize {
+		out = out[:pageSize]
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"models": out,
 	})
 }

@@ -582,6 +582,61 @@ func TestGemini2Anthropic_TransformStreamChunk_TextDelta(t *testing.T) {
 	}
 }
 
+// TestOpenAI2Gemini_TransformStreamChunk_DropsDoneMarker verifies that an
+// OpenAI [DONE] terminator arriving via the stream is dropped by the response
+// pipeline so it doesn't leak to a Gemini client (which does not use [DONE]).
+func TestOpenAI2Gemini_TransformStreamChunk_DropsDoneMarker(t *testing.T) {
+	p := &OpenAI2Gemini{}
+	chunk := engine.SSEChunk{
+		EventType: "",
+		Data:      []byte("[DONE]"),
+	}
+	out, err := p.TransformStreamChunk(chunk, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Data) != 0 {
+		t.Fatalf("expected empty Data for [DONE] input, got %q", out.Data)
+	}
+}
+
+// TestGemini2OpenAI_TransformStreamChunk_DropsDoneMarker is the mirror of the
+// OpenAI2Gemini test, ensuring that the response path consumed by a Gemini
+// client → OpenAI upstream chain also strips the [DONE] terminator before
+// emitting to the Gemini client.
+func TestGemini2OpenAI_TransformStreamChunk_DropsDoneMarker(t *testing.T) {
+	p := &Gemini2OpenAI{}
+	chunk := engine.SSEChunk{
+		EventType: "",
+		Data:      []byte("[DONE]"),
+	}
+	out, err := p.TransformStreamChunk(chunk, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Data) != 0 {
+		t.Fatalf("expected empty Data for [DONE] input, got %q", out.Data)
+	}
+}
+
+// TestAnthropic2Gemini_TransformStreamChunk_DropsDoneMarker verifies the
+// [DONE] strip is in place for the Anthropic→Gemini translation path as well,
+// guarding against engine-synthesized [DONE] chunks leaking to Gemini clients.
+func TestAnthropic2Gemini_TransformStreamChunk_DropsDoneMarker(t *testing.T) {
+	p := &Anthropic2Gemini{}
+	chunk := engine.SSEChunk{
+		EventType: "",
+		Data:      []byte("[DONE]"),
+	}
+	out, err := p.TransformStreamChunk(chunk, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Data) != 0 {
+		t.Fatalf("expected empty Data for [DONE] input, got %q", out.Data)
+	}
+}
+
 // ---------------- geminiModelFromPath ----------------
 
 func TestGeminiModelFromPathLocal(t *testing.T) {

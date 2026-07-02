@@ -1458,3 +1458,97 @@ func TestEngine_GeminiModelFromPath(t *testing.T) {
 		}
 	}
 }
+
+// TestEngine_HandleProxy_GeminiModelsListing verifies that GET /v1beta/models
+// returns a Gemini-format model list aggregated from all downstreams and
+// aliases, regardless of the downstream's configured api_formats (since the
+// engine auto-translates Gemini->OpenAI/Anthropic). This is the endpoint
+// Cherry Studio hits when configured with provider type "Gemini".
+func TestEngine_HandleProxy_GeminiModelsListing(t *testing.T) {
+	s := newTestStore(t)
+	addDownstream(t, s, "ds-anthropic", "AnthropicDS", "http://example.invalid", "key-anthropic", "anthropic")
+	addOutputModelIDs(t, s, "ds-anthropic", "claude-haiku-4-5")
+	addDownstream(t, s, "ds-openai", "OpenAIDS", "http://example.invalid", "key-openai", "openai")
+	addOutputModelIDs(t, s, "ds-openai", "gpt-4o", "gpt-4o-mini")
+	// alias "claude-sonnet" -> ds-openai/gpt-4o
+	addAlias(t, s, "claude-sonnet", "ds-openai", "gpt-4o", true)
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(body))
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("expected JSON content type, got %q", ct)
+	}
+
+	var payload struct {
+		Models []struct {
+			Name                     string   `json:"name"`
+			DisplayName              string   `json:"displayName"`
+			Description              string   `json:"description"`
+			SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	wantNames := map[string]bool{
+		"models/claude-haiku-4-5": false,
+		"models/gpt-4o":           false,
+		"models/gpt-4o-mini":      false,
+		"models/claude-sonnet":    false,
+	}
+	for _, m := range payload.Models {
+		if _, ok := wantNames[m.Name]; ok {
+			wantNames[m.Name] = true
+		}
+		if !strings.HasPrefix(m.Name, "models/") {
+			t.Errorf("model name %q missing 'models/' prefix", m.Name)
+		}
+		if m.DisplayName == "" {
+			t.Errorf("model %q missing displayName", m.Name)
+		}
+		if len(m.SupportedGenerationMethods) == 0 {
+			t.Errorf("model %q missing supportedGenerationMethods", m.Name)
+		}
+	}
+	for name, seen := range wantNames {
+		if !seen {
+			t.Errorf("expected model %q in listing, got %d models total", name, len(payload.Models))
+		}
+	}
+}
+
+// TestEngine_HandleProxy_GeminiModelsListing_PageSize verifies the pageSize
+// query parameter caps the response.
+func TestEngine_HandleProxy_GeminiModelsListing_PageSize(t *testing.T) {
+	s := newTestStore(t)
+	addDownstream(t, s, "ds-openai", "OpenAIDS", "http://example.invalid", "key", "openai")
+	addOutputModelIDs(t, s, "ds-openai", "m1", "m2", "m3", "m4", "m5")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1beta/models?pageSize=2", nil)
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	var payload struct {
+		Models []json.RawMessage `json:"models"`
+	}
+	if err := json.NewDecoder(w.Result().Body).Decode(&payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(payload.Models) != 2 {
+		t.Errorf("expected 2 models with pageSize=2, got %d", len(payload.Models))
+	}
+}

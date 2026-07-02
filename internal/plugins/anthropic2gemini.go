@@ -623,6 +623,13 @@ func mapGeminiFinishReasonToAnthropic(r, _, _ string) interface{} {
 // TransformStreamChunk converts a single Gemini SSE event into an Anthropic
 // SSE chunk.
 func (t *Anthropic2Gemini) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.PipelineContext) (engine.SSEChunk, error) {
+	// Drop any [DONE] marker that may be in the stream (e.g. from an upstream
+	// OpenAI→Anthropic chain or the engine's synthetic terminator). The
+	// Gemini protocol ends with a final chunk carrying finishReason — we
+	// already emit that above — so a stray [DONE] line would just be noise.
+	if bytes.Equal(bytes.TrimSpace(chunk.Data), []byte("[DONE]")) {
+		return engine.SSEChunk{}, nil
+	}
 	state := &anth2geminiStreamState{}
 	if existing, ok := ctx.Variables["anth2gem_stream"]; ok {
 		state = existing.(*anth2geminiStreamState)

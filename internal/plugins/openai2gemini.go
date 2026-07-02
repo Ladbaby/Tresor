@@ -640,6 +640,13 @@ func mapGeminiFinishReason(r string) string {
 // TransformStreamChunk converts a single Gemini SSE event (one JSON payload
 // per data: line) into an OpenAI SSE chunk.
 func (t *OpenAI2Gemini) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.PipelineContext) (engine.SSEChunk, error) {
+	// The OpenAI upstream may send a [DONE] terminator. The Gemini protocol
+	// does NOT use [DONE] — it terminates the stream with a final chunk
+	// carrying finishReason (which we already emitted above). Drop the
+	// [DONE] line silently so it doesn't leak through to the Gemini client.
+	if bytes.Equal(bytes.TrimSpace(chunk.Data), []byte("[DONE]")) {
+		return engine.SSEChunk{}, nil
+	}
 	state := &oai2geminiStreamState{}
 	if existing, ok := ctx.Variables["oai2gem_stream"]; ok {
 		state = existing.(*oai2geminiStreamState)
