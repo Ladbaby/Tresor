@@ -1428,10 +1428,16 @@ html[data-theme="light"] form select {
 .format-icon.icon-openai { background: #0d1117; }
 .format-icon.icon-openai_responses { background: #fff; }
 .format-icon.icon-anthropic { background: #d1a47a; }
-.format-icon.icon-google { background: #fff; }
+.format-icon.icon-gemini {
+    background: #fff;
+    padding: 2px;
+}
 [data-theme="dark"] .format-icon.icon-openai { background: #0d1117; }
 [data-theme="dark"] .format-icon.icon-openai_responses { background: #fff; }
-[data-theme="dark"] .format-icon.icon-google { background: #0d1117; }
+[data-theme="dark"] .format-icon.icon-gemini {
+    background: #0d1117;
+    padding: 2px;
+}
 
 /* Model icons — fetched at runtime from a public CDN, cached on disk by the
    daemon, served via /api/icons/{modelID}. Rendered inside a soft rounded
@@ -1517,13 +1523,21 @@ html[data-theme="light"] form select {
 .format-openai { background: #1c3d7a; color: #58a6ff; }
 .format-openai_responses { background: #1c3d7a; color: #58a6ff; }
 .format-anthropic { background: #4a2d00; color: #d29922; }
-.format-gemini { background: #1a3a2a; color: #6ee7b7; }
+.format-gemini {
+    background: #1a3a2a;
+    color: #6ee7b7; 
+    padding: 2px;
+}
 .format-unknown { background: var(--bg-tertiary); color: var(--text-secondary); }
 
 [data-theme="light"] .format-openai { background: #ddf0ff; color: #0969da; }
 [data-theme="light"] .format-openai_responses { background: #ddf0ff; color: #0969da; }
 [data-theme="light"] .format-anthropic { background: #fff8c2; color: #9e6a0c; }
-[data-theme="light"] .format-gemini { background: #d4f7e3; color: #047857; }
+[data-theme="light"] .format-gemini {
+    background: #d4f7e3;
+    color: #047857;
+    padding: 2px;
+}
 
 /* Format checkbox group — pill/tag style matching alias model tags */
 .format-checkboxes {

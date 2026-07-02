@@ -208,7 +208,7 @@ const FORMAT_ICONS = {
     openai: 'icons/openai-completions.svg',
     openai_responses: 'icons/openai-responses.svg',
     anthropic: 'icons/anthropic.svg',
-    gemini: 'icons/google.svg',
+    gemini: 'icons/gemini.svg',
 };
 
 function formatIconHTML(formatId) {
@@ -268,7 +268,7 @@ async function loadRules() {
                 const inputFmts = r.match_format || [];
                 const dsFmts = r.match_downstream_format || [];
                 const dsIds = r.match_downstreams || [];
-                const formatLabels = { openai: 'OpenAI', openai_responses: 'OpenAI Responses', anthropic: 'Anthropic', gemini: 'Google Gemini' };
+                const formatLabels = { openai: 'OpenAI', openai_responses: 'OpenAI Responses', anthropic: 'Anthropic', gemini: 'Gemini' };
 
                 // Input format badges (blue for openai, amber for anthropic, green for gemini)
                 inputFmts.forEach(f => {
@@ -903,7 +903,7 @@ function renderDownstreamDetail(ds) {
                 <label class="format-checkbox"><input type="checkbox" name="format" value="openai"${formats.includes('openai') ? ' checked' : ''}><img class="format-icon icon-openai" src="icons/openai-completions.svg" alt="" aria-hidden="true"> OpenAI</label>
                 <label class="format-checkbox"><input type="checkbox" name="format" value="openai_responses"${formats.includes('openai_responses') ? ' checked' : ''}><img class="format-icon icon-openai_responses" src="icons/openai-responses.svg" alt="" aria-hidden="true"> OpenAI Responses</label>
                 <label class="format-checkbox"><input type="checkbox" name="format" value="anthropic"${formats.includes('anthropic') ? ' checked' : ''}><img class="format-icon icon-anthropic" src="icons/anthropic.svg" alt="" aria-hidden="true"> Anthropic</label>
-                <label class="format-checkbox"><input type="checkbox" name="format" value="gemini"${formats.includes('gemini') ? ' checked' : ''}><img class="format-icon icon-gemini" src="icons/google.svg" alt="" aria-hidden="true"> Google Gemini</label>
+                <label class="format-checkbox"><input type="checkbox" name="format" value="gemini"${formats.includes('gemini') ? ' checked' : ''}><img class="format-icon icon-gemini" src="icons/gemini.svg" alt="" aria-hidden="true"> Gemini</label>
             </div>
         </div>
         <div class="detail-section">
