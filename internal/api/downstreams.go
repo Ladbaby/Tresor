@@ -136,35 +136,58 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 		writeJSON(w, http.StatusOK, ds)
 
 	case http.MethodPut:
-		var ds store.Downstream
-		if err := json.NewDecoder(req.Body).Decode(&ds); err != nil {
+		var patch struct {
+			Name           *string   `json:"name"`
+			BaseURL        *string   `json:"base_url"`
+			APIKey         *string   `json:"api_key"`
+			ApiFormats     *[]string `json:"api_formats"`
+			OutputModelIDs *[]string `json:"output_model_ids"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
 		}
-		ds.ID = id
 
-		// Validate base_url if being updated
-		if ds.BaseURL != "" {
-			if err := proxy.ValidateOutboundURL(ds.BaseURL); err != nil {
+		existing, err := r.store.GetDownstream(id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+
+		// Partial update: pointer is nil → field absent from request → keep existing.
+		// Pointer non-nil → overwrite (even with "" or []), so callers can clear fields.
+		if patch.Name != nil {
+			existing.Name = *patch.Name
+		}
+		if patch.BaseURL != nil {
+			existing.BaseURL = *patch.BaseURL
+		}
+		if patch.APIKey != nil && *patch.APIKey != "" && *patch.APIKey != "***" {
+			existing.APIKey = *patch.APIKey
+		}
+		if patch.ApiFormats != nil {
+			existing.ApiFormats = *patch.ApiFormats
+		}
+		if patch.OutputModelIDs != nil {
+			existing.OutputModelIDs = append([]string(nil), *patch.OutputModelIDs...)
+		}
+
+		if existing.BaseURL != "" {
+			if err := proxy.ValidateOutboundURL(existing.BaseURL); err != nil {
 				writeError(w, http.StatusBadRequest, "invalid base_url: "+err.Error())
 				return
 			}
 		}
 
-		// Preserve the existing API key if the client sent nothing or the masked placeholder.
-		if ds.APIKey == "" || ds.APIKey == "***" {
-			existing, err := r.store.GetDownstream(id)
-			if err == nil {
-				ds.APIKey = existing.APIKey
-			}
-		}
-		if err := r.store.UpdateDownstream(&ds); err != nil {
+		if err := r.store.UpdateDownstream(existing); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		r.requestConfigWrite()
-		ds.APIKey = "***"
-		writeJSONWithWarning(w, http.StatusOK, ds, proxy.IsBareIP(ds.BaseURL))
+		if existing.APIKey != "" {
+			existing.APIKey = "***"
+		}
+		writeJSONWithWarning(w, http.StatusOK, *existing, proxy.IsBareIP(existing.BaseURL))
 
 	case http.MethodDelete:
 		if err := r.store.DeleteDownstream(id); err != nil {

@@ -3,8 +3,11 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
 	"testing"
 
 	"tresor/internal/store"
@@ -323,5 +326,221 @@ func TestDownstreamModels_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for nonexistent downstream, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- Partial-update regression tests for PUT /api/downstreams/{id} ---
+
+// seedDownstreamForPatch creates a downstream, sets its api_formats via PUT, and
+// adds the given output_model_ids via POST /models. Returns the full seeded
+// record as a fresh GetDownstream read.
+func seedDownstreamForPatch(t *testing.T, handler http.Handler, name, baseURL string, formats []string, models []string) store.Downstream {
+	t.Helper()
+	ds := createDownstreamViaAPI(t, handler, name, baseURL)
+
+	if len(formats) > 0 {
+		body, _ := json.Marshal(map[string]interface{}{"api_formats": formats})
+		req := httptest.NewRequest(http.MethodPut, "/api/downstreams/"+ds.ID, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("seed formats: expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+	}
+
+	for _, m := range models {
+		body, _ := json.Marshal(map[string]interface{}{"model_id": m})
+		req := httptest.NewRequest(http.MethodPost, "/api/downstreams/"+ds.ID+"/models", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("seed model %q: expected 200, got %d: %s", m, w.Code, w.Body.String())
+		}
+	}
+
+	got, err := getDownstreamFresh(handler, ds.ID)
+	if err != nil {
+		t.Fatalf("re-read seeded downstream: %v", err)
+	}
+	return got
+}
+
+// getDownstreamFresh fetches a downstream via GET (returns a *Downstream from the
+// store). We can't reuse the handler response's masking reliably, so go direct.
+func getDownstreamFresh(handler http.Handler, id string) (store.Downstream, error) {
+	req := httptest.NewRequest(http.MethodGet, "/api/downstreams/"+id, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		return store.Downstream{}, fmt.Errorf("get downstream %s: status %d: %s", id, w.Code, w.Body.String())
+	}
+	var ds store.Downstream
+	if err := json.NewDecoder(w.Body).Decode(&ds); err != nil {
+		return store.Downstream{}, err
+	}
+	return ds, nil
+}
+
+// patchDownstream sends a PUT with the given body and returns the status code.
+func patchDownstream(handler http.Handler, id string, body interface{}) int {
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPut, "/api/downstreams/"+id, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	return w.Code
+}
+
+// sortedCopy returns a sorted copy of s so test assertions don't depend on the
+// store's internal ordering (output_model_ids is returned ORDER BY model_id,
+// which is sorted, but be defensive).
+func sortedCopy(s []string) []string {
+	out := append([]string(nil), s...)
+	sort.Strings(out)
+	return out
+}
+
+// Reported bug: toggling a single API format checkbox wiped name, base_url,
+// and output_model_ids because the handler did a full-replace UPDATE.
+func TestUpdateDownstream_PartialPatch_PreservesOtherFields(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	seeded := seedDownstreamForPatch(t, handler, "name-x", "https://x.test/v1",
+		[]string{"openai", "anthropic"}, []string{"gpt-4o-mini", "gpt-4o"})
+
+	if got := patchDownstream(handler, seeded.ID, map[string]interface{}{
+		"api_formats": []string{"openai"},
+	}); got != http.StatusOK {
+		t.Fatalf("expected 200, got %d", got)
+	}
+
+	after, err := getDownstreamFresh(handler, seeded.ID)
+	if err != nil {
+		t.Fatalf("read after patch: %v", err)
+	}
+	if after.Name != "name-x" {
+		t.Fatalf("name wiped: got %q", after.Name)
+	}
+	if after.BaseURL != "https://x.test/v1" {
+		t.Fatalf("base_url wiped: got %q", after.BaseURL)
+	}
+	if !reflect.DeepEqual(sortedCopy(after.OutputModelIDs), []string{"gpt-4o", "gpt-4o-mini"}) {
+		t.Fatalf("output_model_ids wiped: got %v", after.OutputModelIDs)
+	}
+	if !reflect.DeepEqual(after.ApiFormats, []string{"openai"}) {
+		t.Fatalf("api_formats not replaced as expected: got %v", after.ApiFormats)
+	}
+}
+
+// api_formats: [] must mean "clear it", not "no change". Pointer fields let us
+// distinguish absent (nil) from explicit-empty (non-nil pointer to []string{}).
+func TestUpdateDownstream_ExplicitEmptyApiFormats_Clears(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	seeded := seedDownstreamForPatch(t, handler, "fmt-clear", "https://fc.test/v1",
+		[]string{"openai", "anthropic"}, []string{"gpt-4o"})
+
+	if got := patchDownstream(handler, seeded.ID, map[string]interface{}{
+		"api_formats": []string{},
+	}); got != http.StatusOK {
+		t.Fatalf("expected 200, got %d", got)
+	}
+
+	after, err := getDownstreamFresh(handler, seeded.ID)
+	if err != nil {
+		t.Fatalf("read after patch: %v", err)
+	}
+	if len(after.ApiFormats) != 0 {
+		t.Fatalf("api_formats should be cleared, got %v", after.ApiFormats)
+	}
+	// Other fields must survive the explicit-empty patch.
+	if after.Name != "fmt-clear" {
+		t.Fatalf("name wiped: got %q", after.Name)
+	}
+	if after.BaseURL != "https://fc.test/v1" {
+		t.Fatalf("base_url wiped: got %q", after.BaseURL)
+	}
+	if !reflect.DeepEqual(sortedCopy(after.OutputModelIDs), []string{"gpt-4o"}) {
+		t.Fatalf("output_model_ids wiped: got %v", after.OutputModelIDs)
+	}
+}
+
+// api_key: "***" is the masked placeholder the web UI never sends in a patch
+// (it sends nothing or a real replacement). It must mean "do not change".
+func TestUpdateDownstream_MaskedAPIKey_Preserves(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	body := map[string]interface{}{
+		"name":     "key-preserve",
+		"base_url": "https://kp.test/v1",
+		"api_key":  "sk-real-secret",
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var ds store.Downstream
+	json.NewDecoder(w.Body).Decode(&ds)
+
+	// Web UI semantics: it sends {api_key: "***"} when the user didn't type
+	// a new value but the field was included in the patch body.
+	if got := patchDownstream(handler, ds.ID, map[string]interface{}{
+		"api_key": "***",
+	}); got != http.StatusOK {
+		t.Fatalf("expected 200, got %d", got)
+	}
+
+	// Use reveal=1 to read the real stored key.
+	revealReq := httptest.NewRequest(http.MethodGet, "/api/downstreams/"+ds.ID+"?reveal=1", nil)
+	revealW := httptest.NewRecorder()
+	handler.ServeHTTP(revealW, revealReq)
+	if revealW.Code != http.StatusOK {
+		t.Fatalf("reveal: expected 200, got %d", revealW.Code)
+	}
+	var revealed store.Downstream
+	json.NewDecoder(revealW.Body).Decode(&revealed)
+	if revealed.APIKey != "sk-real-secret" {
+		t.Fatalf("api_key changed despite *** placeholder, got %q", revealed.APIKey)
+	}
+}
+
+// output_model_ids: [] must clear models while preserving formats and other fields.
+func TestUpdateDownstream_ExplicitEmptyModels_Clears(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	seeded := seedDownstreamForPatch(t, handler, "models-clear", "https://mc.test/v1",
+		[]string{"openai"}, []string{"gpt-4o", "gpt-4o-mini"})
+
+	if got := patchDownstream(handler, seeded.ID, map[string]interface{}{
+		"output_model_ids": []string{},
+	}); got != http.StatusOK {
+		t.Fatalf("expected 200, got %d", got)
+	}
+
+	after, err := getDownstreamFresh(handler, seeded.ID)
+	if err != nil {
+		t.Fatalf("read after patch: %v", err)
+	}
+	if len(after.OutputModelIDs) != 0 {
+		t.Fatalf("output_model_ids should be cleared, got %v", after.OutputModelIDs)
+	}
+	if !reflect.DeepEqual(after.ApiFormats, []string{"openai"}) {
+		t.Fatalf("api_formats wiped: got %v", after.ApiFormats)
+	}
+	if after.Name != "models-clear" {
+		t.Fatalf("name wiped: got %q", after.Name)
+	}
+	if after.BaseURL != "https://mc.test/v1" {
+		t.Fatalf("base_url wiped: got %q", after.BaseURL)
 	}
 }
