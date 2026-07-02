@@ -64,8 +64,8 @@ Tresor is a single binary with two modes:
 ### Key Capabilities
 
 - ⚡ **Hot-Switch Models** — Map one model name to any backend model and switch on the fly. Your app requests `gpt-4o`; Tresor can route it to Claude Sonnet, Opus, or keep it on GPT-4o — all without restarting.
-- 🔄 **Auto-Translation** — Automatically convert between OpenAI, Anthropic, and OpenAI Responses API formats. Your app sends an OpenAI request; Tresor forwards it to an Anthropic downstream and converts the response back — no rule configuration needed.
-- 🔌 **Plugin Pipeline** — Chain transformation plugins per rule (header injection, image fix, format conversion, and more). Eight built-in plugins cover all common format combinations.
+- 🔄 **Auto-Translation** — Automatically convert between OpenAI, Anthropic, OpenAI Responses, and Google Gemini formats. Your app sends an OpenAI request; Tresor forwards it to an Anthropic, Gemini, or any other downstream and converts the response back — no rule configuration needed.
+- 🔌 **Plugin Pipeline** — Chain transformation plugins per rule (header injection, image fix, format conversion, and more). Twelve built-in plugins cover all common format combinations.
 - 🛤️ **Per-Path Routing** — Route different API paths (and models) to different providers based on configurable rules.
 - 🌐 **Embedded Web UI** — Manage everything from a browser dashboard. No separate frontend deployment.
 - 🖼️ **Model & Provider Icons** — Visual icons for models and providers in the web UI, auto-matched based on provider patterns.

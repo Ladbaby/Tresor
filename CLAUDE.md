@@ -38,7 +38,7 @@ downstreams:                    # LLM provider endpoints
     name: My Provider
     base_url: https://api.example.com/v1
     api_key: sk-...
-    api_formats: [openai]       # API format(s): openai, anthropic, openai_responses
+    api_formats: [openai]       # API format(s): openai, anthropic, openai_responses, gemini
     output_model_ids:           # Models this downstream can handle (required for forwarding)
       - gpt-4o
 
