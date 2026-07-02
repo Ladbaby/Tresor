@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"tresor/internal/store"
@@ -34,6 +35,14 @@ func (m *mockRegistryImpl) CreatePlugin(pluginID string, config map[string]inter
 		return &mockOpenAI2Responses{}, nil
 	case "anthropic2responses":
 		return &mockAnthropic2Responses{}, nil
+	case "openai2gemini":
+		return &mockOpenAI2Gemini{}, nil
+	case "anthropic2gemini":
+		return &mockAnthropic2Gemini{}, nil
+	case "gemini2openai":
+		return &mockGemini2OpenAI{}, nil
+	case "gemini2anthropic":
+		return &mockGemini2Anthropic{}, nil
 	default:
 			return nil, fmt.Errorf("unknown plugin: %s", pluginID)
 	}
@@ -164,6 +173,70 @@ func (m *mockAnthropic2Responses) TransformResponse(resp *http.Response, body []
 }
 
 func (m *mockAnthropic2Responses) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+// mockOpenAI2Gemini marks the request as translated OpenAI→Gemini.
+type mockOpenAI2Gemini struct{}
+
+func (m *mockOpenAI2Gemini) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "openai2gemini")
+	return req, body, nil
+}
+
+func (m *mockOpenAI2Gemini) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (m *mockOpenAI2Gemini) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+// mockAnthropic2Gemini marks the request as translated Anthropic→Gemini.
+type mockAnthropic2Gemini struct{}
+
+func (m *mockAnthropic2Gemini) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "anthropic2gemini")
+	return req, body, nil
+}
+
+func (m *mockAnthropic2Gemini) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (m *mockAnthropic2Gemini) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+// mockGemini2OpenAI marks the request as translated Gemini→OpenAI.
+type mockGemini2OpenAI struct{}
+
+func (m *mockGemini2OpenAI) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "gemini2openai")
+	return req, body, nil
+}
+
+func (m *mockGemini2OpenAI) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (m *mockGemini2OpenAI) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+// mockGemini2Anthropic marks the request as translated Gemini→Anthropic.
+type mockGemini2Anthropic struct{}
+
+func (m *mockGemini2Anthropic) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "gemini2anthropic")
+	return req, body, nil
+}
+
+func (m *mockGemini2Anthropic) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (m *mockGemini2Anthropic) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
 	return chunk, nil
 }
 
@@ -1211,5 +1284,177 @@ func TestEngine_NonStreaming_StripsContentEncodingFromClientResponse(t *testing.
 	resp := w.Result()
 	if got := resp.Header.Get("Content-Encoding"); got != "" {
 		t.Fatalf("expected Content-Encoding stripped from client response, got %q", got)
+	}
+}
+
+// ---------------- Gemini tests ----------------
+
+// TestEngine_HandleProxy_AutoTranslate_OpenAI2Gemini verifies that an OpenAI
+// Chat Completion request to a Gemini downstream is auto-translated and the
+// Gemini-specific x-goog-api-key header is injected.
+func TestEngine_HandleProxy_AutoTranslate_OpenAI2Gemini(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader, googKey string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		googKey = r.Header.Get("x-goog-api-key")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	addDownstream(t, s, "gem-ds", "GeminiDS", dsServer.URL, "gem-key", "gemini")
+	addOutputModelIDs(t, s, "gem-ds", "gemini-2.5-pro")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if translatedHeader != "openai2gemini" {
+		t.Fatalf("expected X-Auto-Translated: openai2gemini, got %q", translatedHeader)
+	}
+	if googKey != "gem-key" {
+		t.Fatalf("expected x-goog-api-key gem-key, got %q", googKey)
+	}
+	// Note: the mock transformer doesn't rewrite the URL path; the real
+	// OpenAI2Gemini plugin does, and is covered by plugins/gemini_test.go.
+}
+
+// TestEngine_HandleProxy_AutoTranslate_Anthropic2Gemini verifies the Anthropic→Gemini auto-translation.
+func TestEngine_HandleProxy_AutoTranslate_Anthropic2Gemini(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader, googKey string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		googKey = r.Header.Get("x-goog-api-key")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	addDownstream(t, s, "gem-ds", "GeminiDS", dsServer.URL, "gem-key", "gemini")
+	addOutputModelIDs(t, s, "gem-ds", "gemini-2.5-pro")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"gemini-2.5-pro","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if translatedHeader != "anthropic2gemini" {
+		t.Fatalf("expected X-Auto-Translated: anthropic2gemini, got %q", translatedHeader)
+	}
+	if googKey != "gem-key" {
+		t.Fatalf("expected x-goog-api-key gem-key, got %q", googKey)
+	}
+}
+
+// TestEngine_HandleProxy_GeminiInput_AutoTranslate_Gemini2OpenAI verifies that
+// a Gemini-format request (model in URL path, no body model) routed to an
+// OpenAI downstream is auto-translated via gemini2openai.
+func TestEngine_HandleProxy_GeminiInput_AutoTranslate_Gemini2OpenAI(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader, authHeader string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		authHeader = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	addDownstream(t, s, "oa-ds", "OpenAIDS", dsServer.URL, "sk-oai", "openai")
+	addOutputModelIDs(t, s, "oa-ds", "gemini-2.5-pro")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	// Gemini request body has no "model" field — the model is in the URL path.
+	body := `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:generateContent", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", resp.StatusCode, w.Body.String())
+	}
+	if translatedHeader != "gemini2openai" {
+		t.Fatalf("expected X-Auto-Translated: gemini2openai, got %q", translatedHeader)
+	}
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		t.Fatalf("expected Bearer auth, got %q", authHeader)
+	}
+	// Note: the mock transformer doesn't rewrite the URL path; the real
+	// Gemini2OpenAI plugin does, and is covered by plugins/gemini_test.go.
+}
+
+// TestEngine_IsLLMPath_Gemini verifies that Gemini paths are recognized as
+// LLM paths so the proxy does not 404 them.
+func TestEngine_IsLLMPath_Gemini(t *testing.T) {
+	paths := []string{
+		"/v1beta/models",
+		"/v1beta/models/gemini-2.5-pro",
+		"/v1beta/models/gemini-2.5-pro:generateContent",
+		"/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+		"/v1beta/models/gemini-2.5-pro:countTokens",
+	}
+	for _, p := range paths {
+		if !isLLMPath(p) {
+			t.Errorf("isLLMPath(%q) = false, want true", p)
+		}
+	}
+}
+
+// TestEngine_DetectInputFormat_Gemini verifies detectInputFormat returns
+// "gemini" for Gemini action paths.
+func TestEngine_DetectInputFormat_Gemini(t *testing.T) {
+	if got := detectInputFormat("/v1beta/models"); got != "" {
+		t.Errorf("detectInputFormat(/v1beta/models) = %q, want \"\"", got)
+	}
+	if got := detectInputFormat("/v1beta/models/gemini-2.5-pro:generateContent"); got != "gemini" {
+		t.Errorf("detectInputFormat(...:generateContent) = %q, want \"gemini\"", got)
+	}
+	if got := detectInputFormat("/v1beta/models/gemini-2.5-pro:streamGenerateContent"); got != "gemini" {
+		t.Errorf("detectInputFormat(...:streamGenerateContent) = %q, want \"gemini\"", got)
+	}
+	// Sanity: existing formats still detected.
+	if got := detectInputFormat("/v1/chat/completions"); got != "openai" {
+		t.Errorf("detectInputFormat(/v1/chat/completions) = %q, want \"openai\"", got)
+	}
+}
+
+// TestEngine_GeminiModelFromPath verifies the URL-path model extractor.
+func TestEngine_GeminiModelFromPath(t *testing.T) {
+	tests := []struct {
+		path, want string
+	}{
+		{"/v1beta/models/gemini-2.5-pro", "gemini-2.5-pro"},
+		{"/v1beta/models/gemini-2.5-pro:generateContent", "gemini-2.5-pro"},
+		{"/v1beta/models/gemini-2.5-pro:streamGenerateContent", "gemini-2.5-pro"},
+		{"/v1beta/models", ""},
+		{"/v1/chat/completions", ""},
+	}
+	for _, tt := range tests {
+		if got := geminiModelFromPath(tt.path); got != tt.want {
+			t.Errorf("geminiModelFromPath(%q) = %q, want %q", tt.path, got, tt.want)
+		}
 	}
 }

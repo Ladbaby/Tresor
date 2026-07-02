@@ -43,8 +43,8 @@ func TestParsePipelineConfig_Invalid(t *testing.T) {
 
 func TestExtractModel(t *testing.T) {
 	tests := []struct {
-		body    string
-		want    string
+		body string
+		want string
 	}{
 		{`{"model": "gpt-4o"}`, "gpt-4o"},
 		{`{"model":"claude-sonnet-4-20250514"}`, "claude-sonnet-4-20250514"},
@@ -55,9 +55,33 @@ func TestExtractModel(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := extractModel([]byte(tt.body))
+		got := extractModel([]byte(tt.body), "")
 		if got != tt.want {
 			t.Errorf("extractModel(%q) = %q, want %q", tt.body, got, tt.want)
+		}
+	}
+}
+
+// TestExtractModel_FromGeminiPath verifies that extractModel falls back to
+// parsing the model name out of the URL path when the body has no "model"
+// field (the Gemini generateContent convention).
+func TestExtractModel_FromGeminiPath(t *testing.T) {
+	tests := []struct {
+		body, path, want string
+	}{
+		{`{}`, "/v1beta/models/gemini-2.5-pro:generateContent", "gemini-2.5-pro"},
+		{`{"contents":[]}`, "/v1beta/models/gemini-2.5-pro:streamGenerateContent", "gemini-2.5-pro"},
+		// Body model takes precedence over path.
+		{`{"model":"from-body"}`, "/v1beta/models/from-path:generateContent", "from-body"},
+		// Empty path & body → "".
+		{`{}`, "", ""},
+		// Non-Gemini path doesn't contribute.
+		{`{}`, "/v1/chat/completions", ""},
+	}
+	for _, tt := range tests {
+		got := extractModel([]byte(tt.body), tt.path)
+		if got != tt.want {
+			t.Errorf("extractModel(body=%q, path=%q) = %q, want %q", tt.body, tt.path, got, tt.want)
 		}
 	}
 }

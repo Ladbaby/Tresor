@@ -212,8 +212,26 @@ aliases:
 		if err := json.Unmarshal(body, &plugins); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if len(plugins) != 8 {
-			t.Fatalf("expected 4 plugins, got %d", len(plugins))
+		// The plugin registry includes format transformers (openai2anthropic,
+		// anthropic2openai, openai2gemini, anthropic2gemini, gemini2openai,
+		// gemini2anthropic, plus the openai_responses family), custom_header,
+		// and fix_anthropic_images — 12 total at the time of writing.
+		if len(plugins) < 8 {
+			t.Fatalf("expected at least 8 plugins, got %d", len(plugins))
+		}
+		// Verify the new Gemini plugins are present in the response.
+		wantIDs := []string{"openai2gemini", "anthropic2gemini", "gemini2openai", "gemini2anthropic"}
+		haveIDs := make(map[string]bool, len(plugins))
+		for _, p := range plugins {
+			pm, _ := p.(map[string]interface{})
+			if id, ok := pm["id"].(string); ok {
+				haveIDs[id] = true
+			}
+		}
+		for _, id := range wantIDs {
+			if !haveIDs[id] {
+				t.Fatalf("expected plugin %q to be registered, but it was missing", id)
+			}
 		}
 	})
 

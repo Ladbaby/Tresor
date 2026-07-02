@@ -117,6 +117,50 @@ func NewRegistry() engine.PluginRegistry {
 		return &Anthropic2Responses{}, nil
 	})
 
+	r.register("openai2gemini", engine.PluginInfo{
+		ID:          "openai2gemini",
+		Description: "Converts OpenAI Chat Completion requests to Google Gemini generateContent format",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &OpenAI2Gemini{}, nil
+	})
+
+	r.register("anthropic2gemini", engine.PluginInfo{
+		ID:          "anthropic2gemini",
+		Description: "Converts Anthropic Messages requests to Google Gemini generateContent format",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &Anthropic2Gemini{}, nil
+	})
+
+	r.register("gemini2openai", engine.PluginInfo{
+		ID:          "gemini2openai",
+		Description: "Converts Google Gemini generateContent requests to OpenAI Chat Completion format and vice versa",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &Gemini2OpenAI{}, nil
+	})
+
+	r.register("gemini2anthropic", engine.PluginInfo{
+		ID:          "gemini2anthropic",
+		Description: "Converts Google Gemini generateContent requests to Anthropic Messages format and vice versa",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &Gemini2Anthropic{}, nil
+	})
+
 	return r
 }
 

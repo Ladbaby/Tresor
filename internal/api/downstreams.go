@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -251,26 +252,69 @@ func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Re
 // fetchModels calls the downstream provider's /models endpoint to discover available models.
 // It tries multiple URL patterns (/v1/models, /models) and returns specific error messages.
 func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
-	return fetchModelsByCreds(ds.BaseURL, ds.APIKey)
+	return fetchModelsByCreds(ds.BaseURL, ds.APIKey, ds.ApiFormats)
 }
 
 // fetchModelsByCreds fetches models given raw credentials (used for both existing
 // downstreams and the create-new-downstream form).
-func fetchModelsByCreds(baseURL, apiKey string) ([]string, error) {
+// apiFormats is used to choose provider-specific endpoints (e.g. Gemini).
+func fetchModelsByCreds(baseURL, apiKey string, apiFormats []string) ([]string, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("no API key configured — add an API key before fetching models")
 	}
 
 	baseURL = strings.TrimSuffix(baseURL, "/")
 
-	// Try common model endpoint patterns
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Gemini probe: GET {baseURL}/models?key={apiKey} (or x-goog-api-key header).
+	// Response shape: { "models": [ { "name": "models/gemini-2.5-pro", ... }, ... ] }.
+	if slices.Contains(apiFormats, "gemini") {
+		url := baseURL + "/models"
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("x-goog-api-key", apiKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			// Fall through to OpenAI-style probes below.
+		} else {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+				return nil, fmt.Errorf("authentication failed — check the API key")
+			}
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				var geminiResp struct {
+					Models []struct {
+						Name string `json:"name"`
+					} `json:"models"`
+				}
+				if err := json.Unmarshal(body, &geminiResp); err == nil && len(geminiResp.Models) > 0 {
+					models := make([]string, 0, len(geminiResp.Models))
+					for _, m := range geminiResp.Models {
+						// Strip the "models/" prefix from each entry.
+						name := strings.TrimPrefix(m.Name, "models/")
+						if name != "" {
+							models = append(models, name)
+						}
+					}
+					if len(models) > 0 {
+						return models, nil
+					}
+				}
+				return nil, fmt.Errorf("gemini /models returned no models in expected format")
+			}
+		}
+	}
+
+	// Try common model endpoint patterns (OpenAI / Anthropic / generic)
 	endpoints := []string{
 		baseURL + "/models",   // OpenAI-style /v1/models (base_url already includes /v1)
 		baseURL + "/v1/models", // Some providers need explicit /v1 prefix
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
 	var lastError string
 
@@ -279,7 +323,13 @@ func fetchModelsByCreds(baseURL, apiKey string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		// Anthropic uses x-api-key, others use Bearer; pick based on declared format.
+		if slices.Contains(apiFormats, "anthropic") {
+			req.Header.Set("x-api-key", apiKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		} else {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -336,8 +386,9 @@ func (r *Router) handleFetchModels(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var body struct {
-		BaseURL string `json:"base_url"`
-		APIKey  string `json:"api_key"`
+		BaseURL string   `json:"base_url"`
+		APIKey  string   `json:"api_key"`
+		Formats []string `json:"formats,omitempty"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -352,7 +403,11 @@ func (r *Router) handleFetchModels(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	models, err := fetchModelsByCreds(body.BaseURL, body.APIKey)
+	var formats []string
+	if len(body.Formats) > 0 {
+		formats = body.Formats
+	}
+	models, err := fetchModelsByCreds(body.BaseURL, body.APIKey, formats)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "fetch failed: "+err.Error())
 		return

@@ -115,9 +115,9 @@ func (e *Engine) SetProxyAuthKeys(keys []string) {
 	e.proxyAuth = &proxyAuth{enabled: true, keys: keySet}
 }
 
-// validateProxyAuth checks the proxy API key sent by the client, supporting both
-// Authorization: Bearer <key> and x-api-key: <key> headers (the latter is used by
-// Anthropic-format clients like the Claude Office plugin).
+// validateProxyAuth checks the proxy API key sent by the client, supporting
+// Authorization: Bearer <key>, x-api-key: <key>, and x-goog-api-key: <key> headers
+// (the latter two are used by Anthropic- and Gemini-format clients respectively).
 // If auth is enabled and the key is invalid, it writes a 401 response and returns false.
 // On success (or when auth is disabled), it returns true and strips the auth header
 // from the request so the downstream's own API key can be injected cleanly.
@@ -126,7 +126,7 @@ func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool 
 		return true
 	}
 
-	// Try Authorization: Bearer <key> first, then x-api-key: <key>
+	// Try Authorization: Bearer <key>, then x-api-key: <key>, then x-goog-api-key: <key>
 	token := ""
 	authHeader := r.Header.Get("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {
@@ -135,6 +135,11 @@ func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool 
 	if token == "" {
 		if xak := r.Header.Get("x-api-key"); xak != "" {
 			token = xak
+		}
+	}
+	if token == "" {
+		if xgak := r.Header.Get("x-goog-api-key"); xgak != "" {
+			token = xgak
 		}
 	}
 
@@ -152,6 +157,7 @@ func (e *Engine) validateProxyAuth(r *http.Request, w http.ResponseWriter) bool 
 	// The downstream will receive its own API key from config.
 	r.Header.Del("Authorization")
 	r.Header.Del("x-api-key")
+	r.Header.Del("x-goog-api-key")
 
 	return true
 }
@@ -232,6 +238,10 @@ func isLLMPath(path string) bool {
 	case "/messages", "/count_tokens":
 		return true
 	}
+	// Gemini endpoints: /v1beta/models and /v1beta/models/{model}:{action}
+	if strings.HasPrefix(path, "/v1beta/models") {
+		return true
+	}
 	return false
 }
 
@@ -270,7 +280,7 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 		return &modelResult{body: body}, &gatewayError{http.StatusInternalServerError, "failed to read body", "failed to read body", "failed to read body", err}
 	}
 
-	model := extractModel(body)
+	model := extractModel(body, r.URL.Path)
 	if model == "" {
 		return &modelResult{body: body}, &gatewayError{http.StatusBadRequest, "request body missing model", "request body missing model", "missing model", nil}
 	}
@@ -339,15 +349,21 @@ func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store
 		var pluginID string
 		switch inputFormat {
 		case "openai":
-			if slices.Contains(ds.ApiFormats, "openai_responses") {
+			switch {
+			case slices.Contains(ds.ApiFormats, "openai_responses"):
 				pluginID = "openai2responses"
-			} else {
+			case slices.Contains(ds.ApiFormats, "gemini"):
+				pluginID = "openai2gemini"
+			default:
 				pluginID = "openai2anthropic"
 			}
 		case "anthropic":
-			if slices.Contains(ds.ApiFormats, "openai_responses") {
+			switch {
+			case slices.Contains(ds.ApiFormats, "openai_responses"):
 				pluginID = "anthropic2responses"
-			} else {
+			case slices.Contains(ds.ApiFormats, "gemini"):
+				pluginID = "anthropic2gemini"
+			default:
 				pluginID = "anthropic2openai"
 			}
 		case "openai_responses":
@@ -355,6 +371,17 @@ func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store
 				pluginID = "responses2openai"
 			} else if slices.Contains(ds.ApiFormats, "anthropic") {
 				pluginID = "responses2anthropic"
+			}
+			// Note: responses2gemini is not implemented. To route OpenAI
+			// Responses traffic to a Gemini downstream, configure a rule
+			// with an explicit pipeline_config that converts through OpenAI
+			// first (responses2openai + openai2gemini chained).
+		case "gemini":
+			switch {
+			case slices.Contains(ds.ApiFormats, "openai"):
+				pluginID = "gemini2openai"
+			case slices.Contains(ds.ApiFormats, "anthropic"):
+				pluginID = "gemini2anthropic"
 			}
 		}
 		if pluginID != "" {
@@ -771,15 +798,22 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	}
 
 	// Set the downstream API key only if a pipeline transformer hasn't
-	// already set auth headers (e.g., x-api-key for Anthropic)
+	// already set auth headers (e.g., x-api-key for Anthropic, x-goog-api-key for Gemini)
 	if ctx.TargetDownstream.APIKey != "" {
 		hasAuthHeader := forwardedReq.Header.Get("Authorization") != "" ||
-			forwardedReq.Header.Get("x-api-key") != ""
+			forwardedReq.Header.Get("x-api-key") != "" ||
+			forwardedReq.Header.Get("x-goog-api-key") != ""
 		if !hasAuthHeader {
-			if slices.Contains(ctx.TargetDownstream.ApiFormats, "anthropic") {
+			switch {
+			case slices.Contains(ctx.TargetDownstream.ApiFormats, "anthropic"):
 				forwardedReq.Header.Set("x-api-key", ctx.TargetDownstream.APIKey)
 				forwardedReq.Header.Set("anthropic-version", "2023-06-01")
-			} else {
+			case slices.Contains(ctx.TargetDownstream.ApiFormats, "gemini"):
+				// Google Gemini accepts the key either as the `x-goog-api-key` header
+				// or as a `?key=...` query param. Use the header to avoid leaking the
+				// key into proxy/access logs.
+				forwardedReq.Header.Set("x-goog-api-key", ctx.TargetDownstream.APIKey)
+			default:
 				forwardedReq.Header.Set("Authorization", "Bearer "+ctx.TargetDownstream.APIKey)
 			}
 		}
@@ -803,18 +837,53 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 }
 
 // extractModel parses the request body JSON to find the "model" field.
-func extractModel(body []byte) string {
-	if len(body) == 0 {
-		return ""
+// For Gemini paths (/v1beta/models/{model}:action), the model is embedded
+// in the URL path instead of the body, so we extract it from pathFallback
+// when a body parse returns nothing.
+func extractModel(body []byte, pathFallback string) string {
+	if len(body) > 0 {
+		var payload struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(body, &payload); err == nil && payload.Model != "" {
+			return payload.Model
+		}
 	}
-	var payload struct {
-		Model string `json:"model"`
+	// Fallback: parse from path. Gemini-style: /v1beta/models/{model}:{action}
+	if m := geminiModelFromPath(pathFallback); m != "" {
+		return m
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
-	}
-	return payload.Model
+	return ""
 }
+
+// geminiModelFromPath extracts the model segment from a Gemini path.
+// Examples:
+//   /v1beta/models                       → ""
+//   /v1beta/models/gemini-2.5-pro        → "gemini-2.5-pro"
+//   /v1beta/models/gemini-2.5-pro:generateContent → "gemini-2.5-pro"
+// Returns "" for non-Gemini paths.
+func geminiModelFromPath(path string) string {
+	const prefix = "/v1beta/models/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	if rest == "" {
+		return ""
+	}
+	// Strip the ":action" suffix if present.
+	if i := strings.Index(rest, ":"); i >= 0 {
+		rest = rest[:i]
+	}
+	// Strip a trailing slash if any.
+	rest = strings.TrimSuffix(rest, "/")
+	if rest == "" {
+		return ""
+	}
+	return rest
+}
+
+
 
 // rewriteModelInBody replaces the "model" field in a JSON request body with
 // the given output model name. Returns the original body if parsing fails.
@@ -834,7 +903,8 @@ func rewriteModelInBody(body []byte, outputModel string) []byte {
 }
 
 // detectInputFormat determines the API format of an incoming request based on its URL path.
-// Returns "openai" for /v1/chat/completions, "anthropic" for /v1/messages, or "" for unknown paths.
+// Returns "openai" for /v1/chat/completions, "anthropic" for /v1/messages, "openai_responses"
+// for /v1/responses, or "gemini" for /v1beta/models/* action paths.
 func detectInputFormat(path string) string {
 	switch path {
 	case "/v1/chat/completions":
@@ -843,9 +913,14 @@ func detectInputFormat(path string) string {
 		return "anthropic"
 	case "/v1/responses":
 		return "openai_responses"
-	default:
-		return ""
 	}
+	// Gemini action paths: /v1beta/models/{model}:generateContent,
+	// /v1beta/models/{model}:streamGenerateContent, /v1beta/models/{model}:countTokens.
+	// /v1beta/models (without an action suffix) is a listing endpoint and has no body.
+	if strings.HasPrefix(path, "/v1beta/models/") {
+		return "gemini"
+	}
+	return ""
 }
 
 func isEventStream(contentType string) bool {
