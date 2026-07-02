@@ -646,6 +646,10 @@ func TestGeminiModelFromPathLocal(t *testing.T) {
 		{"/v1beta/models/gemini-2.5-pro", "gemini-2.5-pro"},
 		{"/v1beta/models/gemini-2.5-pro:generateContent", "gemini-2.5-pro"},
 		{"/v1beta/models/gemini-2.5-pro:streamGenerateContent", "gemini-2.5-pro"},
+		// Model names with colons must be preserved.
+		{"/v1beta/models/qwen3.5:9b-mtp:instruct", "qwen3.5:9b-mtp:instruct"},
+		{"/v1beta/models/qwen3.5:9b-mtp:instruct:streamGenerateContent", "qwen3.5:9b-mtp:instruct"},
+		{"/v1beta/models/qwen3.5:9b-mtp:instruct:generateContent", "qwen3.5:9b-mtp:instruct"},
 		{"/v1beta/models", ""},
 		{"/v1beta/models/", ""},
 		{"/v1/chat/completions", ""},

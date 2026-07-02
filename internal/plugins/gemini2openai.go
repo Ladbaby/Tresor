@@ -13,11 +13,16 @@ import (
 
 // geminiModelFromPath extracts the model segment from a Gemini path.
 // Examples:
-//   /v1beta/models                       → ""
-//   /v1beta/models/gemini-2.5-pro        → "gemini-2.5-pro"
-//   /v1beta/models/gemini-2.5-pro:generateContent → "gemini-2.5-pro"
+//   /v1beta/models                              → ""
+//   /v1beta/models/gemini-2.5-pro               → "gemini-2.5-pro"
+//   /v1beta/models/gemini-2.5-pro:generateContent          → "gemini-2.5-pro"
+//   /v1beta/models/qwen3.5:9b-mtp:instruct:streamGenerateContent → "qwen3.5:9b-mtp:instruct"
 // Returns "" for non-Gemini paths. Duplicated from internal/engine so
 // plugins can use it without an import cycle.
+//
+// Model names may legitimately contain colons (e.g. self-hosted models like
+// "qwen3.5:9b-mtp:instruct"), so we only strip a trailing ":{action}" when
+// {action} is a known Gemini verb. Anything else is part of the model id.
 func geminiModelFromPath(path string) string {
 	const prefix = "/v1beta/models/"
 	if !strings.HasPrefix(path, prefix) {
@@ -27,12 +32,22 @@ func geminiModelFromPath(path string) string {
 	if rest == "" {
 		return ""
 	}
-	if i := strings.Index(rest, ":"); i >= 0 {
-		rest = rest[:i]
-	}
 	rest = strings.TrimSuffix(rest, "/")
 	if rest == "" {
 		return ""
+	}
+	knownActions := []string{
+		":streamGenerateContent",
+		":generateContent",
+		":countTokens",
+		":embedContent",
+		":batchGenerateContent",
+	}
+	for _, suffix := range knownActions {
+		if strings.HasSuffix(rest, suffix) {
+			rest = strings.TrimSuffix(rest, suffix)
+			break
+		}
 	}
 	return rest
 }
