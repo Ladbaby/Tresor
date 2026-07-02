@@ -1517,11 +1517,13 @@ html[data-theme="light"] form select {
 .format-openai { background: #1c3d7a; color: #58a6ff; }
 .format-openai_responses { background: #1c3d7a; color: #58a6ff; }
 .format-anthropic { background: #4a2d00; color: #d29922; }
+.format-gemini { background: #1a3a2a; color: #6ee7b7; }
 .format-unknown { background: var(--bg-tertiary); color: var(--text-secondary); }
 
 [data-theme="light"] .format-openai { background: #ddf0ff; color: #0969da; }
 [data-theme="light"] .format-openai_responses { background: #ddf0ff; color: #0969da; }
 [data-theme="light"] .format-anthropic { background: #fff8c2; color: #9e6a0c; }
+[data-theme="light"] .format-gemini { background: #d4f7e3; color: #047857; }
 
 /* Format checkbox group — pill/tag style matching alias model tags */
 .format-checkboxes {
