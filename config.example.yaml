@@ -63,6 +63,17 @@ downstreams:
       - claude-sonnet-4-20250514
       - claude-haiku-4.5
 
+  # - id: gemini
+  #   name: Google Gemini
+  #   api_formats: [gemini]
+  #   base_url: https://generativelanguage.googleapis.com/v1beta
+  #   api_key: ""                          # Set your API key here
+  #   output_model_ids:                    # Known output models for this provider
+  #     - gemini-2.5-pro
+  #     - gemini-2.5-flash
+  #     - gemini-1.5-pro
+  #
+
 # Routing rules (OPTIONAL) — customize forwarding with transform pipelines.
 # Rules are NOT required for normal forwarding: model resolution uses aliases and
 # downstream output_model_ids automatically. Rules only add plugin pipelines;
