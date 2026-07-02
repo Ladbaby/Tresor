@@ -516,6 +516,72 @@ func TestGemini2Anthropic_TransformRequest_Streaming(t *testing.T) {
 	}
 }
 
+// TestGemini2Anthropic_TransformStreamChunk_ThinkingDelta is a regression test
+// for the bug where Anthropic thinking_delta events from a reasoning model
+// (e.g. MiniMax-M2.5) were silently dropped, so Gemini clients (Cherry Studio)
+// saw the model respond without any chain-of-thought content.
+func TestGemini2Anthropic_TransformStreamChunk_ThinkingDelta(t *testing.T) {
+	p := &Gemini2Anthropic{}
+
+	// Simulate one Anthropic content_block_delta with type=thinking_delta.
+	chunk := engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"index":0,"delta":{"type":"thinking_delta","thinking":"The user asked about 2+2."}}`),
+	}
+	out, err := p.TransformStreamChunk(chunk, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Data) == 0 {
+		t.Fatal("expected non-empty output for thinking_delta, got empty (the bug)")
+	}
+	var resp geminiGenerateContentResponse
+	if err := json.Unmarshal(out.Data, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Candidates) == 0 {
+		t.Fatal("expected at least 1 candidate")
+	}
+	parts := resp.Candidates[0].Content.Parts
+	if len(parts) == 0 {
+		t.Fatal("expected at least 1 part in candidate")
+	}
+	if !parts[0].Thought {
+		t.Fatalf("expected part.thought=true for thinking_delta, got %+v", parts[0])
+	}
+	if parts[0].Text != "The user asked about 2+2." {
+		t.Fatalf("expected part.text to carry the thinking text, got %q", parts[0].Text)
+	}
+}
+
+// TestGemini2Anthropic_TransformStreamChunk_TextDelta verifies that a regular
+// text_delta is still emitted without the thought flag (so the final answer
+// doesn't show up as reasoning in the client).
+func TestGemini2Anthropic_TransformStreamChunk_TextDelta(t *testing.T) {
+	p := &Gemini2Anthropic{}
+
+	chunk := engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"index":1,"delta":{"type":"text_delta","text":"Hello"}}`),
+	}
+	out, err := p.TransformStreamChunk(chunk, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if len(out.Data) == 0 {
+		t.Fatal("expected non-empty output for text_delta")
+	}
+	var resp geminiGenerateContentResponse
+	_ = json.Unmarshal(out.Data, &resp)
+	parts := resp.Candidates[0].Content.Parts
+	if parts[0].Thought {
+		t.Fatal("expected part.thought=false for text_delta")
+	}
+	if parts[0].Text != "Hello" {
+		t.Fatalf("expected text 'Hello', got %q", parts[0].Text)
+	}
+}
+
 // ---------------- geminiModelFromPath ----------------
 
 func TestGeminiModelFromPathLocal(t *testing.T) {

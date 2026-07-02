@@ -363,24 +363,44 @@ func (t *Gemini2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 		case "content_block_delta":
 			var d struct {
 				Delta struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					Thinking string `json:"thinking"`
 				} `json:"delta"`
 			}
 			if err := json.Unmarshal(data, &d); err != nil {
 				return true
 			}
-			if d.Delta.Type == "text_delta" && d.Delta.Text != "" {
-				writeSSEData(&out, geminiGenerateContentResponse{
-					ModelVersion: model,
-					Candidates: []geminiCandidate{{
-						Content: geminiContent{
-							Role:  "model",
-							Parts: []geminiPart{{Text: d.Delta.Text}},
-						},
-						Index: 0,
-					}},
-				})
+			switch d.Delta.Type {
+			case "text_delta":
+				if d.Delta.Text != "" {
+					writeSSEData(&out, geminiGenerateContentResponse{
+						ModelVersion: model,
+						Candidates: []geminiCandidate{{
+							Content: geminiContent{
+								Role:  "model",
+								Parts: []geminiPart{{Text: d.Delta.Text}},
+							},
+							Index: 0,
+						}},
+					})
+				}
+			case "thinking_delta":
+				// Reasoning content from Anthropic thinking blocks — emit a
+				// part with thought:true so Gemini clients (Cherry Studio,
+				// etc.) can render the chain-of-thought.
+				if d.Delta.Thinking != "" {
+					writeSSEData(&out, geminiGenerateContentResponse{
+						ModelVersion: model,
+						Candidates: []geminiCandidate{{
+							Content: geminiContent{
+								Role:  "model",
+								Parts: []geminiPart{{Text: d.Delta.Thinking, Thought: true}},
+							},
+							Index: 0,
+						}},
+					})
+				}
 			}
 		case "message_delta":
 			var d struct {
@@ -429,25 +449,46 @@ func (t *Gemini2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	case "content_block_delta":
 		var d struct {
 			Delta struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				Thinking string `json:"thinking"`
 			} `json:"delta"`
 		}
 		if err := json.Unmarshal(chunk.Data, &d); err != nil {
 			return chunk, nil
 		}
-		if d.Delta.Type == "text_delta" && d.Delta.Text != "" {
-			resp := geminiGenerateContentResponse{
-				Candidates: []geminiCandidate{{
-					Content: geminiContent{
-						Role:  "model",
-						Parts: []geminiPart{{Text: d.Delta.Text}},
-					},
-					Index: 0,
-				}},
+		switch d.Delta.Type {
+		case "text_delta":
+			if d.Delta.Text != "" {
+				resp := geminiGenerateContentResponse{
+					Candidates: []geminiCandidate{{
+						Content: geminiContent{
+							Role:  "model",
+							Parts: []geminiPart{{Text: d.Delta.Text}},
+						},
+						Index: 0,
+					}},
+				}
+				data, _ := json.Marshal(resp)
+				return engine.SSEChunk{EventType: "", Data: data}, nil
 			}
-			data, _ := json.Marshal(resp)
-			return engine.SSEChunk{EventType: "", Data: data}, nil
+		case "thinking_delta":
+			// Reasoning content from Anthropic thinking blocks. Emit a part
+			// with thought:true so Gemini clients (e.g. Cherry Studio) can
+			// surface it as a reasoning/chain-of-thought block.
+			if d.Delta.Thinking != "" {
+				resp := geminiGenerateContentResponse{
+					Candidates: []geminiCandidate{{
+						Content: geminiContent{
+							Role:  "model",
+							Parts: []geminiPart{{Text: d.Delta.Thinking, Thought: true}},
+						},
+						Index: 0,
+					}},
+				}
+				data, _ := json.Marshal(resp)
+				return engine.SSEChunk{EventType: "", Data: data}, nil
+			}
 		}
 		return engine.SSEChunk{}, nil
 	case "message_delta":
