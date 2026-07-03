@@ -1375,7 +1375,7 @@ func TestAnthropic2OpenAI_TransformRequest_ThinkingBlock(t *testing.T) {
 			map[string]interface{}{
 				"role": "assistant",
 				"content": []interface{}{
-					map[string]interface{}{"type": "thinking", "text": "I need to think about this"},
+					map[string]interface{}{"type": "thinking", "thinking": "I need to think about this"},
 					map[string]interface{}{"type": "text", "text": "Here is my answer"},
 				},
 			},
