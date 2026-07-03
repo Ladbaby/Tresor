@@ -24,6 +24,16 @@ type a2rStreamState struct {
 	sentStart       bool
 	pendingTextCBS  bool // whether we've sent content_block_start for current text block
 	toolCallBlocks  map[string]*a2rToolCallBlock // output_id -> tool call block
+
+	// Reasoning tracking. When the upstream emits a reasoning output item
+	// (response.output_item.added with type:"reasoning"), we register a
+	// thinking content block at the next available ContentBlockIdx and route
+	// reasoning_summary_text.delta events into thinking_delta deltas on that
+	// block. The empty signature emitted on close satisfies the Anthropic
+	// SDK's discriminated-union schema variant for thinking blocks.
+	pendingThinkingCBS    bool
+	thinkingBlockIdx      int
+	thinkingBlockOutputID string
 }
 
 type a2rToolCallBlock struct {
@@ -281,6 +291,33 @@ func (t *Anthropic2Responses) TransformResponse(resp *http.Response, body []byte
 				Name:  name,
 				Input: input,
 			})
+		case "reasoning":
+			// Reasoning items carry human-readable summaries in summary[]
+			// (each entry is {type:"summary_text", text:"..."}). Concatenate
+			// them as the Anthropic thinking block's text content. The empty
+			// signature satisfies the Anthropic SDK's discriminated-union
+			// schema that requires the `signature` field on every thinking
+			// content block.
+			var thinking strings.Builder
+			if summaries, ok := item["summary"].([]any); ok {
+				for _, s := range summaries {
+					if sMap, ok := s.(map[string]any); ok {
+						if t, _ := sMap["text"].(string); t != "" {
+							if thinking.Len() > 0 {
+								thinking.WriteString("\n\n")
+							}
+							thinking.WriteString(t)
+						}
+					}
+				}
+			}
+			if thinking.Len() > 0 {
+				content = append(content, anthropicContent{
+					Type:      "thinking",
+					Thinking:  thinking.String(),
+					Signature: "",
+				})
+			}
 		}
 	}
 
@@ -428,58 +465,95 @@ func (t *Anthropic2Responses) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 
 	case "response.output_item.added":
 		var evt struct {
-			OutputID string `json:"output_id"`
-			Output   struct {
+			OutputIndex int `json:"output_index"`
+			Item        struct {
 				Type   string `json:"type"`
+				ID     string `json:"id"`
 				CallID string `json:"call_id"`
 				Name   string `json:"name"`
-			} `json:"output"`
+			} `json:"item"`
 		}
-		if err := json.Unmarshal(chunk.Data, &evt); err != nil || evt.Output.Type != "function_call" {
+		if err := json.Unmarshal(chunk.Data, &evt); err != nil {
 			break
 		}
-
-		idx := state.ContentBlockIdx
-		state.ContentBlockIdx++
-		state.toolCallBlocks[evt.OutputID] = &a2rToolCallBlock{
-			ID:       evt.Output.CallID,
-			Name:     evt.Output.Name,
-			BlockIdx: idx,
-		}
-
-		writeSSE("content_block_start", map[string]interface{}{
-			"type":  "content_block_start",
-			"index": idx,
-			"content_block": map[string]interface{}{
-				"type":  "tool_use",
-				"id":    evt.Output.CallID,
-				"name":  evt.Output.Name,
-				"input": map[string]interface{}{},
-			},
-		})
-
-	case "response.function_call_arguments.delta":
-		var evt struct {
-			OutputID string `json:"output_id"`
-			Delta    string `json:"delta"`
-		}
-		if err := json.Unmarshal(chunk.Data, &evt); err != nil || evt.Delta == "" {
-			break
-		}
-
-		tcb, ok := state.toolCallBlocks[evt.OutputID]
-		if !ok {
-			// Unknown tool call — assign a new block index
+		switch evt.Item.Type {
+		case "function_call":
 			idx := state.ContentBlockIdx
 			state.ContentBlockIdx++
-			tcb = &a2rToolCallBlock{BlockIdx: idx}
-			state.toolCallBlocks[evt.OutputID] = tcb
+			state.toolCallBlocks[evt.Item.ID] = &a2rToolCallBlock{
+				ID:       evt.Item.CallID,
+				Name:     evt.Item.Name,
+				BlockIdx: idx,
+			}
 			writeSSE("content_block_start", map[string]interface{}{
 				"type":  "content_block_start",
 				"index": idx,
 				"content_block": map[string]interface{}{
 					"type":  "tool_use",
-					"id":    evt.OutputID,
+					"id":    evt.Item.CallID,
+					"name":  evt.Item.Name,
+					"input": map[string]interface{}{},
+				},
+			})
+		case "reasoning":
+			// Register a thinking block at the next available index so the
+			// Anthropic SDK accepts the discriminated-union schema variant
+			// for thinking content. The Vercel AI SDK / Anthropic SDK
+			// content_block_start schema for type:"thinking" is strict:
+			// only `type` and `thinking` fields are allowed in the
+			// content_block — no `signature` (which arrives via a
+			// separate signature_delta). Subsequent
+			// reasoning_summary_text.delta events will be routed here as
+			// thinking_delta deltas.
+			idx := state.ContentBlockIdx
+			state.ContentBlockIdx++
+			state.pendingThinkingCBS = true
+			state.thinkingBlockIdx = idx
+			state.thinkingBlockOutputID = evt.Item.ID
+			writeSSE("content_block_start", map[string]interface{}{
+				"type":  "content_block_start",
+				"index": idx,
+				"content_block": map[string]interface{}{
+					"type":     "thinking",
+					"thinking": "",
+				},
+			})
+		}
+
+	case "response.function_call_arguments.delta":
+		var evt struct {
+			OutputIndex int    `json:"output_index"`
+			ItemID      string `json:"item_id"`
+			CallID      string `json:"call_id"`
+			Delta       string `json:"delta"`
+		}
+		if err := json.Unmarshal(chunk.Data, &evt); err != nil || evt.Delta == "" {
+			break
+		}
+
+		// The Responses API may use either call_id or item_id depending on
+		// the upstream implementation. item_id is the canonical Responses
+		// API field; call_id is the legacy OpenAI field.
+		key := evt.CallID
+		if key == "" {
+			key = evt.ItemID
+		}
+		if key == "" {
+			break
+		}
+		tcb, ok := state.toolCallBlocks[key]
+		if !ok {
+			// Unknown tool call — assign a new block index
+			idx := state.ContentBlockIdx
+			state.ContentBlockIdx++
+			tcb = &a2rToolCallBlock{BlockIdx: idx}
+			state.toolCallBlocks[key] = tcb
+			writeSSE("content_block_start", map[string]interface{}{
+				"type":  "content_block_start",
+				"index": idx,
+				"content_block": map[string]interface{}{
+					"type":  "tool_use",
+					"id":    key,
 					"name":  "unknown",
 					"input": map[string]interface{}{},
 				},
@@ -495,17 +569,70 @@ func (t *Anthropic2Responses) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 			},
 		})
 
+	case "response.reasoning_summary_text.delta":
+		// Human-readable reasoning summary deltas. Map each one to a
+		// thinking_delta on the currently-open reasoning block so the
+		// Anthropic SDK surfaces the model's reasoning to the user.
+		var evt struct {
+			Delta string `json:"delta"`
+		}
+		if err := json.Unmarshal(chunk.Data, &evt); err != nil || evt.Delta == "" {
+			break
+		}
+		if !state.pendingThinkingCBS {
+			break
+		}
+		writeSSE("content_block_delta", map[string]interface{}{
+			"type":  "content_block_delta",
+			"index": state.thinkingBlockIdx,
+			"delta": map[string]interface{}{
+				"type":     "thinking_delta",
+				"thinking": evt.Delta,
+			},
+		})
+
 	case "response.output_item.done":
 		var evt struct {
-			OutputID string `json:"output_id"`
+			OutputIndex int    `json:"output_index"`
+			ItemID      string `json:"item_id"`
+			Item        struct {
+				ID string `json:"id"`
+			} `json:"item"`
 		}
 		json.Unmarshal(chunk.Data, &evt)
-		if tcb, ok := state.toolCallBlocks[evt.OutputID]; ok {
+		// Prefer item.id (the canonical Responses API identifier) but fall
+		// back to item_id for older implementations.
+		key := evt.Item.ID
+		if key == "" {
+			key = evt.ItemID
+		}
+		if key == "" {
+			break
+		}
+		if tcb, ok := state.toolCallBlocks[key]; ok {
 			writeSSE("content_block_stop", map[string]interface{}{
 				"type":  "content_block_stop",
 				"index": tcb.BlockIdx,
 			})
-			delete(state.toolCallBlocks, evt.OutputID)
+			delete(state.toolCallBlocks, key)
+		} else if state.pendingThinkingCBS && key == state.thinkingBlockOutputID {
+			// Close the reasoning block with an empty signature_delta (the
+			// Anthropic SDK requires `signature` on every thinking block)
+			// followed by content_block_stop.
+			writeSSE("content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": state.thinkingBlockIdx,
+				"delta": map[string]interface{}{
+					"type":      "signature_delta",
+					"signature": "",
+				},
+			})
+			writeSSE("content_block_stop", map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": state.thinkingBlockIdx,
+			})
+			state.pendingThinkingCBS = false
+			state.thinkingBlockOutputID = ""
 		}
 
 	case "response.completed":
@@ -524,6 +651,25 @@ func (t *Anthropic2Responses) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 				"type":  "content_block_stop",
 				"index": state.ContentBlockIdx - 1,
 			})
+		}
+
+		// Close any open reasoning block (the upstream may have ended the
+		// stream without emitting response.output_item.done for the
+		// reasoning item).
+		if state.pendingThinkingCBS {
+			writeSSE("content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": state.thinkingBlockIdx,
+				"delta": map[string]interface{}{
+					"type":      "signature_delta",
+					"signature": "",
+				},
+			})
+			writeSSE("content_block_stop", map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": state.thinkingBlockIdx,
+			})
+			state.pendingThinkingCBS = false
 		}
 
 		// Close any open tool call blocks
