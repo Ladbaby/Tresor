@@ -490,6 +490,20 @@ func (t *Anthropic2Gemini) transformStreamingResponse(body []byte) ([]byte, erro
 	var out bytes.Buffer
 	var id, model string
 
+	// Per-block state. Gemini streams a single part's text across multiple SSE
+	// chunks; we must emit one content_block_start followed by N deltas rather
+	// than re-opening on every chunk. We also need to close the thinking block
+	// with a signature_delta before opening the next text/tool_use block so the
+	// Vercel AI SDK's discriminated-union schema (which requires `signature` on
+	// every `type: "thinking"` block) accepts the start event.
+	var (
+		nextBlockIdx   = 0
+		textBlockOpen  = false
+		thinkingOpen   = false
+		thinkingIdx    = -1
+		toolUseOpen    = false
+	)
+
 	emit := func(eventType string, data interface{}) {
 		writeAnthropicSSE(&out, eventType, data)
 	}
@@ -530,26 +544,75 @@ func (t *Anthropic2Gemini) transformStreamingResponse(body []byte) ([]byte, erro
 		}
 		candidate := chunk.Candidates[0]
 
-		for i, part := range candidate.Content.Parts {
+		for _, part := range candidate.Content.Parts {
 			if part.Text != "" {
 				if part.Thought {
-					emit("content_block_start", map[string]interface{}{
-						"index": i,
-						"content_block": map[string]interface{}{
-							"type": "thinking",
+					// Close any text/tool_use block first so thinking gets a
+					// fresh block index when it appears before/after text.
+					if textBlockOpen {
+						emit("content_block_stop", map[string]interface{}{
+							"type":  "content_block_stop",
+							"index": nextBlockIdx - 1,
+						})
+						textBlockOpen = false
+					}
+					if !thinkingOpen {
+						thinkingIdx = nextBlockIdx
+						nextBlockIdx++
+						emit("content_block_start", map[string]interface{}{
+							"type":  "content_block_start",
+							"index": thinkingIdx,
+							"content_block": map[string]interface{}{
+								"type":     "thinking",
+								"thinking": "",
+							},
+						})
+						thinkingOpen = true
+					}
+					emit("content_block_delta", map[string]interface{}{
+						"type":  "content_block_delta",
+						"index": thinkingIdx,
+						"delta": map[string]interface{}{
+							"type":     "thinking_delta",
 							"thinking": part.Text,
 						},
 					})
 				} else {
-					emit("content_block_start", map[string]interface{}{
-						"index": i,
-						"content_block": map[string]interface{}{
-							"type": "text",
-							"text": "",
-						},
-					})
+					// Close any thinking block first so text gets a fresh
+					// block index (Gemini can emit thought + text in same
+					// chunk). The signature_delta satisfies strict Anthropic
+					// SDK schemas that require `signature` on thinking blocks.
+					if thinkingOpen {
+						emit("content_block_delta", map[string]interface{}{
+							"type":  "content_block_delta",
+							"index": thinkingIdx,
+							"delta": map[string]interface{}{
+								"type":      "signature_delta",
+								"signature": "",
+							},
+						})
+						emit("content_block_stop", map[string]interface{}{
+							"type":  "content_block_stop",
+							"index": thinkingIdx,
+						})
+						thinkingOpen = false
+					}
+					if !textBlockOpen {
+						idx := nextBlockIdx
+						nextBlockIdx++
+						emit("content_block_start", map[string]interface{}{
+							"type":  "content_block_start",
+							"index": idx,
+							"content_block": map[string]interface{}{
+								"type": "text",
+								"text": "",
+							},
+						})
+						textBlockOpen = true
+					}
 					emit("content_block_delta", map[string]interface{}{
-						"index": i,
+						"type":  "content_block_delta",
+						"index": nextBlockIdx - 1,
 						"delta": map[string]interface{}{
 							"type": "text_delta",
 							"text": part.Text,
@@ -558,8 +621,35 @@ func (t *Anthropic2Gemini) transformStreamingResponse(body []byte) ([]byte, erro
 				}
 			}
 			if part.FunctionCall != nil {
+				// Close any open text/thinking block so tool_use gets a fresh
+				// block index.
+				if textBlockOpen {
+					emit("content_block_stop", map[string]interface{}{
+						"type":  "content_block_stop",
+						"index": nextBlockIdx - 1,
+					})
+					textBlockOpen = false
+				}
+				if thinkingOpen {
+					emit("content_block_delta", map[string]interface{}{
+						"type":  "content_block_delta",
+						"index": thinkingIdx,
+						"delta": map[string]interface{}{
+							"type":      "signature_delta",
+							"signature": "",
+						},
+					})
+					emit("content_block_stop", map[string]interface{}{
+						"type":  "content_block_stop",
+						"index": thinkingIdx,
+					})
+					thinkingOpen = false
+				}
+				idx := nextBlockIdx
+				nextBlockIdx++
 				emit("content_block_start", map[string]interface{}{
-					"index": i,
+					"type":  "content_block_start",
+					"index": idx,
 					"content_block": map[string]interface{}{
 						"type":  "tool_use",
 						"id":    "toolu_" + part.FunctionCall.Name,
@@ -567,6 +657,7 @@ func (t *Anthropic2Gemini) transformStreamingResponse(body []byte) ([]byte, erro
 						"input": map[string]interface{}{},
 					},
 				})
+				toolUseOpen = true
 				args := "{}"
 				if part.FunctionCall.Args != nil {
 					b, err := json.Marshal(part.FunctionCall.Args)
@@ -575,9 +666,10 @@ func (t *Anthropic2Gemini) transformStreamingResponse(body []byte) ([]byte, erro
 					}
 				}
 				emit("content_block_delta", map[string]interface{}{
-					"index": i,
+					"type":  "content_block_delta",
+					"index": idx,
 					"delta": map[string]interface{}{
-						"type":        "input_json_delta",
+						"type":         "input_json_delta",
 						"partial_json": args,
 					},
 				})
@@ -585,15 +677,57 @@ func (t *Anthropic2Gemini) transformStreamingResponse(body []byte) ([]byte, erro
 		}
 
 		if candidate.FinishReason != "" {
-			emit("message_delta", map[string]interface{}{
+			// Close any open blocks before the message-level terminator so
+			// Anthropic SDKs (which require content_block_stop before
+			// message_stop) accept the stream.
+			if textBlockOpen {
+				emit("content_block_stop", map[string]interface{}{
+					"type":  "content_block_stop",
+					"index": nextBlockIdx - 1,
+				})
+				textBlockOpen = false
+			}
+			if thinkingOpen {
+				emit("content_block_delta", map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": thinkingIdx,
+					"delta": map[string]interface{}{
+						"type":      "signature_delta",
+						"signature": "",
+					},
+				})
+				emit("content_block_stop", map[string]interface{}{
+					"type":  "content_block_stop",
+					"index": thinkingIdx,
+				})
+				thinkingOpen = false
+			}
+			if toolUseOpen {
+				emit("content_block_stop", map[string]interface{}{
+					"type":  "content_block_stop",
+					"index": nextBlockIdx - 1,
+				})
+				toolUseOpen = false
+			}
+			msgDelta := map[string]interface{}{
 				"delta": map[string]interface{}{
 					"stop_reason":   mapGeminiFinishReasonToAnthropic(candidate.FinishReason, "", ""),
 					"stop_sequence": nil,
 				},
+				// The Vercel AI SDK's message_delta Zod schema requires `usage`
+				// to be present as an object — omitting it when Gemini didn't
+				// include usageMetadata fails validation (path: ["usage"],
+				// expected: "object"). Always emit at least an empty object.
 				"usage": map[string]interface{}{
-					"output_tokens": chunk.UsageMetadata.CandidatesTokenCount,
+					"output_tokens": 0,
 				},
-			})
+			}
+			if chunk.UsageMetadata != nil {
+				msgDelta["usage"] = map[string]interface{}{
+					"output_tokens": chunk.UsageMetadata.CandidatesTokenCount,
+				}
+			}
+			emit("message_delta", msgDelta)
 			emit("message_stop", map[string]interface{}{"type": "message_stop"})
 		}
 		return true
@@ -677,39 +811,120 @@ func (t *Anthropic2Gemini) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	// For simplicity, we emit only the first text-bearing part per chunk
 	// (chunk-level granularity is coarse; multiple parts in one Gemini chunk
 	// is uncommon).
-	for i, part := range candidate.Content.Parts {
+	var pending bytes.Buffer
+	for _, part := range candidate.Content.Parts {
 		if part.Text != "" {
 			if part.Thought {
-				startB, _ := json.Marshal(map[string]interface{}{
-					"index": i,
-					"content_block": map[string]interface{}{
-						"type":     "thinking",
+				// The Anthropic SDK's discriminated-union schema (used by Vercel
+				// AI SDK / Cherry Studio) requires `signature` on every
+				// `type:"thinking"` content block. The Anthropic SDK
+				// discriminated-union Zod schema also requires the start
+				// event to carry both `thinking` and `signature` fields
+				// (empty strings OK). Send the text as a thinking_delta so
+				// the schema validates. The signature_delta is emitted
+				// when the block closes (when a text block opens next or
+				// the stream ends).
+				if !state.thinkingBlockStarted {
+					state.thinkingBlockStarted = true
+					state.thinkingBlockIdx = state.nextBlockIdx()
+					state.textBlockStarted = false
+					startB, _ := json.Marshal(map[string]interface{}{
+						"type":         "content_block_start",
+						"index":        state.thinkingBlockIdx,
+						"content_block": map[string]interface{}{
+							"type":     "thinking",
+							"thinking": "",
+						},
+					})
+					writeAnthropicRawEvent(&pending, "content_block_start", startB)
+					// Fall through to emit the thinking_delta for this part.
+				}
+				deltaB, _ := json.Marshal(map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": state.thinkingBlockIdx,
+					"delta": map[string]interface{}{
+						"type":     "thinking_delta",
 						"thinking": part.Text,
 					},
 				})
-				return engine.SSEChunk{EventType: "content_block_start", Data: startB}, nil
+				writeAnthropicRawEvent(&pending, "content_block_delta", deltaB)
+				continue
+			}
+			// Non-thinking text. If a thinking block is open, close it (with
+			// signature_delta + content_block_stop so the discriminated-union
+			// schema accepts the block) before opening the text block so
+			// indices stay monotonic. The current chunk's text MUST also be
+			// emitted in the same batch so it isn't dropped on the
+			// freshly-opened text block — without the delta the model
+			// produces "Hi " but the client only sees "there! 👋 ...".
+			if state.thinkingBlockStarted {
+				sigB, _ := json.Marshal(map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": state.thinkingBlockIdx,
+					"delta": map[string]interface{}{
+						"type":      "signature_delta",
+						"signature": "",
+					},
+				})
+				writeAnthropicRawEvent(&pending, "content_block_delta", sigB)
+				stopB, _ := json.Marshal(map[string]interface{}{
+					"type":  "content_block_stop",
+					"index": state.thinkingBlockIdx,
+				})
+				writeAnthropicRawEvent(&pending, "content_block_stop", stopB)
+				state.thinkingBlockStarted = false
 			}
 			if !state.textBlockStarted {
 				state.textBlockStarted = true
+				state.textBlockIdx = state.nextBlockIdx()
 				startB, _ := json.Marshal(map[string]interface{}{
-					"index": i,
+					"type":         "content_block_start",
+					"index":        state.textBlockIdx,
 					"content_block": map[string]interface{}{
 						"type": "text",
 						"text": "",
 					},
 				})
-				return engine.SSEChunk{EventType: "content_block_start", Data: startB}, nil
+				writeAnthropicRawEvent(&pending, "content_block_start", startB)
 			}
 			deltaB, _ := json.Marshal(map[string]interface{}{
-				"index": i,
+				"type":  "content_block_delta",
+				"index": state.textBlockIdx,
 				"delta": map[string]interface{}{
 					"type": "text_delta",
 					"text": part.Text,
 				},
 			})
-			return engine.SSEChunk{EventType: "content_block_delta", Data: deltaB}, nil
+			writeAnthropicRawEvent(&pending, "content_block_delta", deltaB)
+			continue
 		}
 		if part.FunctionCall != nil {
+			// Close any open thinking block first.
+			if state.thinkingBlockStarted {
+				sigB, _ := json.Marshal(map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": state.thinkingBlockIdx,
+					"delta": map[string]interface{}{
+						"type":      "signature_delta",
+						"signature": "",
+					},
+				})
+				writeAnthropicRawEvent(&pending, "content_block_delta", sigB)
+				stopB, _ := json.Marshal(map[string]interface{}{
+					"type":  "content_block_stop",
+					"index": state.thinkingBlockIdx,
+				})
+				writeAnthropicRawEvent(&pending, "content_block_stop", stopB)
+				state.thinkingBlockStarted = false
+			}
+			if state.textBlockStarted {
+				stopB, _ := json.Marshal(map[string]interface{}{
+					"type":  "content_block_stop",
+					"index": state.textBlockIdx,
+				})
+				writeAnthropicRawEvent(&pending, "content_block_stop", stopB)
+				state.textBlockStarted = false
+			}
 			args := "{}"
 			if part.FunctionCall.Args != nil {
 				b, err := json.Marshal(part.FunctionCall.Args)
@@ -717,49 +932,120 @@ func (t *Anthropic2Gemini) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					args = string(b)
 				}
 			}
+			idx := state.nextBlockIdx()
 			startB, _ := json.Marshal(map[string]interface{}{
-				"index": i,
+				"type":         "content_block_start",
+				"index":        idx,
 				"content_block": map[string]interface{}{
-					"type":        "tool_use",
-					"id":          "toolu_" + part.FunctionCall.Name,
-					"name":        part.FunctionCall.Name,
-					"input":       map[string]interface{}{},
+					"type":  "tool_use",
+					"id":    "toolu_" + part.FunctionCall.Name,
+					"name":  part.FunctionCall.Name,
+					"input": map[string]interface{}{},
 				},
 			})
-			_ = startB
+			writeAnthropicRawEvent(&pending, "content_block_start", startB)
 			deltaB, _ := json.Marshal(map[string]interface{}{
-				"index": i,
+				"type":  "content_block_delta",
+				"index": idx,
 				"delta": map[string]interface{}{
 					"type":         "input_json_delta",
 					"partial_json": args,
 				},
 			})
-			return engine.SSEChunk{EventType: "content_block_delta", Data: deltaB}, nil
+			writeAnthropicRawEvent(&pending, "content_block_delta", deltaB)
+			continue
 		}
 	}
 
 	if candidate.FinishReason != "" {
-		stopB, _ := json.Marshal(map[string]interface{}{
+		// Close any open thinking block first (with signature_delta + stop),
+		// then close any open text block, then emit the message-level
+		// terminator. Without the text content_block_stop the Anthropic SDK
+		// either truncates the trailing text or fails validation — the
+		// Vercel AI SDK's discriminated-union schema requires every opened
+		// content_block to be closed with a matching stop event before
+		// message_delta.
+		if state.thinkingBlockStarted {
+			sigB, _ := json.Marshal(map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": state.thinkingBlockIdx,
+				"delta": map[string]interface{}{
+					"type":      "signature_delta",
+					"signature": "",
+				},
+			})
+			writeAnthropicRawEvent(&pending, "content_block_delta", sigB)
+			stopB, _ := json.Marshal(map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": state.thinkingBlockIdx,
+			})
+			writeAnthropicRawEvent(&pending, "content_block_stop", stopB)
+			state.thinkingBlockStarted = false
+		}
+		if state.textBlockStarted {
+			stopB, _ := json.Marshal(map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": state.textBlockIdx,
+			})
+			writeAnthropicRawEvent(&pending, "content_block_stop", stopB)
+			state.textBlockStarted = false
+		}
+		stopDelta := map[string]interface{}{
+			"type": "message_delta",
 			"delta": map[string]interface{}{
 				"stop_reason":   mapGeminiFinishReasonToAnthropic(candidate.FinishReason, "", ""),
 				"stop_sequence": nil,
 			},
+			// The Vercel AI SDK's message_delta Zod schema requires `usage` to
+			// be present as an object (path: ["usage"], expected: "object").
+			// Omitting it when Gemini didn't include usageMetadata fails
+			// validation. Always emit at least an empty usage object.
 			"usage": map[string]interface{}{
-				"output_tokens": resp.UsageMetadata.CandidatesTokenCount,
+				"output_tokens": 0,
 			},
-		})
-		return engine.SSEChunk{EventType: "message_delta", Data: stopB}, nil
+		}
+		if resp.UsageMetadata != nil {
+			stopDelta["usage"] = map[string]interface{}{
+				"output_tokens": resp.UsageMetadata.CandidatesTokenCount,
+			}
+		}
+		stopB, _ := json.Marshal(stopDelta)
+		writeAnthropicRawEvent(&pending, "message_delta", stopB)
 	}
 
-	return engine.SSEChunk{}, nil
+	if pending.Len() == 0 {
+		return engine.SSEChunk{}, nil
+	}
+	return engine.SSEChunk{Data: pending.Bytes()}, nil
 }
 
 // anth2geminiStreamState tracks state across SSE chunks for a single stream.
 type anth2geminiStreamState struct {
-	ID                string
-	Model             string
-	started           bool
-	textBlockStarted  bool
+	ID                   string
+	Model                string
+	started              bool
+	textBlockStarted     bool
+	textBlockIdx         int
+	thinkingBlockStarted bool
+	thinkingBlockIdx     int
+	blockIdxCounter      int
+}
+
+// nextBlockIdx returns the next monotonically increasing content-block index.
+func (s *anth2geminiStreamState) nextBlockIdx() int {
+	idx := s.blockIdxCounter
+	s.blockIdxCounter++
+	return idx
+}
+
+// writeAnthropicRawEvent writes a pre-marshaled SSE event with the given
+// event type and raw JSON data. Useful when batching multiple events into a
+// single SSEChunk.
+func writeAnthropicRawEvent(buf *bytes.Buffer, eventType string, rawData []byte) {
+	fmt.Fprintf(buf, "event: %s\n", eventType)
+	buf.WriteString("data: ")
+	buf.Write(rawData)
+	buf.WriteString("\n\n")
 }
 
 // Interface compliance.
