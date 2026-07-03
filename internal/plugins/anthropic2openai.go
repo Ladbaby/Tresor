@@ -34,6 +34,8 @@ type anthropicRequest2 struct {
 type anthropicContentBlock2 struct {
     Type      string          `json:"type"`
     Text      string          `json:"text,omitempty"`
+    Thinking  string          `json:"thinking,omitempty"`
+    Signature string          `json:"signature,omitempty"`
     ID        string          `json:"id,omitempty"`
     Name      string          `json:"name,omitempty"`
     Input     json.RawMessage `json:"input,omitempty"`
@@ -216,8 +218,8 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 						textParts = append(textParts, block.Text)
 					}
 				case "thinking":
-					if block.Text != "" {
-						reasoningContent += block.Text
+					if block.Thinking != "" {
+						reasoningContent += block.Thinking
 					}
 				case "image":
 					img := convertAnthropicImageToOpenAI(block)
@@ -435,6 +437,37 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
     inContentBlock := false
     messageStarted := false
     outputTextLen := 0 // accumulated output text length (for usage estimate)
+    // Track whether a thinking block is currently open. Reasoning models
+    // (OpenAI o1/o3, DeepSeek-R1, etc.) emit `reasoning_content` alongside
+    // `content`; we surface that as a thinking content block on the wire
+    // before the text block so the Anthropic SDK's discriminated-union schema
+    // (which requires `signature` on every thinking block) accepts it.
+    inThinkingBlock := false
+    contentBlockIdx := -1
+
+    closeThinkingBlock := func() {
+        if !inThinkingBlock {
+            return
+        }
+        // Empty signature satisfies the SDK schema variant that requires the
+        // `signature` field on every `type:"thinking"` content block.
+        sig := struct {
+            Type  string `json:"type"`
+            Index int    `json:"index"`
+            Delta struct {
+                Type      string `json:"type"`
+                Signature string `json:"signature"`
+            } `json:"delta"`
+        }{Type: "content_block_delta", Index: contentBlockIdx}
+        sig.Delta.Type = "signature_delta"
+        sig.Delta.Signature = ""
+        writeAnthropicSSE(&out, "content_block_delta", sig)
+        writeAnthropicSSE(&out, "content_block_stop", struct {
+            Type  string `json:"type"`
+            Index int    `json:"index"`
+        }{Type: "content_block_stop", Index: contentBlockIdx})
+        inThinkingBlock = false
+    }
 
     parseOpenAISSE(body, func(data []byte) bool {
         var chunk openAIChunk
@@ -466,20 +499,62 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
         }
 
         for _, choice := range chunk.Choices {
-            if choice.Delta.Role == "assistant" && !inContentBlock {
+            // Emit a thinking block for reasoning_content before text so the
+            // Anthropic SDK accepts the discriminated-union schema (it
+            // requires `signature` on every thinking block).
+            if choice.Delta.ReasoningContent != "" {
+                if !inThinkingBlock {
+                    // Close any open text block first so thinking gets a
+                    // fresh block index when reasoning interleaves with text.
+                    if inContentBlock {
+                        writeAnthropicSSE(&out, "content_block_stop", struct {
+                            Type  string `json:"type"`
+                            Index int    `json:"index"`
+                        }{Type: "content_block_stop", Index: contentBlockIdx})
+                        inContentBlock = false
+                    }
+                    contentBlockIdx++
+                    start := struct {
+                        Type         string `json:"type"`
+                        Index        int    `json:"index"`
+                        ContentBlock struct {
+                            Type     string `json:"type"`
+                            Thinking string `json:"thinking"`
+                        } `json:"content_block"`
+                    }{Type: "content_block_start", Index: contentBlockIdx}
+                    start.ContentBlock.Type = "thinking"
+                    start.ContentBlock.Thinking = ""
+                    writeAnthropicSSE(&out, "content_block_start", start)
+                    inThinkingBlock = true
+                }
+                delta := struct {
+                    Type  string `json:"type"`
+                    Index int    `json:"index"`
+                    Delta struct {
+                        Type     string `json:"type"`
+                        Thinking string `json:"thinking"`
+                    } `json:"delta"`
+                }{Type: "content_block_delta", Index: contentBlockIdx}
+                delta.Delta.Type = "thinking_delta"
+                delta.Delta.Thinking = choice.Delta.ReasoningContent
+                writeAnthropicSSE(&out, "content_block_delta", delta)
+            }
+
+            if choice.Delta.Role == "assistant" && !inContentBlock && !inThinkingBlock {
                 // Always emit content_block_start immediately, even with empty text.
                 // Deferring (pendingContentBlock) caused an empty data: \n\n SSE event
                 // that could confuse Anthropic SDK event parsers.
+                contentBlockIdx++
                 msg := struct {
                     Type         string `json:"type"`
+                    Index        int    `json:"index"`
                     ContentBlock struct {
                         Type string `json:"type"`
                         Text string `json:"text"`
                     } `json:"content_block"`
-                    Index int `json:"index"`
                 }{
                     Type:  "content_block_start",
-                    Index: choice.Index,
+                    Index: contentBlockIdx,
                 }
                 msg.ContentBlock.Type = "text"
                 msg.ContentBlock.Text = choice.Delta.Content
@@ -487,6 +562,24 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
                 writeAnthropicSSE(&out, "content_block_start", msg)
                 inContentBlock = true
             } else if choice.Delta.Content != "" {
+                // If reasoning finished just before text, close the thinking
+                // block first so the text block can use a fresh index.
+                closeThinkingBlock()
+                if !inContentBlock {
+                    contentBlockIdx++
+                    open := struct {
+                        Type         string `json:"type"`
+                        Index        int    `json:"index"`
+                        ContentBlock struct {
+                            Type string `json:"type"`
+                            Text string `json:"text"`
+                        } `json:"content_block"`
+                    }{Type: "content_block_start", Index: contentBlockIdx}
+                    open.ContentBlock.Type = "text"
+                    open.ContentBlock.Text = ""
+                    writeAnthropicSSE(&out, "content_block_start", open)
+                    inContentBlock = true
+                }
                 delta := struct {
                     Type  string `json:"type"`
                     Index int    `json:"index"`
@@ -494,10 +587,7 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
                         Type string `json:"type"`
                         Text string `json:"text"`
                     } `json:"delta"`
-                }{
-                    Type:  "content_block_delta",
-                    Index: choice.Index,
-                }
+                }{Type: "content_block_delta", Index: contentBlockIdx}
                 delta.Delta.Type = "text_delta"
                 delta.Delta.Text = choice.Delta.Content
                 outputTextLen += len(choice.Delta.Content)
@@ -512,10 +602,14 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
                 if stopReason == "tool_calls" {
                     stopReason = "tool_use"
                 }
-                writeAnthropicSSE(&out, "content_block_stop", struct {
-                    Type  string `json:"type"`
-                    Index int    `json:"index"`
-                }{Type: "content_block_stop", Index: choice.Index})
+                closeThinkingBlock()
+                if inContentBlock {
+                    writeAnthropicSSE(&out, "content_block_stop", struct {
+                        Type  string `json:"type"`
+                        Index int    `json:"index"`
+                    }{Type: "content_block_stop", Index: contentBlockIdx})
+                    inContentBlock = false
+                }
                 outputTokens := outputTextLen / 4
                 if outputTokens < 1 {
                     outputTokens = 1
@@ -551,9 +645,20 @@ func (t *Anthropic2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
         return body, nil
     }
 
-    // Build Anthropic response content blocks (text + tool_use)
+    // Build Anthropic response content blocks (text + reasoning + tool_use)
     content := make([]anthropicContent, 0)
     for _, choice := range openAIResp.Choices {
+        // Add reasoning/thinking block if the upstream emitted reasoning_content.
+        // The Anthropic SDK's discriminated-union schema requires `signature` on
+        // every thinking block; emit an empty string when the upstream didn't
+        // provide one (Anthropic's own blocks also support empty signatures).
+        if choice.Message.ReasoningContent != "" {
+            content = append(content, anthropicContent{
+                Type:      "thinking",
+                Thinking:  choice.Message.ReasoningContent,
+                Signature: "",
+            })
+        }
         // Add text content if present
         if choice.Message.Content.Text != "" {
             content = append(content, anthropicContent{Type: "text", Text: choice.Message.Content.Text})
@@ -677,8 +782,50 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
     }
 
     for _, choice := range oaiChunk.Choices {
-        if choice.Delta.Role == "assistant" && !state.inContentBlock {
+        // Emit a thinking block for reasoning_content before text so the
+        // Anthropic SDK accepts the discriminated-union schema (which requires
+        // `signature` on every thinking block).
+        if choice.Delta.ReasoningContent != "" {
+            if !state.inThinkingBlock {
+                // Close any open text block first so thinking gets a fresh
+                // block index when reasoning interleaves with text.
+                if state.inContentBlock {
+                    writeAnthropicSSE(&out, "content_block_stop", struct {
+                        Type  string `json:"type"`
+                        Index int    `json:"index"`
+                    }{Type: "content_block_stop", Index: state.contentBlockIdx})
+                    state.inContentBlock = false
+                }
+                state.contentBlockIdx++
+                start := struct {
+                    Type         string `json:"type"`
+                    Index        int    `json:"index"`
+                    ContentBlock struct {
+                        Type     string `json:"type"`
+                        Thinking string `json:"thinking"`
+                    } `json:"content_block"`
+                }{Type: "content_block_start", Index: state.contentBlockIdx}
+                start.ContentBlock.Type = "thinking"
+                start.ContentBlock.Thinking = ""
+                writeAnthropicSSE(&out, "content_block_start", start)
+                state.inThinkingBlock = true
+            }
+            delta := struct {
+                Type  string `json:"type"`
+                Index int    `json:"index"`
+                Delta struct {
+                    Type     string `json:"type"`
+                    Thinking string `json:"thinking"`
+                } `json:"delta"`
+            }{Type: "content_block_delta", Index: state.contentBlockIdx}
+            delta.Delta.Type = "thinking_delta"
+            delta.Delta.Thinking = choice.Delta.ReasoningContent
+            writeAnthropicSSE(&out, "content_block_delta", delta)
+        }
+
+        if choice.Delta.Role == "assistant" && !state.inContentBlock && !state.inThinkingBlock {
             // Always emit content_block_start immediately, even with empty text.
+            state.contentBlockIdx++
             msg := struct {
                 Type         string `json:"type"`
                 ContentBlock struct {
@@ -686,14 +833,50 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
                     Text string `json:"text"`
                 } `json:"content_block"`
                 Index int `json:"index"`
-            }{Type: "content_block_start", Index: choice.Index}
+            }{Type: "content_block_start", Index: state.contentBlockIdx}
             msg.ContentBlock.Type = "text"
             msg.ContentBlock.Text = choice.Delta.Content
             state.outputTokens += len(choice.Delta.Content)
-            state.contentBlockIdx++
             writeAnthropicSSE(&out, "content_block_start", msg)
             state.inContentBlock = true
         } else if choice.Delta.Content != "" {
+            // If reasoning finished just before text, close the thinking block
+            // first (with signature_delta) so the text block can use a fresh
+            // index. The empty signature satisfies the SDK schema variant
+            // that requires `signature` on every thinking block.
+            if state.inThinkingBlock {
+                sig := struct {
+                    Type  string `json:"type"`
+                    Index int    `json:"index"`
+                    Delta struct {
+                        Type      string `json:"type"`
+                        Signature string `json:"signature"`
+                    } `json:"delta"`
+                }{Type: "content_block_delta", Index: state.contentBlockIdx}
+                sig.Delta.Type = "signature_delta"
+                sig.Delta.Signature = ""
+                writeAnthropicSSE(&out, "content_block_delta", sig)
+                writeAnthropicSSE(&out, "content_block_stop", struct {
+                    Type  string `json:"type"`
+                    Index int    `json:"index"`
+                }{Type: "content_block_stop", Index: state.contentBlockIdx})
+                state.inThinkingBlock = false
+            }
+            if !state.inContentBlock {
+                state.contentBlockIdx++
+                open := struct {
+                    Type         string `json:"type"`
+                    ContentBlock struct {
+                        Type string `json:"type"`
+                        Text string `json:"text"`
+                    } `json:"content_block"`
+                    Index int `json:"index"`
+                }{Type: "content_block_start", Index: state.contentBlockIdx}
+                open.ContentBlock.Type = "text"
+                open.ContentBlock.Text = ""
+                writeAnthropicSSE(&out, "content_block_start", open)
+                state.inContentBlock = true
+            }
             delta := struct {
                 Type  string `json:"type"`
                 Index int    `json:"index"`
@@ -701,7 +884,7 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
                     Type string `json:"type"`
                     Text string `json:"text"`
                 } `json:"delta"`
-            }{Type: "content_block_delta", Index: choice.Index}
+            }{Type: "content_block_delta", Index: state.contentBlockIdx}
             delta.Delta.Type = "text_delta"
             delta.Delta.Text = choice.Delta.Content
             state.outputTokens += len(choice.Delta.Content)
@@ -789,12 +972,33 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
                 stopReason = "max_tokens"
             }
 
+            // Close the thinking block (with signature_delta) first so the
+            // Anthropic SDK accepts the discriminated-union schema.
+            if state.inThinkingBlock {
+                sig := struct {
+                    Type  string `json:"type"`
+                    Index int    `json:"index"`
+                    Delta struct {
+                        Type      string `json:"type"`
+                        Signature string `json:"signature"`
+                    } `json:"delta"`
+                }{Type: "content_block_delta", Index: state.contentBlockIdx}
+                sig.Delta.Type = "signature_delta"
+                sig.Delta.Signature = ""
+                writeAnthropicSSE(&out, "content_block_delta", sig)
+                writeAnthropicSSE(&out, "content_block_stop", struct {
+                    Type  string `json:"type"`
+                    Index int    `json:"index"`
+                }{Type: "content_block_stop", Index: state.contentBlockIdx})
+                state.inThinkingBlock = false
+            }
+
             // Close text content block if open
             if state.inContentBlock {
                 writeAnthropicSSE(&out, "content_block_stop", struct {
                     Type  string `json:"type"`
                     Index int    `json:"index"`
-                }{Type: "content_block_stop", Index: choice.Index})
+                }{Type: "content_block_stop", Index: state.contentBlockIdx})
                 state.inContentBlock = false
             }
 
@@ -845,6 +1049,7 @@ type anthropic2openaiStreamState struct {
     Model            string
     messageStarted   bool
     inContentBlock   bool
+    inThinkingBlock  bool
     messageDeltaSent bool
     outputTokens     int // accumulated output text (rough estimate for usage)
 
