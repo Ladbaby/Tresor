@@ -619,10 +619,19 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		}
 		return true
 	}
-	tryFlush := func() bool {
+	tryFlush := func() (ok bool) {
 		if clientGone {
 			return false
 		}
+		// A broken or hijacked client connection can make flusher.Flush()
+		// panic. The flush is best-effort — capture any panic and treat
+		// it as "client gone" so the rest of the stream tears down
+		// cleanly rather than crashing the proxy request goroutine.
+		defer func() {
+			if r := recover(); r != nil {
+				ok = false
+			}
+		}()
 		flusher.Flush()
 		return true
 	}
@@ -639,7 +648,9 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			if !tryWrite([]byte(line + "\n")) {
 				return
 			}
-			flusher.Flush()
+			if !tryFlush() {
+				return
+			}
 		}
 		if err := scanner.Err(); err != nil {
 			log.Printf("Stream ended: %v", err)
@@ -748,7 +759,9 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		if !tryWrite([]byte(line + "\n")) {
 			return
 		}
-		flusher.Flush()
+		if !tryFlush() {
+			return
+		}
 	}
 
 	// Flush any remaining event (handles responses that don't end with \n\n)
@@ -767,8 +780,10 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			syntheticChunk := SSEChunk{Data: []byte("[DONE]")}
 			transformed, err := ExecuteStreamResponsePipeline(syntheticChunk, ctx, pipeline.StreamResponseSteps)
 			if err == nil && len(transformed.Data) > 0 {
-				tryWrite(transformed.Data)
-				flusher.Flush()
+				if !tryWrite(transformed.Data) {
+					return
+				}
+				tryFlush()
 			}
 		}
 	}
