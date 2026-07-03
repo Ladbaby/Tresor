@@ -43,6 +43,8 @@ func (m *mockRegistryImpl) CreatePlugin(pluginID string, config map[string]inter
 		return &mockGemini2OpenAI{}, nil
 	case "gemini2anthropic":
 		return &mockGemini2Anthropic{}, nil
+	case "gemini2responses":
+		return &mockGemini2Responses{}, nil
 	default:
 			return nil, fmt.Errorf("unknown plugin: %s", pluginID)
 	}
@@ -237,6 +239,22 @@ func (m *mockGemini2Anthropic) TransformResponse(resp *http.Response, body []byt
 }
 
 func (m *mockGemini2Anthropic) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+// mockGemini2Responses marks the request as translated Gemini→Responses API.
+type mockGemini2Responses struct{}
+
+func (m *mockGemini2Responses) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "gemini2responses")
+	return req, body, nil
+}
+
+func (m *mockGemini2Responses) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (m *mockGemini2Responses) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
 	return chunk, nil
 }
 
@@ -1404,6 +1422,46 @@ func TestEngine_HandleProxy_GeminiInput_AutoTranslate_Gemini2OpenAI(t *testing.T
 	}
 	// Note: the mock transformer doesn't rewrite the URL path; the real
 	// Gemini2OpenAI plugin does, and is covered by plugins/gemini_test.go.
+}
+
+// TestEngine_HandleProxy_GeminiInput_AutoTranslate_Gemini2Responses verifies
+// that a Gemini-format request routed to a downstream with api_formats
+// [openai_responses] is auto-translated via gemini2responses. This is the
+// regression test for the case where Cherry Studio uses provider type
+// "Gemini" against a Responses-API downstream.
+func TestEngine_HandleProxy_GeminiInput_AutoTranslate_Gemini2Responses(t *testing.T) {
+	s := newTestStore(t)
+
+	var translatedHeader, authHeader string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		translatedHeader = r.Header.Get("X-Auto-Translated")
+		authHeader = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	addDownstream(t, s, "resp-ds", "ResponsesDS", dsServer.URL, "sk-resp", "openai_responses")
+	addOutputModelIDs(t, s, "resp-ds", "gpt-5")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gpt-5:generateContent", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", resp.StatusCode, w.Body.String())
+	}
+	if translatedHeader != "gemini2responses" {
+		t.Fatalf("expected X-Auto-Translated: gemini2responses, got %q", translatedHeader)
+	}
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		t.Fatalf("expected Bearer auth, got %q", authHeader)
+	}
 }
 
 // TestEngine_IsLLMPath_Gemini verifies that Gemini paths are recognized as

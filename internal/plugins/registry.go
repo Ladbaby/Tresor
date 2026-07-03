@@ -161,6 +161,17 @@ func NewRegistry() engine.PluginRegistry {
 		return &Gemini2Anthropic{}, nil
 	})
 
+	r.register("gemini2responses", engine.PluginInfo{
+		ID:          "gemini2responses",
+		Description: "Converts Google Gemini generateContent requests to OpenAI Responses API format and vice versa",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &Gemini2Responses{}, nil
+	})
+
 	return r
 }
 

@@ -399,6 +399,8 @@ func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store
 				pluginID = "gemini2openai"
 			case slices.Contains(ds.ApiFormats, "anthropic"):
 				pluginID = "gemini2anthropic"
+			case slices.Contains(ds.ApiFormats, "openai_responses"):
+				pluginID = "gemini2responses"
 			}
 		}
 		if pluginID != "" {
@@ -1112,9 +1114,9 @@ type geminiModelRecord struct {
 // handleGeminiModels responds to GET /v1beta/models with a Gemini-format list
 // of available models. We surface every downstream model regardless of the
 // downstream's configured `api_formats`: when a Gemini-format request comes
-// in for a downstream that speaks OpenAI or Anthropic, the engine auto-
-// inserts the appropriate Gemini->OpenAI or Gemini->Anthropic transformer
-// (see buildPipeline). Hiding those models here would be a lie about what's
+// in for a downstream that speaks OpenAI, Anthropic, or OpenAI Responses, the
+// engine auto-inserts the appropriate Gemini->X transformer (see
+// buildPipeline). Hiding those models here would be a lie about what's
 // reachable.
 //
 // Alias inputs (the model name the client uses to talk to the gateway) are
@@ -1173,8 +1175,8 @@ func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
 	// `m.name.startsWith('models/') ? m.name.slice(7) : m.name`.
 	//
 	// We include models from every downstream — not just Gemini-format ones
-	// — because the engine can auto-translate Gemini->OpenAI/Anthropic. See
-	// the function-level comment for the rationale.
+	// — because the engine can auto-translate Gemini->OpenAI/Anthropic/
+	// OpenAI Responses. See the function-level comment for the rationale.
 	for _, ds := range downstreams {
 		for _, m := range ds.OutputModelIDs {
 			name := m
