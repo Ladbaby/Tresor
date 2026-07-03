@@ -277,14 +277,29 @@ func (l *RequestLogger) StreamLogs(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Write SSE comment to keep connection alive
-			fmt.Fprint(w, ": heartbeat\n\n")
-			flusher.Flush()
+			// Write SSE comment to keep connection alive. Guard with
+			// recover so a broken or hijacked client connection doesn't
+			// panic the logger goroutine.
+			func() {
+				defer func() { _ = recover() }()
+				fmt.Fprint(w, ": heartbeat\n\n")
+				flusher.Flush()
+			}()
 		}
 	}
 }
 
-func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) error {
+func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) (err error) {
+	// The flusher may panic if the underlying connection has been closed
+	// or hijacked. Recover and surface the failure as an error so the
+	// caller can drop the subscriber rather than crashing the goroutine
+	// that called into Record/Debug (which may be serving a live proxy
+	// request, where a panic here used to bring the whole request down).
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sse flush panic: %v", r)
+		}
+	}()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
@@ -292,6 +307,8 @@ func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, dat
 	fmt.Fprintln(w, "event:", event)
 	fmt.Fprintln(w, "data:", string(jsonData))
 	fmt.Fprintln(w, "") // empty line terminates SSE event
-	flusher.Flush()
+	if flusher != nil {
+		flusher.Flush()
+	}
 	return nil
 }
