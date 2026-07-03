@@ -174,6 +174,7 @@ func (t *OpenAI2Responses) TransformResponse(resp *http.Response, body []byte, c
 
 	finishReason := mapOpenAIFinishReason(status)
 	var content string
+	var reasoningContent string
 	var toolCalls []openAIChatToolCall
 
 	output, _ := respMap["output"].([]any)
@@ -208,6 +209,25 @@ func (t *OpenAI2Responses) TransformResponse(resp *http.Response, body []byte, c
 				}
 				content += text
 			}
+		case "reasoning":
+			// Reasoning items carry human-readable summaries in summary[]
+			// (each entry is {type:"summary_text", text:"..."}). Concatenate
+			// them as the Chat Completions reasoning_content so the Gemini
+			// client can render the model's thinking.
+			if summaries, ok := item["summary"].([]any); ok {
+				for _, sRaw := range summaries {
+					s, ok := sRaw.(map[string]any)
+					if !ok {
+						continue
+					}
+					if text, _ := s["text"].(string); text != "" {
+						if reasoningContent != "" {
+							reasoningContent += "\n\n"
+						}
+						reasoningContent += text
+					}
+				}
+			}
 		case "function_call":
 			callID, _ := item["call_id"].(string)
 			name, _ := item["name"].(string)
@@ -226,17 +246,21 @@ func (t *OpenAI2Responses) TransformResponse(resp *http.Response, body []byte, c
 		}
 	}
 
+	msg := map[string]any{
+		"role":    "assistant",
+		"content": content,
+	}
+	if reasoningContent != "" {
+		msg["reasoning_content"] = reasoningContent
+	}
 	response := map[string]any{
 		"id":     respID,
 		"object": "chat.completion",
 		"model":  model,
 		"choices": []any{
 			map[string]any{
-				"index": 0,
-				"message": map[string]any{
-					"role":    "assistant",
-					"content": content,
-				},
+				"index":         0,
+				"message":        msg,
 				"finish_reason": finishReason,
 			},
 		},
@@ -349,6 +373,61 @@ func (t *OpenAI2Responses) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				},
 			})
 		}
+
+	case "response.reasoning_summary_text.delta":
+		// Human-readable reasoning summary deltas. Map to Chat Completions
+		// delta.reasoning_content so downstream transformers (Gemini) can
+		// surface them as thought parts.
+		var evt struct {
+			Delta string `json:"delta"`
+		}
+		if err := json.Unmarshal(chunk.Data, &evt); err != nil || evt.Delta == "" {
+			break
+		}
+		if !state.sentRole {
+			// Mark role as sent but don't synthesize a separate role chunk —
+			// the assistant role for a reasoning-only stream arrives later
+			// with response.output_text.delta. We still need the upstream
+			// to see the reasoning_content delta, so emit it directly.
+			state.sentRole = true
+		}
+		writeChunk(map[string]interface{}{
+			"choices": []interface{}{
+				map[string]interface{}{
+					"index": 0,
+					"delta": map[string]interface{}{
+						"reasoning_content": evt.Delta,
+					},
+					"finish_reason": nil,
+				},
+			},
+		})
+
+	case "response.reasoning_text.delta":
+		// Raw reasoning content deltas (encrypted-content path). Same
+		// treatment as summary deltas — emit as reasoning_content. We
+		// don't try to decrypt or reinterpret the bytes; Chat Completions
+		// clients pass the string through unchanged.
+		var evt struct {
+			Delta string `json:"delta"`
+		}
+		if err := json.Unmarshal(chunk.Data, &evt); err != nil || evt.Delta == "" {
+			break
+		}
+		if !state.sentRole {
+			state.sentRole = true
+		}
+		writeChunk(map[string]interface{}{
+			"choices": []interface{}{
+				map[string]interface{}{
+					"index": 0,
+					"delta": map[string]interface{}{
+						"reasoning_content": evt.Delta,
+					},
+					"finish_reason": nil,
+				},
+			},
+		})
 
 	case "response.output_item.added":
 		var evt struct {

@@ -294,8 +294,27 @@ func (t *Responses2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 
 	output := make([]map[string]any, 0)
 	msgContent := make([]map[string]any, 0)
+	var reasoningItems []map[string]any
 
 	for _, choice := range oaiResp.Choices {
+		// Surface reasoning text emitted by an OpenAI Chat Completions upstream
+		// (message.reasoning_content) as a Responses-style reasoning output
+		// item with summary_text, mirroring what the client receives from
+		// first-party OpenAI Responses API. Without this the thinking block
+		// gets silently dropped on the responses2openai hop.
+		if choice.Message.ReasoningContent != "" {
+			reasoningItems = append(reasoningItems, map[string]any{
+				"id":   respID + "_reasoning_0",
+				"type": "reasoning",
+				"summary": []any{
+					map[string]any{
+						"type": "summary_text",
+						"text": choice.Message.ReasoningContent,
+					},
+				},
+			})
+		}
+
 		if choice.Message.Content.Text != "" {
 			msgContent = append(msgContent, map[string]any{
 				"type":        "output_text",
@@ -316,16 +335,22 @@ func (t *Responses2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 		}
 	}
 
+	// Reasoning items come first (so they precede the assistant message in
+	// the output array), then the message item, then any function_call items.
+	// This matches the first-party Responses API output ordering.
+	final := make([]map[string]any, 0, len(reasoningItems)+len(output)+1)
+	final = append(final, reasoningItems...)
 	if len(msgContent) > 0 {
-		msgItem := map[string]any{
+		final = append(final, map[string]any{
 			"type":    "message",
 			"id":      respID + "_msg_0",
 			"status":  "completed",
 			"role":    "assistant",
 			"content": msgContent,
-		}
-		output = append([]map[string]any{msgItem}, output...)
+		})
 	}
+	final = append(final, output...)
+	output = final
 
 	usage := map[string]any{
 		"input_tokens":  0,
@@ -357,6 +382,11 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 	var messageStarted bool
 	var msgItemSent bool
 	var contentPartSent bool
+	var reasoningContent string
+	var reasoningItemSent bool
+	var summaryPartSent bool
+	const reasoningItemID = "rs_0" // sentinel; replaced with id-prefixed ID below
+	var reasoningID string
 
 	parseOpenAISSE(body, func(data []byte) bool {
 		if string(bytes.TrimSpace(data)) == "[DONE]" {
@@ -370,6 +400,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 
 		if !messageStarted {
 			id = chunk.ID
+			reasoningID = id + "_reasoning_0"
 			messageStarted = true
 
 			writeResponsesSSE(&out, "response.created", map[string]any{
@@ -390,6 +421,50 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 		}
 
 		for _, choice := range chunk.Choices {
+			// Reasoning text streamed by an OpenAI Chat Completions upstream
+			// (delta.reasoning_content) is surfaced as a Responses-style
+			// reasoning item + summary_text.delta so the client (Cherry Studio,
+			// codex-proxy, etc.) sees the same chain-of-thought it would from
+			// the first-party Responses API. Without this the thinking block
+			// gets silently dropped on the responses2openai hop.
+			if choice.Delta.ReasoningContent != "" {
+				reasoningContent += choice.Delta.ReasoningContent
+
+				if !reasoningItemSent {
+					reasoningItemSent = true
+					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+						"type":         "response.output_item.added",
+						"output_index": 0,
+						"item": map[string]any{
+							"id":      reasoningID,
+							"type":    "reasoning",
+							"summary": []any{},
+						},
+					})
+				}
+				if !summaryPartSent {
+					summaryPartSent = true
+					writeResponsesSSE(&out, "response.reasoning_summary_part.added", map[string]any{
+						"type":          "response.reasoning_summary_part.added",
+						"output_index":  0,
+						"summary_index": 0,
+						"item_id":       reasoningID,
+						"part": map[string]any{
+							"type": "summary_text",
+							"text": "",
+						},
+					})
+				}
+
+				writeResponsesSSE(&out, "response.reasoning_summary_text.delta", map[string]any{
+					"type":          "response.reasoning_summary_text.delta",
+					"output_index":  0,
+					"summary_index": 0,
+					"item_id":       reasoningID,
+					"delta":         choice.Delta.ReasoningContent,
+				})
+			}
+
 			if choice.Delta.Content != "" {
 				textContent += choice.Delta.Content
 
@@ -471,6 +546,46 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 			}
 
 			if choice.FinishReason != nil {
+				// Close the reasoning item if any reasoning text was streamed.
+				if reasoningItemSent && summaryPartSent {
+					writeResponsesSSE(&out, "response.reasoning_summary_text.done", map[string]any{
+						"type":          "response.reasoning_summary_text.done",
+						"output_index":  0,
+						"summary_index": 0,
+						"item_id":       reasoningID,
+						"text":          reasoningContent,
+					})
+					writeResponsesSSE(&out, "response.reasoning_summary_part.done", map[string]any{
+						"type":          "response.reasoning_summary_part.done",
+						"output_index":  0,
+						"summary_index": 0,
+						"item_id":       reasoningID,
+						"part": map[string]any{
+							"type": "summary_text",
+							"text": reasoningContent,
+						},
+					})
+				}
+				if reasoningItemSent {
+					reasoningItem := map[string]any{
+						"id":      reasoningID,
+						"type":    "reasoning",
+						"summary": []any{},
+					}
+					if reasoningContent != "" {
+						reasoningItem["summary"] = []any{
+							map[string]any{
+								"type": "summary_text",
+								"text": reasoningContent,
+							},
+						}
+					}
+					writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+						"type":         "response.output_item.done",
+						"output_index": 0,
+						"item":         reasoningItem,
+					})
+				}
 				if textContent != "" {
 					if contentPartSent {
 						writeResponsesSSE(&out, "response.content_part.done", map[string]any{
@@ -542,14 +657,17 @@ type r2oStreamToolCall struct {
 }
 
 type r2oStreamState struct {
-	ResponseID      string
-	Model           string
-	Created         bool
-	Terminated      bool // set when finish-reason events have been emitted
-	TextContent     string
-	MessageItemSent bool
-	ContentPartSent bool
-	ToolCallAcc     map[int]*r2oStreamToolCall
+	ResponseID        string
+	Model             string
+	Created           bool
+	Terminated        bool // set when finish-reason events have been emitted
+	TextContent       string
+	MessageItemSent   bool
+	ContentPartSent   bool
+	ToolCallAcc       map[int]*r2oStreamToolCall
+	ReasoningContent  string
+	ReasoningItemSent bool
+	SummaryPartSent   bool
 }
 
 func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.PipelineContext) (engine.SSEChunk, error) {
@@ -566,6 +684,46 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		}
 		if state.Created {
 			var out bytes.Buffer
+			if state.ReasoningItemSent {
+				reasoningID := state.ResponseID + "_reasoning_0"
+				if state.SummaryPartSent {
+					writeResponsesSSE(&out, "response.reasoning_summary_text.done", map[string]any{
+						"type":          "response.reasoning_summary_text.done",
+						"output_index":  0,
+						"summary_index": 0,
+						"item_id":       reasoningID,
+						"text":          state.ReasoningContent,
+					})
+					writeResponsesSSE(&out, "response.reasoning_summary_part.done", map[string]any{
+						"type":          "response.reasoning_summary_part.done",
+						"output_index":  0,
+						"summary_index": 0,
+						"item_id":       reasoningID,
+						"part": map[string]any{
+							"type": "summary_text",
+							"text": state.ReasoningContent,
+						},
+					})
+				}
+				reasoningItem := map[string]any{
+					"id":      reasoningID,
+					"type":    "reasoning",
+					"summary": []any{},
+				}
+				if state.ReasoningContent != "" {
+					reasoningItem["summary"] = []any{
+						map[string]any{
+							"type": "summary_text",
+							"text": state.ReasoningContent,
+						},
+					}
+				}
+				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": 0,
+					"item":         reasoningItem,
+				})
+			}
 			if state.TextContent != "" {
 				if state.ContentPartSent {
 					writeResponsesSSE(&out, "response.content_part.done", map[string]any{
@@ -657,6 +815,49 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	}
 
 	for _, choice := range oaiChunk.Choices {
+		// Reasoning text streamed by an OpenAI Chat Completions upstream
+		// (delta.reasoning_content) is surfaced as a Responses-style
+		// reasoning item + summary_text.delta. Without this the thinking
+		// block gets silently dropped on the responses2openai hop.
+		if choice.Delta.ReasoningContent != "" {
+			state.ReasoningContent += choice.Delta.ReasoningContent
+			reasoningID := state.ResponseID + "_reasoning_0"
+
+			if !state.ReasoningItemSent {
+				state.ReasoningItemSent = true
+				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": 0,
+					"item": map[string]any{
+						"id":      reasoningID,
+						"type":    "reasoning",
+						"summary": []any{},
+					},
+				})
+			}
+			if !state.SummaryPartSent {
+				state.SummaryPartSent = true
+				writeResponsesSSE(&out, "response.reasoning_summary_part.added", map[string]any{
+					"type":          "response.reasoning_summary_part.added",
+					"output_index":  0,
+					"summary_index": 0,
+					"item_id":       reasoningID,
+					"part": map[string]any{
+						"type": "summary_text",
+						"text": "",
+					},
+				})
+			}
+
+			writeResponsesSSE(&out, "response.reasoning_summary_text.delta", map[string]any{
+				"type":          "response.reasoning_summary_text.delta",
+				"output_index":  0,
+				"summary_index": 0,
+				"item_id":       reasoningID,
+				"delta":         choice.Delta.ReasoningContent,
+			})
+		}
+
 		// Content delta
 		if choice.Delta.Content != "" {
 			state.TextContent += choice.Delta.Content
@@ -752,6 +953,47 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 		// Finish reason
 		if choice.FinishReason != nil {
+			// Close the reasoning item if any reasoning text was streamed.
+			if state.ReasoningItemSent {
+				reasoningID := state.ResponseID + "_reasoning_0"
+				if state.SummaryPartSent {
+					writeResponsesSSE(&out, "response.reasoning_summary_text.done", map[string]any{
+						"type":          "response.reasoning_summary_text.done",
+						"output_index":  0,
+						"summary_index": 0,
+						"item_id":       reasoningID,
+						"text":          state.ReasoningContent,
+					})
+					writeResponsesSSE(&out, "response.reasoning_summary_part.done", map[string]any{
+						"type":          "response.reasoning_summary_part.done",
+						"output_index":  0,
+						"summary_index": 0,
+						"item_id":       reasoningID,
+						"part": map[string]any{
+							"type": "summary_text",
+							"text": state.ReasoningContent,
+						},
+					})
+				}
+				reasoningItem := map[string]any{
+					"id":      reasoningID,
+					"type":    "reasoning",
+					"summary": []any{},
+				}
+				if state.ReasoningContent != "" {
+					reasoningItem["summary"] = []any{
+						map[string]any{
+							"type": "summary_text",
+							"text": state.ReasoningContent,
+						},
+					}
+				}
+				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": 0,
+					"item":         reasoningItem,
+				})
+			}
 			if state.TextContent != "" {
 				if state.ContentPartSent {
 					writeResponsesSSE(&out, "response.content_part.done", map[string]any{

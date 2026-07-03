@@ -2488,6 +2488,149 @@ func TestResponses2OpenAI_TransformStreamChunk_Content(t *testing.T) {
 	}
 }
 
+// TestResponses2OpenAI_TransformResponse_Reasoning verifies that a Chat
+// Completions upstream reply containing message.reasoning_content is mapped
+// into a Responses-style reasoning output item (id, type:"reasoning",
+// summary:[{type:"summary_text", text:...}]), so the local Tresor / client
+// (Cherry Studio, codex-proxy) actually receives the thinking block.
+func TestResponses2OpenAI_TransformResponse_Reasoning(t *testing.T) {
+	p := &Responses2OpenAI{}
+	respBody := []byte(`{
+		"id": "chatcmpl-1",
+		"object": "chat.completion",
+		"model": "gpt-5",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "x = 2",
+				"reasoning_content": "Solve x^2=4"
+			},
+			"finish_reason": "stop"
+		}]
+	}`)
+	httpResp := &http.Response{Header: http.Header{}}
+	httpResp.Header.Set("Content-Type", "application/json")
+
+	transformed, err := p.TransformResponse(httpResp, respBody, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(transformed, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	output, _ := result["output"].([]any)
+	if len(output) != 2 {
+		t.Fatalf("expected 2 output items (reasoning + message), got %d", len(output))
+	}
+	// reasoning item comes first, message second
+	reasoningItem, ok := output[0].(map[string]any)
+	if !ok || reasoningItem["type"] != "reasoning" {
+		t.Fatalf("expected first output item to be a reasoning item, got %v", output[0])
+	}
+	summary, _ := reasoningItem["summary"].([]any)
+	if len(summary) != 1 {
+		t.Fatalf("expected 1 summary entry, got %d", len(summary))
+	}
+	s0, _ := summary[0].(map[string]any)
+	if s0["type"] != "summary_text" || s0["text"] != "Solve x^2=4" {
+		t.Fatalf("expected summary_text 'Solve x^2=4', got %v", s0)
+	}
+	msgItem, _ := output[1].(map[string]any)
+	if msgItem["type"] != "message" {
+		t.Fatalf("expected second output item to be a message, got %v", output[1])
+	}
+}
+
+// TestResponses2OpenAI_TransformStreamChunk_ReasoningDelta verifies that a
+// Chat Completions delta carrying delta.reasoning_content is forwarded to
+// the client as response.reasoning_summary_text.delta events, with the
+// reasoning item + summary part registered first.
+func TestResponses2OpenAI_TransformStreamChunk_ReasoningDelta(t *testing.T) {
+	p := &Responses2OpenAI{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	// First chunk seeds the response.id state.
+	initChunk := engine.SSEChunk{
+		Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5","choices":[{"index":0,"delta":{"role":"assistant"}}]}`),
+	}
+	p.TransformStreamChunk(initChunk, ctx)
+
+	// Now a reasoning delta.
+	reasoningChunk := engine.SSEChunk{
+		Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5","choices":[{"index":0,"delta":{"reasoning_content":"Solve x^2=4"}}]}`),
+	}
+	out, err := p.TransformStreamChunk(reasoningChunk, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(out.Data)
+	if !strings.Contains(output, "response.output_item.added") {
+		t.Fatalf("expected response.output_item.added (reasoning), got: %s", output)
+	}
+	if !strings.Contains(output, `"reasoning"`) {
+		t.Fatalf("expected reasoning item type, got: %s", output)
+	}
+	if !strings.Contains(output, "response.reasoning_summary_part.added") {
+		t.Fatalf("expected response.reasoning_summary_part.added, got: %s", output)
+	}
+	if !strings.Contains(output, "response.reasoning_summary_text.delta") {
+		t.Fatalf("expected response.reasoning_summary_text.delta, got: %s", output)
+	}
+	if !strings.Contains(output, "Solve x^2=4") {
+		t.Fatalf("expected reasoning text to be carried through, got: %s", output)
+	}
+}
+
+// TestResponses2OpenAI_TransformStreamChunk_ReasoningPlusText_FinishReason
+// verifies that when a stream finishes after reasoning-then-text content,
+// the emitted output closes the reasoning item AND the message item, with
+// the reasoning summary preserved.
+func TestResponses2OpenAI_TransformStreamChunk_ReasoningPlusText_FinishReason(t *testing.T) {
+	p := &Responses2OpenAI{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	p.TransformStreamChunk(engine.SSEChunk{
+		Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5","choices":[{"index":0,"delta":{"role":"assistant"}}]}`),
+	}, ctx)
+
+	// Reasoning delta.
+	p.TransformStreamChunk(engine.SSEChunk{
+		Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5","choices":[{"index":0,"delta":{"reasoning_content":"thinking..."}}]}`),
+	}, ctx)
+
+	// Text delta after reasoning.
+	p.TransformStreamChunk(engine.SSEChunk{
+		Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5","choices":[{"index":0,"delta":{"content":"x=2"}}]}`),
+	}, ctx)
+
+	// Finish.
+	finish := "stop"
+	out, err := p.TransformStreamChunk(engine.SSEChunk{
+		Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-5","choices":[{"index":0,"delta":{},"finish_reason":"` + finish + `"}]}`),
+	}, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(out.Data)
+	if !strings.Contains(output, "response.reasoning_summary_text.done") {
+		t.Fatalf("expected reasoning summary done, got: %s", output)
+	}
+	if !strings.Contains(output, "thinking...") {
+		t.Fatalf("expected reasoning content preserved, got: %s", output)
+	}
+	if !strings.Contains(output, `"reasoning"`) {
+		t.Fatalf("expected reasoning output_item.done, got: %s", output)
+	}
+	if !strings.Contains(output, "response.output_text.done") {
+		t.Fatalf("expected response.output_text.done, got: %s", output)
+	}
+	if !strings.Contains(output, "response.completed") {
+		t.Fatalf("expected response.completed, got: %s", output)
+	}
+}
+
 // ----- Responses2Anthropic tests -----
 
 func TestResponses2Anthropic_TransformRequest_Basic(t *testing.T) {
@@ -3313,6 +3456,108 @@ func TestOpenAI2Responses_TransformResponse_NonStreaming(t *testing.T) {
 	}
 	if msg["role"] != "assistant" {
 		t.Fatalf("expected role 'assistant', got %s", msg["role"])
+	}
+}
+
+// TestOpenAI2Responses_TransformResponse_Reasoning verifies that a Responses
+// API output[].type="reasoning" item with summary entries surfaces as
+// message.reasoning_content in the Chat Completions response. Without this,
+// downstream transformers (e.g. Gemini2OpenAI) would never see the model's
+// thoughts and would drop them.
+func TestOpenAI2Responses_TransformResponse_Reasoning(t *testing.T) {
+	p := &OpenAI2Responses{}
+	respBody := []byte(`{
+		"id": "resp_123",
+		"object": "response",
+		"status": "completed",
+		"model": "gpt-5",
+		"output": [
+			{
+				"type": "reasoning",
+				"summary": [
+					{"type": "summary_text", "text": "First thought."},
+					{"type": "summary_text", "text": "Second thought."}
+				]
+			},
+			{"type": "message", "role": "assistant", "content": [
+				{"type": "output_text", "text": "Final answer."}
+			]}
+		]
+	}`)
+	httpResp := &http.Response{Header: http.Header{}}
+	transformed, err := p.TransformResponse(httpResp, respBody, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(transformed, &result); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	msg := result["choices"].([]interface{})[0].(map[string]interface{})["message"].(map[string]interface{})
+	if msg["content"] != "Final answer." {
+		t.Fatalf("expected content 'Final answer.', got %v", msg["content"])
+	}
+	rc, ok := msg["reasoning_content"].(string)
+	if !ok {
+		t.Fatalf("expected reasoning_content string, got %T: %v", msg["reasoning_content"], msg["reasoning_content"])
+	}
+	if !strings.Contains(rc, "First thought.") || !strings.Contains(rc, "Second thought.") {
+		t.Fatalf("expected reasoning_content to contain both summary entries, got %q", rc)
+	}
+}
+
+// TestOpenAI2Responses_TransformStreamChunk_ReasoningSummaryDelta verifies
+// that response.reasoning_summary_text.delta events are surfaced as Chat
+// Completions delta.reasoning_content chunks so streaming Gemini clients
+// can render thoughts as they arrive.
+func TestOpenAI2Responses_TransformStreamChunk_ReasoningSummaryDelta(t *testing.T) {
+	p := &OpenAI2Responses{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	// Seed state so the transformer has response.id/model.
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.created",
+		Data:      []byte(`{"type":"response.created","response":{"id":"resp_123","model":"gpt-5"}}`),
+	}, ctx)
+
+	result, err := p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.reasoning_summary_text.delta",
+		Data:      []byte(`{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"Thinking..."}`),
+	}, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, `"reasoning_content":"Thinking..."`) {
+		t.Fatalf("expected delta.reasoning_content, got: %s", output)
+	}
+	if !strings.Contains(output, "data: ") {
+		t.Fatalf("expected data: SSE framing, got: %s", output)
+	}
+}
+
+// TestOpenAI2Responses_TransformStreamChunk_ReasoningTextDelta covers the
+// encrypted-content reasoning path where the upstream emits
+// response.reasoning_text.delta instead of the summary variant.
+func TestOpenAI2Responses_TransformStreamChunk_ReasoningTextDelta(t *testing.T) {
+	p := &OpenAI2Responses{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.created",
+		Data:      []byte(`{"type":"response.created","response":{"id":"resp_123","model":"gpt-5"}}`),
+	}, ctx)
+
+	result, err := p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.reasoning_text.delta",
+		Data:      []byte(`{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"enc_blob_chunk"}`),
+	}, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(result.Data)
+	if !strings.Contains(output, `"reasoning_content":"enc_blob_chunk"`) {
+		t.Fatalf("expected reasoning_content with encrypted delta, got: %s", output)
 	}
 }
 
