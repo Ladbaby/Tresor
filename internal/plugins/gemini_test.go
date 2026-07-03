@@ -442,6 +442,61 @@ func TestGemini2OpenAI_TransformResponse_JSON(t *testing.T) {
 	}
 }
 
+// TestGemini2OpenAI_TransformRequest_ThinkingConfig verifies that Gemini's
+// generationConfig.thinkingConfig is mapped to OpenAI's reasoning_effort so
+// downstream transformers (notably OpenAI2Responses) can carry the request
+// through to a Responses API downstream.
+func TestGemini2OpenAI_TransformRequest_ThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name              string
+		budget            int
+		includeThoughts   bool
+		wantEffortPresent bool
+		wantEffort        string
+	}{
+		{"high budget", 16384, true, true, "high"},
+		{"medium budget", 4096, true, true, "medium"},
+		{"low budget", 512, true, true, "low"},
+		{"dynamic (-1)", -1, true, true, "medium"},
+		{"zero budget without includeThoughts", 0, false, false, ""},
+		{"zero budget with includeThoughts", 0, true, true, "low"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Gemini2OpenAI{}
+			body, _ := json.Marshal(map[string]interface{}{
+				"contents": []map[string]interface{}{
+					{"role": "user", "parts": []map[string]interface{}{{"text": "Hello"}}},
+				},
+				"generationConfig": map[string]interface{}{
+					"thinkingConfig": map[string]interface{}{
+						"includeThoughts": tt.includeThoughts,
+						"thinkingBudget":  tt.budget,
+					},
+				},
+			})
+			req, _ := http.NewRequest("POST", "http://example.com/v1beta/models/gpt-5:generateContent", bytes.NewReader(body))
+			ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+
+			_, newBody, err := p.TransformRequest(req, body, ctx)
+			if err != nil {
+				t.Fatalf("transform: %v", err)
+			}
+			var oaiReq map[string]interface{}
+			if err := json.Unmarshal(newBody, &oaiReq); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, present := oaiReq["reasoning_effort"]
+			if present != tt.wantEffortPresent {
+				t.Fatalf("reasoning_effort presence = %v, want %v (body: %s)", present, tt.wantEffortPresent, string(newBody))
+			}
+			if present && got != tt.wantEffort {
+				t.Fatalf("reasoning_effort = %v, want %v", got, tt.wantEffort)
+			}
+		})
+	}
+}
+
 // ---------------- Gemini2Anthropic ----------------
 
 func TestGemini2Anthropic_TransformRequest_Basic(t *testing.T) {

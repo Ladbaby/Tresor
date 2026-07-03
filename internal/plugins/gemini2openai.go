@@ -86,13 +86,23 @@ type geminiFunctionCallingConfig struct {
 
 // geminiGenerationConfig is the Gemini generationConfig object.
 type geminiGenerationConfig struct {
-	Temperature      float64  `json:"temperature,omitempty"`
-	TopP             float64  `json:"topP,omitempty"`
-	TopK             int      `json:"topK,omitempty"`
-	MaxOutputTokens  int      `json:"maxOutputTokens,omitempty"`
-	StopSequences    []string `json:"stopSequences,omitempty"`
-	ResponseMimeType string   `json:"responseMimeType,omitempty"`
-	ResponseSchema   interface{} `json:"responseSchema,omitempty"`
+	Temperature      float64                `json:"temperature,omitempty"`
+	TopP             float64                `json:"topP,omitempty"`
+	TopK             int                    `json:"topK,omitempty"`
+	MaxOutputTokens  int                    `json:"maxOutputTokens,omitempty"`
+	StopSequences    []string               `json:"stopSequences,omitempty"`
+	ResponseMimeType string                 `json:"responseMimeType,omitempty"`
+	ResponseSchema   interface{}            `json:"responseSchema,omitempty"`
+	ThinkingConfig   *geminiThinkingConfig  `json:"thinkingConfig,omitempty"`
+}
+
+// geminiThinkingConfig is the Gemini thinkingConfig object. Setting
+// includeThoughts makes the model return thought content alongside the
+// answer; thinkingBudget bounds the number of tokens spent on thinking
+// (or -1 for dynamic).
+type geminiThinkingConfig struct {
+	IncludeThoughts bool `json:"includeThoughts,omitempty"`
+	ThinkingBudget  int  `json:"thinkingBudget,omitempty"`
 }
 
 // TransformRequest converts a Gemini generateContent request into an OpenAI
@@ -140,6 +150,22 @@ func (t *Gemini2OpenAI) TransformRequest(req *http.Request, body []byte, ctx *en
 					"schema": gem.GenerationConfig.ResponseSchema,
 				},
 			}
+		}
+	}
+	// Map Gemini thinkingConfig -> OpenAI reasoning_effort. We don't have
+	// an exact 1:1 (Gemini uses a token budget; OpenAI uses a low/medium/high
+	// level), so bucket the budget into effort levels. includeThoughts on
+	// its own without a budget maps to "low" — the client asked for thoughts
+	// but didn't constrain effort, so we pick the smallest. -1 (dynamic)
+	// maps to "medium" since the server decides. If neither budget nor
+	// includeThoughts are set, we don't emit reasoning_effort — the model
+	// will decide whether to think on its own.
+	if gem.GenerationConfig != nil && gem.GenerationConfig.ThinkingConfig != nil {
+		if effort := mapThinkingBudgetToEffort(
+			gem.GenerationConfig.ThinkingConfig.ThinkingBudget,
+			gem.GenerationConfig.ThinkingConfig.IncludeThoughts,
+		); effort != "" {
+			oaiBody["reasoning_effort"] = effort
 		}
 	}
 
@@ -428,6 +454,37 @@ func toolCallsToMaps(tcs []openAIChatToolCall) []map[string]interface{} {
 
 func isStreamRequest(path string) bool {
 	return bytes.Contains([]byte(path), []byte(":streamGenerateContent"))
+}
+
+// mapThinkingBudgetToEffort buckets a Gemini thinkingConfig.thinkingBudget
+// into an OpenAI reasoning_effort level. The two systems aren't directly
+// comparable — Gemini exposes a token budget, OpenAI exposes three coarse
+// levels — so this is a best-effort mapping tuned for typical use:
+//
+//	thinkingBudget == 0  -> "" (don't set; model decides whether to think)
+//	thinkingBudget < 0   -> "medium" (dynamic — server picks)
+//	budget <  2048       -> "low"
+//	budget <  8192       -> "medium"
+//	budget >= 8192       -> "high"
+//
+// If includeThoughts is true and the budget is 0 (the "just return thoughts
+// but don't constrain" case), we default to "low" so the upstream still
+// emits reasoning.
+func mapThinkingBudgetToEffort(budget int, includeThoughts bool) string {
+	if budget == 0 && !includeThoughts {
+		return ""
+	}
+	if budget < 0 {
+		return "medium"
+	}
+	switch {
+	case budget < 2048:
+		return "low"
+	case budget < 8192:
+		return "medium"
+	default:
+		return "high"
+	}
 }
 
 // TransformResponse converts an OpenAI Chat Completion response into a Gemini
