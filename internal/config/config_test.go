@@ -44,7 +44,7 @@ admin_password: secret123
 downstreams:
   - id: my-provider
     name: My Provider
-    base_url: https://api.example.com/v1
+    base_url: https://api.example.com
     api_key: sk-test-key
     output_model_ids:
       - claude-sonnet-4-20250514

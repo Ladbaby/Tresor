@@ -36,7 +36,7 @@ db_path: ` + dbPath + `
 downstreams:
   - id: openai-gpt4o
     name: OpenAI GPT-4o
-    base_url: https://api.openai.com/v1
+    base_url: https://api.openai.com
     api_key: sk-test-key
     output_model_ids:
       - gpt-4o

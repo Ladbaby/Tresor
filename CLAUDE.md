@@ -36,7 +36,7 @@ log_level: "info"               # Request logging verbosity: debug, info, warn, 
 downstreams:                    # LLM provider endpoints
   - id: my-provider
     name: My Provider
-    base_url: https://api.example.com/v1
+    base_url: https://api.example.com
     api_key: sk-...
     api_formats: [openai]       # API format(s): openai, anthropic, openai_responses, gemini
     output_model_ids:           # Models this downstream can handle (required for forwarding)

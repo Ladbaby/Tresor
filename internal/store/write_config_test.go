@@ -27,7 +27,7 @@ func TestWriteConfig_RoundTrip(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
 	// Populate DB with known data
-	ds := &Downstream{ID: "ds-test", Name: "Test Provider", BaseURL: "https://test.com/v1", APIKey: "sk-123"}
+	ds := &Downstream{ID: "ds-test", Name: "Test Provider", BaseURL: "https://test.com", APIKey: "sk-123"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestWriteConfig_OverwritesOldData(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
 	// First write with one downstream
-	ds1 := &Downstream{ID: "ds-1", Name: "First", BaseURL: "https://first.com/v1"}
+	ds1 := &Downstream{ID: "ds-1", Name: "First", BaseURL: "https://first.com"}
 	if err := s.CreateDownstream(ds1); err != nil {
 		t.Fatalf("create downstream 1: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestWriteConfig_OverwritesOldData(t *testing.T) {
 	}
 
 	// Add a second downstream
-	ds2 := &Downstream{ID: "ds-2", Name: "Second", BaseURL: "https://second.com/v1"}
+	ds2 := &Downstream{ID: "ds-2", Name: "Second", BaseURL: "https://second.com"}
 	if err := s.CreateDownstream(ds2); err != nil {
 		t.Fatalf("create downstream 2: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestWriteConfig_AtomicWrite(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	tmpFile := filepath.Join(tmpDir, ".tresor-config.tmp")
 
-	ds := &Downstream{ID: "ds-atomic", Name: "Atomic", BaseURL: "https://atomic.com/v1"}
+	ds := &Downstream{ID: "ds-atomic", Name: "Atomic", BaseURL: "https://atomic.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}

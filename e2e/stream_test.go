@@ -54,7 +54,7 @@ downstreams:
   - id: mock-openai
     name: Mock OpenAI
     api_formats: [openai]
-    base_url: http://127.0.0.1:%d/v1
+    base_url: http://127.0.0.1:%d
     api_key: sk-mock-key
     output_model_ids:
       - gpt-4o
@@ -406,7 +406,7 @@ downstreams:
   - id: mock-chat
     name: Mock Chat
     api_formats: [openai]
-    base_url: http://127.0.0.1:%d/v1
+    base_url: http://127.0.0.1:%d
     api_key: sk-mock-key
     output_model_ids:
       - gpt-4o

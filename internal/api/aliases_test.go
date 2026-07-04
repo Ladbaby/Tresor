@@ -53,7 +53,7 @@ func TestCreateAlias_Success(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com/v1")
+	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com")
 
 	code, created, bodyStr := createAliasViaAPI(t, handler, store.Alias{
 		InputModelID:  "gpt-4o",
@@ -81,7 +81,7 @@ func TestCreateAlias_RejectsMissingFields(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com/v1")
+	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com")
 
 	// Missing output_model_id
 	data, _ := json.Marshal(store.Alias{
@@ -159,8 +159,8 @@ func TestListAliases_WithGroups(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds1 := setupDownstream(t, handler, "Provider-A", "https://a.test.com/v1")
-	ds2 := setupDownstream(t, handler, "Provider-B", "https://b.test.com/v1")
+	ds1 := setupDownstream(t, handler, "Provider-A", "https://a.test.com")
+	ds2 := setupDownstream(t, handler, "Provider-B", "https://b.test.com")
 
 	// Create two aliases for gpt-4o group (a1 active, a2 inactive)
 	code, _, _ := createAliasViaAPI(t, handler, store.Alias{
@@ -218,7 +218,7 @@ func TestGetAlias_Success(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com/v1")
+	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com")
 
 	_, created, _ := createAliasViaAPI(t, handler, store.Alias{
 		InputModelID: "gpt-4o", OutputModelID: "claude-sonnet", DownstreamID: ds.ID, IsActive: true,
@@ -258,7 +258,7 @@ func TestUpdateAlias_Success(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com/v1")
+	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com")
 
 	_, created, _ := createAliasViaAPI(t, handler, store.Alias{
 		InputModelID: "gpt-4o", OutputModelID: "gpt-4o", DownstreamID: ds.ID, IsActive: true,
@@ -290,7 +290,7 @@ func TestUpdateAlias_RejectsInvalidDownstream(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com/v1")
+	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com")
 
 	_, created, _ := createAliasViaAPI(t, handler, store.Alias{
 		InputModelID: "gpt-4o", OutputModelID: "gpt-4o", DownstreamID: ds.ID,
@@ -315,7 +315,7 @@ func TestDeleteAlias_Success(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com/v1")
+	ds := setupDownstream(t, handler, "test-provider", "https://api.test.com")
 
 	_, created, _ := createAliasViaAPI(t, handler, store.Alias{
 		InputModelID: "gpt-4o", OutputModelID: "claude-sonnet", DownstreamID: ds.ID,
@@ -345,8 +345,8 @@ func TestActivateAlias_HotSwitch(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds1 := setupDownstream(t, handler, "Provider-A", "https://a.test.com/v1")
-	ds2 := setupDownstream(t, handler, "Provider-B", "https://b.test.com/v1")
+	ds1 := setupDownstream(t, handler, "Provider-A", "https://a.test.com")
+	ds2 := setupDownstream(t, handler, "Provider-B", "https://b.test.com")
 
 	// Create active alias pointing to ds1
 	_, a1, _ := createAliasViaAPI(t, handler, store.Alias{
@@ -391,8 +391,8 @@ func TestCreateAlias_AutoDeactivatesSibling(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds1 := setupDownstream(t, handler, "Provider-A", "https://a.test.com/v1")
-	ds2 := setupDownstream(t, handler, "Provider-B", "https://b.test.com/v1")
+	ds1 := setupDownstream(t, handler, "Provider-A", "https://a.test.com")
+	ds2 := setupDownstream(t, handler, "Provider-B", "https://b.test.com")
 
 	// Create first alias as active
 	_, a1, _ := createAliasViaAPI(t, handler, store.Alias{
@@ -449,8 +449,8 @@ func TestDeleteAliasGroup_Success(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds1 := setupDownstream(t, handler, "Provider-A", "https://a.test.com/v1")
-	ds2 := setupDownstream(t, handler, "Provider-B", "https://b.test.com/v1")
+	ds1 := setupDownstream(t, handler, "Provider-A", "https://a.test.com")
+	ds2 := setupDownstream(t, handler, "Provider-B", "https://b.test.com")
 
 	// Create 3 aliases for gpt-4o group
 	for i, out := range []string{"model-a", "model-b", "model-c"} {

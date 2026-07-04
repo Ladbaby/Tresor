@@ -454,7 +454,7 @@ func (s *Store) SeedDefaults() error {
 		Models     []string
 	}
 	defaults := []defaultDS{
-		{"openai-gpt4o", "OpenAI GPT-4o", "https://api.openai.com/v1", "", []string{"openai"}, []string{"gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"}},
+		{"openai-gpt4o", "OpenAI GPT-4o", "https://api.openai.com", "", []string{"openai"}, []string{"gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"}},
 		{"anthropic-sonnet", "Anthropic Claude Sonnet", "https://api.anthropic.com", "", []string{"anthropic"}, []string{"claude-sonnet-4-20250514"}},
 		{"anthropic-haiku", "Anthropic Claude Haiku", "https://api.anthropic.com", "", []string{"anthropic"}, []string{"claude-haiku-4.5"}},
 	}

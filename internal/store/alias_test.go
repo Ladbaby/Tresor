@@ -11,7 +11,7 @@ func TestStore_CRUD_Aliases(t *testing.T) {
 	ds := &Downstream{
 		ID:    "test-ds",
 		Name:  "Test DS",
-		BaseURL: "https://test.api.com/v1",
+		BaseURL: "https://test.api.com",
 	}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
@@ -75,11 +75,11 @@ func TestStore_CRUD_Aliases(t *testing.T) {
 func TestStore_Alias_Activation(t *testing.T) {
 	s := newTestStore(t)
 
-	ds := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com/v1"}
+	ds := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
-	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com/v1"}
+	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com"}
 	if err := s.CreateDownstream(ds2); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -123,11 +123,11 @@ func TestStore_Alias_Activation(t *testing.T) {
 func TestStore_CreateAlias_AutoDeactivate(t *testing.T) {
 	s := newTestStore(t)
 
-	ds := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com/v1"}
+	ds := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
-	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com/v1"}
+	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com"}
 	if err := s.CreateDownstream(ds2); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestStore_CreateAlias_AutoDeactivate(t *testing.T) {
 func TestStore_FindActiveAlias(t *testing.T) {
 	s := newTestStore(t)
 
-	ds := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com/v1"}
+	ds := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -188,11 +188,11 @@ func TestStore_FindActiveAlias(t *testing.T) {
 func TestStore_ListGroups(t *testing.T) {
 	s := newTestStore(t)
 
-	ds1 := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com/v1"}
+	ds1 := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com"}
 	if err := s.CreateDownstream(ds1); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
-	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com/v1"}
+	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com"}
 	if err := s.CreateDownstream(ds2); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -262,11 +262,11 @@ func TestStore_Alias_InvalidDownstream(t *testing.T) {
 func TestStore_DeleteAlias_PromoteSibling(t *testing.T) {
 	s := newTestStore(t)
 
-	ds1 := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com/v1"}
+	ds1 := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com"}
 	if err := s.CreateDownstream(ds1); err != nil {
 		t.Fatalf("create downstream ds1: %v", err)
 	}
-	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com/v1"}
+	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com"}
 	if err := s.CreateDownstream(ds2); err != nil {
 		t.Fatalf("create downstream ds2: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestStore_DeleteAlias_PromoteSibling(t *testing.T) {
 func TestStore_DeleteAlias_LastInGroup(t *testing.T) {
 	s := newTestStore(t)
 
-	ds := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com/v1"}
+	ds := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -354,11 +354,11 @@ func TestStore_DeleteAlias_LastInGroup(t *testing.T) {
 func TestStore_DeleteAlias_InactiveNoPromote(t *testing.T) {
 	s := newTestStore(t)
 
-	ds1 := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com/v1"}
+	ds1 := &Downstream{ID: "ds1", Name: "DS1", BaseURL: "https://test1.com"}
 	if err := s.CreateDownstream(ds1); err != nil {
 		t.Fatalf("create downstream ds1: %v", err)
 	}
-	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com/v1"}
+	ds2 := &Downstream{ID: "ds2", Name: "DS2", BaseURL: "https://test2.com"}
 	if err := s.CreateDownstream(ds2); err != nil {
 		t.Fatalf("create downstream ds2: %v", err)
 	}

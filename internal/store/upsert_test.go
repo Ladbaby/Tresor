@@ -10,7 +10,7 @@ func TestUpsertDownstreams_InsertNew(t *testing.T) {
 	s := newTestStore(t)
 
 	downstreams := []config.DownstreamCfg{
-		{ID: "ds-new", Name: "New Provider", BaseURL: "https://new.com/v1", APIKey: "sk-new", OutputModelIDs: []string{"gpt-4o"}},
+		{ID: "ds-new", Name: "New Provider", BaseURL: "https://new.com", APIKey: "sk-new", OutputModelIDs: []string{"gpt-4o"}},
 	}
 	if err := s.upsertDownstreams(downstreams); err != nil {
 		t.Fatalf("upsert downstreams: %v", err)
@@ -32,14 +32,14 @@ func TestUpsertDownstreams_UpdateExisting(t *testing.T) {
 	s := newTestStore(t)
 
 	// Create initial downstream
-	ds := &Downstream{ID: "ds-upd", Name: "Old Name", BaseURL: "https://old.com/v1"}
+	ds := &Downstream{ID: "ds-upd", Name: "Old Name", BaseURL: "https://old.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
 
 	// Upsert with updated fields
 	downstreams := []config.DownstreamCfg{
-		{ID: "ds-upd", Name: "New Name", BaseURL: "https://new.com/v1", APIKey: "sk-updated", OutputModelIDs: []string{"model-a"}},
+		{ID: "ds-upd", Name: "New Name", BaseURL: "https://new.com", APIKey: "sk-updated", OutputModelIDs: []string{"model-a"}},
 	}
 	if err := s.upsertDownstreams(downstreams); err != nil {
 		t.Fatalf("upsert downstreams: %v", err)
@@ -141,7 +141,7 @@ func TestUpsertAliases_InsertAndActivate(t *testing.T) {
 	s := newTestStore(t)
 
 	// Create a downstream first (aliases require valid downstreams)
-	ds := &Downstream{ID: "ds-alias", Name: "Alias DS", BaseURL: "https://alias.com/v1"}
+	ds := &Downstream{ID: "ds-alias", Name: "Alias DS", BaseURL: "https://alias.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestUpsertAliases_InsertAndActivate(t *testing.T) {
 func TestUpsertAliases_StaleCleanup(t *testing.T) {
 	s := newTestStore(t)
 
-	ds := &Downstream{ID: "ds-alias", Name: "Alias DS", BaseURL: "https://alias.com/v1"}
+	ds := &Downstream{ID: "ds-alias", Name: "Alias DS", BaseURL: "https://alias.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestLoadConfigData_MergesWithExisting(t *testing.T) {
 	s := newTestStore(t)
 
 	// Create a downstream that won't be in the config
-	ds := &Downstream{ID: "ds-existing", Name: "Existing", BaseURL: "https://existing.com/v1"}
+	ds := &Downstream{ID: "ds-existing", Name: "Existing", BaseURL: "https://existing.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestLoadConfigData_MergesWithExisting(t *testing.T) {
 	// Load config with a different downstream
 	cfg := &config.AppConfig{
 		Downstreams: []config.DownstreamCfg{
-			{ID: "ds-config", Name: "From Config", BaseURL: "https://config.com/v1"},
+			{ID: "ds-config", Name: "From Config", BaseURL: "https://config.com"},
 		},
 		Rules:   []config.RuleCfg{},
 		Aliases: []config.AliasGroupCfg{},
@@ -303,7 +303,7 @@ func TestLoadConfigData_MergesWithExisting(t *testing.T) {
 func TestDeleteDownstream_CascadeNullifiesRules(t *testing.T) {
 	s := newTestStore(t)
 
-	ds := &Downstream{ID: "ds-cascade", Name: "Cascade DS", BaseURL: "https://cascade.com/v1"}
+	ds := &Downstream{ID: "ds-cascade", Name: "Cascade DS", BaseURL: "https://cascade.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestDeleteDownstream_CascadeNullifiesRules(t *testing.T) {
 func TestDeleteDownstream_CascadeDeletesAliases(t *testing.T) {
 	s := newTestStore(t)
 
-	ds := &Downstream{ID: "ds-alias-cascade", Name: "Alias Cascade DS", BaseURL: "https://cascade.com/v1"}
+	ds := &Downstream{ID: "ds-alias-cascade", Name: "Alias Cascade DS", BaseURL: "https://cascade.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestDeleteDownstream_CascadeDeletesAliases(t *testing.T) {
 func TestAddRemoveOutputModelID(t *testing.T) {
 	s := newTestStore(t)
 
-	ds := &Downstream{ID: "ds-models", Name: "Models DS", BaseURL: "https://models.com/v1"}
+	ds := &Downstream{ID: "ds-models", Name: "Models DS", BaseURL: "https://models.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestUpdateRule(t *testing.T) {
 func TestDeleteGroup(t *testing.T) {
 	s := newTestStore(t)
 
-	ds := &Downstream{ID: "ds-group", Name: "Group DS", BaseURL: "https://group.com/v1"}
+	ds := &Downstream{ID: "ds-group", Name: "Group DS", BaseURL: "https://group.com"}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}

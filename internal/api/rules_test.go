@@ -99,7 +99,7 @@ func TestCreateRule_Success(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "rule-ds", "https://rule.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "rule-ds", "https://rule.test.com")
 
 	body := map[string]interface{}{
 		"name":              "test-rule",
@@ -129,7 +129,7 @@ func TestGetRule_Success(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "get-rule-ds", "https://getrule.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "get-rule-ds", "https://getrule.test.com")
 
 	ruleBody := map[string]interface{}{
 		"name":              "get-test-rule",
@@ -181,7 +181,7 @@ func TestUpdateRule_FullUpdate(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "update-rule-ds", "https://updaterule.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "update-rule-ds", "https://updaterule.test.com")
 
 	ruleBody := map[string]interface{}{
 		"name":              "old-name",
@@ -229,7 +229,7 @@ func TestUpdateRule_EnabledOnly(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "enable-rule-ds", "https://enablerule.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "enable-rule-ds", "https://enablerule.test.com")
 
 	ruleBody := map[string]interface{}{
 		"name":              "enable-test-rule",
@@ -273,7 +273,7 @@ func TestUpdateRule_NoFields(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "nofields-ds", "https://nofields.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "nofields-ds", "https://nofields.test.com")
 
 	ruleBody := map[string]interface{}{
 		"name":              "no-fields-rule",
@@ -309,7 +309,7 @@ func TestDeleteRule(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "del-rule-ds", "https://delrule.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "del-rule-ds", "https://delrule.test.com")
 
 	ruleBody := map[string]interface{}{
 		"name":              "delete-me-rule",

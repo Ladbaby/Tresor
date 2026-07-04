@@ -62,7 +62,7 @@ func TestCreateDownstream_Success(t *testing.T) {
 
 	body := map[string]interface{}{
 		"name":     "test-provider",
-		"base_url": "https://api.test.com/v1",
+		"base_url": "https://api.test.com",
 		"api_key":  "sk-test-key",
 	}
 	data, _ := json.Marshal(body)
@@ -90,7 +90,7 @@ func TestCreateDownstream_MissingName(t *testing.T) {
 	handler := router.Handler()
 
 	body := map[string]interface{}{
-		"base_url": "https://api.test.com/v1",
+		"base_url": "https://api.test.com",
 	}
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
@@ -125,7 +125,7 @@ func TestGetDownstream_Success(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "get-test", "https://get.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "get-test", "https://get.test.com")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/downstreams/"+ds.ID, nil)
 	w := httptest.NewRecorder()
@@ -159,11 +159,11 @@ func TestUpdateDownstream(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "old-name", "https://old.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "old-name", "https://old.test.com")
 
 	body := map[string]interface{}{
 		"name":     "new-name",
-		"base_url": "https://new.test.com/v1",
+		"base_url": "https://new.test.com",
 	}
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPut, "/api/downstreams/"+ds.ID, bytes.NewReader(data))
@@ -186,7 +186,7 @@ func TestDeleteDownstream(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "delete-me", "https://del.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "delete-me", "https://del.test.com")
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/downstreams/"+ds.ID, nil)
 	w := httptest.NewRecorder()
@@ -217,7 +217,7 @@ func TestListDownstreams_MasksAPIKeys(t *testing.T) {
 
 	body := map[string]interface{}{
 		"name":     "key-test",
-		"base_url": "https://key.test.com/v1",
+		"base_url": "https://key.test.com",
 		"api_key":  "sk-real-secret-key",
 	}
 	data, _ := json.Marshal(body)
@@ -247,7 +247,7 @@ func TestAddRemoveModel(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "model-test", "https://model.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "model-test", "https://model.test.com")
 
 	// Add a model
 	addBody := map[string]interface{}{"model_id": "gpt-4o-mini"}
@@ -299,7 +299,7 @@ func TestAddModel_EmptyModelID(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	ds := createDownstreamViaAPI(t, handler, "empty-model-test", "https://empty.test.com/v1")
+	ds := createDownstreamViaAPI(t, handler, "empty-model-test", "https://empty.test.com")
 
 	body := map[string]interface{}{"model_id": ""}
 	data, _ := json.Marshal(body)
@@ -408,7 +408,7 @@ func TestUpdateDownstream_PartialPatch_PreservesOtherFields(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	seeded := seedDownstreamForPatch(t, handler, "name-x", "https://x.test/v1",
+	seeded := seedDownstreamForPatch(t, handler, "name-x", "https://x.test",
 		[]string{"openai", "anthropic"}, []string{"gpt-4o-mini", "gpt-4o"})
 
 	if got := patchDownstream(handler, seeded.ID, map[string]interface{}{
@@ -424,7 +424,7 @@ func TestUpdateDownstream_PartialPatch_PreservesOtherFields(t *testing.T) {
 	if after.Name != "name-x" {
 		t.Fatalf("name wiped: got %q", after.Name)
 	}
-	if after.BaseURL != "https://x.test/v1" {
+	if after.BaseURL != "https://x.test" {
 		t.Fatalf("base_url wiped: got %q", after.BaseURL)
 	}
 	if !reflect.DeepEqual(sortedCopy(after.OutputModelIDs), []string{"gpt-4o", "gpt-4o-mini"}) {
@@ -441,7 +441,7 @@ func TestUpdateDownstream_ExplicitEmptyApiFormats_Clears(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	seeded := seedDownstreamForPatch(t, handler, "fmt-clear", "https://fc.test/v1",
+	seeded := seedDownstreamForPatch(t, handler, "fmt-clear", "https://fc.test",
 		[]string{"openai", "anthropic"}, []string{"gpt-4o"})
 
 	if got := patchDownstream(handler, seeded.ID, map[string]interface{}{
@@ -461,7 +461,7 @@ func TestUpdateDownstream_ExplicitEmptyApiFormats_Clears(t *testing.T) {
 	if after.Name != "fmt-clear" {
 		t.Fatalf("name wiped: got %q", after.Name)
 	}
-	if after.BaseURL != "https://fc.test/v1" {
+	if after.BaseURL != "https://fc.test" {
 		t.Fatalf("base_url wiped: got %q", after.BaseURL)
 	}
 	if !reflect.DeepEqual(sortedCopy(after.OutputModelIDs), []string{"gpt-4o"}) {
@@ -477,7 +477,7 @@ func TestUpdateDownstream_MaskedAPIKey_Preserves(t *testing.T) {
 
 	body := map[string]interface{}{
 		"name":     "key-preserve",
-		"base_url": "https://kp.test/v1",
+		"base_url": "https://kp.test",
 		"api_key":  "sk-real-secret",
 	}
 	data, _ := json.Marshal(body)
@@ -518,7 +518,7 @@ func TestUpdateDownstream_ExplicitEmptyModels_Clears(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
-	seeded := seedDownstreamForPatch(t, handler, "models-clear", "https://mc.test/v1",
+	seeded := seedDownstreamForPatch(t, handler, "models-clear", "https://mc.test",
 		[]string{"openai"}, []string{"gpt-4o", "gpt-4o-mini"})
 
 	if got := patchDownstream(handler, seeded.ID, map[string]interface{}{
@@ -540,7 +540,7 @@ func TestUpdateDownstream_ExplicitEmptyModels_Clears(t *testing.T) {
 	if after.Name != "models-clear" {
 		t.Fatalf("name wiped: got %q", after.Name)
 	}
-	if after.BaseURL != "https://mc.test/v1" {
+	if after.BaseURL != "https://mc.test" {
 		t.Fatalf("base_url wiped: got %q", after.BaseURL)
 	}
 }

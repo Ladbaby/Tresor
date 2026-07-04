@@ -916,7 +916,7 @@ function renderDownstreamDetail(ds) {
         <div class="detail-section">
             <label>API Host</label>
             <div class="detail-row">
-                <input type="text" class="detail-edit-url" id="edit-url-${esc(ds.id)}" value="${esc(ds.base_url || '')}" placeholder="https://api.example.com/v1" autocomplete="off">
+                <input type="text" class="detail-edit-url" id="edit-url-${esc(ds.id)}" value="${esc(ds.base_url || '')}" placeholder="https://api.example.com" autocomplete="off">
             </div>
         </div>
         <div class="detail-section">
