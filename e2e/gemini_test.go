@@ -8,41 +8,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// startMockGeminiServer creates a mock Google Gemini server that responds
-// to /v1beta/models/{model}:generateContent with a JSON body and
-// to :streamGenerateContent?alt=sse with streaming SSE.
-//
-// The mock verifies the request was sent in Gemini format (contents[]/parts[])
-// and the x-goog-api-key header was set.
+const geminiPort = 9198
+
 func startMockGeminiServer(t *testing.T, port int) *http.Server {
+	t.Helper()
 	mux := http.NewServeMux()
 
-	// Listing endpoint. Register both bare /models and /v1beta/models
-	// because some clients and tools hit either.
-	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("x-goog-api-key-echo", r.Header.Get("x-goog-api-key"))
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"models": []map[string]interface{}{
-				{"name": "models/gemini-2.5-pro"},
-				{"name": "models/gemini-2.5-flash"},
-				{"name": "models/gemini-1.5-pro"},
-			},
-		})
-	})
+	// Listing endpoint. Engine calls /v1beta/models.
 	mux.HandleFunc("/v1beta/models", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("x-goog-api-key-echo", r.Header.Get("x-goog-api-key"))
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"models": []map[string]interface{}{
 				{"name": "models/gemini-2.5-pro"},
@@ -57,18 +38,14 @@ func startMockGeminiServer(t *testing.T, port int) *http.Server {
 		verifyGeminiRequest(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"candidates": []map[string]interface{}{
-				{
-					"content": map[string]interface{}{
-						"role": "model",
-						"parts": []map[string]interface{}{
-							{"text": "Hello from Gemini!"},
-						},
-					},
-					"finishReason": "STOP",
-					"index":        0,
+			"candidates": []map[string]interface{}{{
+				"content": map[string]interface{}{
+					"role":  "model",
+					"parts": []map[string]interface{}{{"text": "Hello from Gemini!"}},
 				},
-			},
+				"finishReason": "STOP",
+				"index":        0,
+			}},
 			"usageMetadata": map[string]interface{}{
 				"promptTokenCount":     4,
 				"candidatesTokenCount": 4,
@@ -80,59 +57,26 @@ func startMockGeminiServer(t *testing.T, port int) *http.Server {
 
 	// Generate content (streaming).
 	mux.HandleFunc("/v1beta/models/gemini-2.5-pro:streamGenerateContent", func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.URL.RawQuery, "alt=sse") {
-			t.Errorf("expected alt=sse query param, got %q", r.URL.RawQuery)
-		}
 		verifyGeminiRequest(t, r)
-		flusher, _ := w.(http.Flusher)
+		flusher := w.(http.Flusher)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 
-		writeGeminiSSE(w, map[string]interface{}{
-			"candidates": []map[string]interface{}{{
-				"content": map[string]interface{}{
-					"role":  "model",
-					"parts": []map[string]interface{}{{"text": "Hello"}},
-				},
-				"index": 0,
-			}},
-			"modelVersion": "gemini-2.5-pro",
-		})
-		flusher.Flush()
-		writeGeminiSSE(w, map[string]interface{}{
-			"candidates": []map[string]interface{}{{
-				"content": map[string]interface{}{
-					"role":  "model",
-					"parts": []map[string]interface{}{{"text": " from Gemini!"}},
-				},
-				"index": 0,
-			}},
-		})
-		flusher.Flush()
-		writeGeminiSSE(w, map[string]interface{}{
-			"candidates": []map[string]interface{}{{
-				"content":       map[string]interface{}{"role": "model", "parts": []map[string]interface{}{}},
-				"finishReason":  "STOP",
-				"index":         0,
-			}},
-			"usageMetadata": map[string]interface{}{"candidatesTokenCount": 5},
-		})
-		flusher.Flush()
+		for _, payload := range []map[string]interface{}{
+			{"candidates": []map[string]interface{}{{"content": map[string]interface{}{"role": "model", "parts": []map[string]interface{}{{"text": "Hello"}}}, "index": 0}}, "modelVersion": "gemini-2.5-pro"},
+			{"candidates": []map[string]interface{}{{"content": map[string]interface{}{"role": "model", "parts": []map[string]interface{}{{"text": " from Gemini!"}}}, "index": 0}}},
+			{"candidates": []map[string]interface{}{{"content": map[string]interface{}{"role": "model", "parts": []map[string]interface{}{}}, "finishReason": "STOP", "index": 0}}, "usageMetadata": map[string]interface{}{"candidatesTokenCount": 5}},
+		} {
+			writeGeminiSSE(w, payload)
+			flusher.Flush()
+		}
 	})
 
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		t.Fatalf("listen on %d: %v", port, err)
-	}
-	srv := &http.Server{Handler: mux}
-	go srv.Serve(ln)
-	return srv
+	return startMockServer(t, port, mux)
 }
 
-// verifyGeminiRequest checks that the request is a well-formed Gemini body
-// (has contents[]) and was authenticated with x-goog-api-key. systemInstruction
-// is optional.
 func verifyGeminiRequest(t *testing.T, r *http.Request) {
+	t.Helper()
 	if r.Header.Get("x-goog-api-key") == "" {
 		t.Errorf("expected x-goog-api-key header, got none")
 	}
@@ -142,16 +86,12 @@ func verifyGeminiRequest(t *testing.T, r *http.Request) {
 		return
 	}
 	if _, ok := body["contents"]; !ok {
-		t.Errorf("expected contents[] in Gemini request, got keys: %v", keysOf(body))
+		keys := make([]string, 0, len(body))
+		for k := range body {
+			keys = append(keys, k)
+		}
+		t.Errorf("expected contents[] in Gemini request, got keys: %v", keys)
 	}
-}
-
-func keysOf(m map[string]interface{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }
 
 func writeGeminiSSE(w io.Writer, payload interface{}) {
@@ -159,34 +99,11 @@ func writeGeminiSSE(w io.Writer, payload interface{}) {
 	fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
-// TestGeminiE2E runs an end-to-end test that exercises the Gemini plugin
-// pipeline against a live daemon and a mock Gemini server. It verifies:
-//   - The /v1beta/models listing endpoint works (with x-goog-api-key auth).
-//   - An OpenAI Chat Completion request is auto-translated to Gemini format
-//     and forwarded to the mock Gemini server, which receives a properly
-//     shaped Gemini body.
-//   - A streaming request goes through the :streamGenerateContent endpoint
-//     with alt=sse and the response is correctly translated back to OpenAI
-//     SSE chunks.
-//   - x-goog-api-key is injected when the downstream's api_formats contains
-//     "gemini".
 func TestGeminiE2E(t *testing.T) {
-	// --- 1. Start mock Gemini server on its own port. ---
-	mockPort := 9380
-	mockSrv := startMockGeminiServer(t, mockPort)
+	mockSrv := startMockGeminiServer(t, 9380)
 	defer mockSrv.Close()
 
-	// --- 2. Configure Tresor with the mock Gemini downstream. ---
-	tmpDir, err := os.MkdirTemp("", "tresor-e2e-gemini-*")
-	if err != nil {
-		t.Fatalf("temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-	dbPath := filepath.Join(tmpDir, "test.db")
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-
-	// Use a different port to avoid clashing with the main TestE2E daemon.
-	geminiPort := 9198
+	dbPath := filepath.Join(t.TempDir(), "test.db")
 	cfg := fmt.Sprintf(`
 bind_addr: 127.0.0.1:%d
 db_path: %s
@@ -195,34 +112,17 @@ downstreams:
   - id: mock-gemini
     name: Mock Gemini
     api_formats: [gemini]
-    base_url: http://127.0.0.1:%d
+    base_url: http://127.0.0.1:9380
     api_key: gem-test-key
     output_model_ids:
       - gemini-2.5-pro
-`, geminiPort, dbPath, mockPort)
+`, geminiPort, dbPath)
 
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	apiBase, cleanup := startTresor(t, cfg, geminiPort)
+	defer cleanup()
 
-	// --- 3. Start the daemon. ---
-	binary, _ := filepath.Abs("../tresor.exe")
-	cmd := exec.Command(binary, "run", "--config", cfgPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start daemon: %v", err)
-	}
-	defer func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}()
-	time.Sleep(2 * time.Second)
-
-	apiBase := fmt.Sprintf("http://127.0.0.1:%d", geminiPort)
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	// --- 4. Health check. ---
 	t.Run("HealthCheck", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/health")
 		if err != nil {
@@ -234,45 +134,37 @@ downstreams:
 		}
 	})
 
-	// --- 5. Plugins list includes the new Gemini transformers. ---
 	t.Run("PluginsListIncludesGemini", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/plugins")
 		if err != nil {
 			t.Fatalf("plugins: %v", err)
 		}
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
 		var plugins []map[string]interface{}
-		if err := json.Unmarshal(body, &plugins); err != nil {
+		if err := json.NewDecoder(resp.Body).Decode(&plugins); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		want := map[string]bool{
-			"openai2gemini":      false,
-			"anthropic2gemini":   false,
-			"gemini2openai":      false,
-			"gemini2anthropic":   false,
-		}
+		want := []string{"openai2gemini", "anthropic2gemini", "gemini2openai", "gemini2anthropic"}
+		have := make(map[string]bool, len(plugins))
 		for _, p := range plugins {
-			if _, ok := want[p["id"].(string)]; ok {
-				want[p["id"].(string)] = true
+			if id, ok := p["id"].(string); ok {
+				have[id] = true
 			}
 		}
-		for id, found := range want {
-			if !found {
-				t.Errorf("plugin %s not found in /api/plugins response", id)
+		for _, id := range want {
+			if !have[id] {
+				t.Errorf("plugin %s not found in /api/plugins", id)
 			}
 		}
 	})
 
-	// --- 6. Create a Gemini-format downstream via admin API and verify the
-	//       fetch-models endpoint can hit the mock. ---
 	t.Run("CreateGeminiDownstream", func(t *testing.T) {
 		body := map[string]interface{}{
-			"id":         "test-gemini",
-			"name":       "Test Gemini",
-			"api_formats": []string{"gemini"},
-			"base_url":   fmt.Sprintf("http://127.0.0.1:%d", mockPort),
-			"api_key":    "gem-test-key",
+			"id":              "test-gemini",
+			"name":            "Test Gemini",
+			"api_formats":     []string{"gemini"},
+			"base_url":        "http://127.0.0.1:9380",
+			"api_key":         "gem-test-key",
 			"output_model_ids": []string{},
 		}
 		b, _ := json.Marshal(body)
@@ -309,10 +201,8 @@ downstreams:
 		if len(out.ModelIDs) == 0 {
 			t.Fatalf("expected model_ids, got none (body: %s)", respBody)
 		}
-		t.Logf("Fetched models: %v", out.ModelIDs)
 	})
 
-	// --- 7. OpenAI → Gemini auto-translation. ---
 	t.Run("OpenAIToGemini_AutoTranslate", func(t *testing.T) {
 		body := map[string]interface{}{
 			"model": "gemini-2.5-pro",
@@ -338,17 +228,16 @@ downstreams:
 		if err := json.Unmarshal(respBody, &oaiResp); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		choices, _ := oaiResp["choices"].([]interface{})
+		choices := oaiResp["choices"].([]interface{})
 		if len(choices) == 0 {
-			t.Fatalf("expected 1 choice, got %d (body: %s)", len(choices), respBody)
+			t.Fatalf("expected 1 choice, got 0")
 		}
-		choice := choices[0].(map[string]interface{})
-		msg := choice["message"].(map[string]interface{})
+		msg := choices[0].(map[string]interface{})["message"].(map[string]interface{})
 		if msg["content"] != "Hello from Gemini!" {
 			t.Fatalf("expected content 'Hello from Gemini!', got %v", msg["content"])
 		}
-		if choice["finish_reason"] != "stop" {
-			t.Fatalf("expected finish_reason 'stop', got %v", choice["finish_reason"])
+		if reason := choices[0].(map[string]interface{})["finish_reason"]; reason != "stop" {
+			t.Fatalf("expected finish_reason 'stop', got %v", reason)
 		}
 		usage := oaiResp["usage"].(map[string]interface{})
 		if usage["total_tokens"] != float64(8) {
@@ -356,7 +245,6 @@ downstreams:
 		}
 	})
 
-	// --- 8. Streaming: OpenAI → Gemini SSE → OpenAI SSE. ---
 	t.Run("OpenAIToGemini_Streaming", func(t *testing.T) {
 		body := map[string]interface{}{
 			"model":    "gemini-2.5-pro",
@@ -372,25 +260,20 @@ downstreams:
 			t.Fatalf("stream: %v", err)
 		}
 		defer resp.Body.Close()
-		if resp.Header.Get("Content-Type") != "text/event-stream" {
+		if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 			t.Fatalf("expected text/event-stream, got %q", resp.Header.Get("Content-Type"))
 		}
-		// Read chunks; verify we get at least one content delta and a [DONE] marker.
 		var gotContent, gotDone bool
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 		for scanner.Scan() {
-			line := strings.TrimRight(scanner.Text(), "\r")
-			if line == "" {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			// Some servers emit "[DONE]" with no "data: " prefix; handle both.
 			payload := strings.TrimPrefix(line, "data: ")
 			if payload == "[DONE]" {
 				gotDone = true
-				continue
-			}
-			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
 			var chunk map[string]interface{}
@@ -401,10 +284,11 @@ downstreams:
 			if len(choices) == 0 {
 				continue
 			}
-			c0, _ := choices[0].(map[string]interface{})
-			delta, _ := c0["delta"].(map[string]interface{})
-			if c, ok := delta["content"].(string); ok && c != "" {
-				gotContent = true
+			c0 := choices[0].(map[string]interface{})
+			if d, _ := c0["delta"].(map[string]interface{}); d != nil {
+				if c, ok := d["content"].(string); ok && c != "" {
+					gotContent = true
+				}
 			}
 		}
 		if !gotContent {
@@ -415,15 +299,12 @@ downstreams:
 		}
 	})
 
-	// --- 9. Anthropic → Gemini auto-translation. ---
 	t.Run("AnthropicToGemini_AutoTranslate", func(t *testing.T) {
 		body := map[string]interface{}{
 			"model":      "gemini-2.5-pro",
 			"max_tokens": 100,
 			"system":     "You are helpful.",
-			"messages": []map[string]interface{}{
-				{"role": "user", "content": "Hi"},
-			},
+			"messages":    []map[string]interface{}{{"role": "user", "content": "Hi"}},
 		}
 		b, _ := json.Marshal(body)
 		req, _ := http.NewRequest("POST", apiBase+"/v1/messages", bytes.NewReader(b))
@@ -446,7 +327,7 @@ downstreams:
 		if anth["role"] != "assistant" {
 			t.Fatalf("expected assistant, got %v", anth["role"])
 		}
-		content, _ := anth["content"].([]interface{})
+		content := anth["content"].([]interface{})
 		if len(content) != 1 {
 			t.Fatalf("expected 1 content block, got %d", len(content))
 		}

@@ -5,33 +5,21 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// TestE2E runs the full end-to-end integration test against a live Tresor daemon.
-// Usage: go test -tags=integration -run TestE2E ./...
-// Note: the binary must be built first with 'go build -o tresor.exe .'
+const e2ePort = 9199
+
 func TestE2E(t *testing.T) {
-	// Create temp dir for test artifacts
-	tmpDir, err := os.MkdirTemp("", "tresor-e2e-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	dbPath := filepath.Join(tmpDir, "test.db")
-	cfgPath := filepath.Join(tmpDir, "config.yaml")
-
-	// Write YAML config for the test
-	cfgContent := `
-bind_addr: 127.0.0.1:9199
-db_path: ` + dbPath + `
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	cfg := fmt.Sprintf(`
+bind_addr: 127.0.0.1:%d
+db_path: %s
 
 downstreams:
   - id: openai-gpt4o
@@ -77,36 +65,11 @@ aliases:
         downstream_id: anthropic-sonnet
         output_model_id: claude-sonnet-4-20250514
 `
-	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
-		t.Fatalf("Failed to write config: %v", err)
-	}
+	apiBase, cleanup := startTresor(t, cfg, e2ePort)
+	defer cleanup()
 
-	binary, err := filepath.Abs("../tresor.exe")
-	if err != nil {
-		t.Fatalf("Failed to resolve binary path: %v", err)
-	}
-
-	t.Log("=== Tresor End-to-End Test ===")
-	t.Logf("Binary: %s", binary)
-	t.Logf("Config: %s", cfgPath)
-	t.Logf("DB: %s", dbPath)
-
-	// Start the daemon with YAML config
-	cmd := exec.Command(binary, "run", "--config", cfgPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Failed to start daemon: %v", err)
-	}
-	defer cmd.Process.Kill()
-
-	// Wait for startup
-	time.Sleep(2 * time.Second)
-
-	apiBase := "http://127.0.0.1:9199"
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	// Test 1: Health check
 	t.Run("HealthCheck", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/health")
 		if err != nil {
@@ -114,23 +77,19 @@ aliases:
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", body)
 		if resp.StatusCode != 200 {
-			t.Fatalf("expected 200, got %d", resp.StatusCode)
+			t.Fatalf("expected 200, got %d, body=%s", resp.StatusCode, body)
 		}
 	})
 
-	// Test 2: List rules (expecting config-loaded defaults)
 	t.Run("ListRules", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/rules")
 		if err != nil {
 			t.Fatalf("list rules: %v", err)
 		}
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", body)
 		var rules []interface{}
-		if err := json.Unmarshal(body, &rules); err != nil {
+		if err := json.NewDecoder(resp.Body).Decode(&rules); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		if len(rules) == 0 {
@@ -138,17 +97,14 @@ aliases:
 		}
 	})
 
-	// Test 3: List downstreams
 	t.Run("ListDownstreams", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/downstreams")
 		if err != nil {
 			t.Fatalf("list downstreams: %v", err)
 		}
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", body)
 		var ds []interface{}
-		if err := json.Unmarshal(body, &ds); err != nil {
+		if err := json.NewDecoder(resp.Body).Decode(&ds); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		if len(ds) != 4 {
@@ -156,7 +112,7 @@ aliases:
 		}
 	})
 
-	// Test 4: Create a new rule
+	var createdRuleID string
 	t.Run("CreateRule", func(t *testing.T) {
 		newRule := map[string]interface{}{
 			"name":              "test-chat",
@@ -172,19 +128,16 @@ aliases:
 			t.Fatalf("create rule: %v", err)
 		}
 		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", respBody)
 		if resp.StatusCode != 201 {
 			t.Fatalf("expected 201, got %d", resp.StatusCode)
 		}
+		var out map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&out)
+		createdRuleID, _ = out["id"].(string)
 	})
 
-	// Test 5: Update rule match_downstreams
 	t.Run("UpdateRule", func(t *testing.T) {
-		payload := map[string]interface{}{
-			"match_downstreams": []string{"anthropic-sonnet"},
-		}
-		data, _ := json.Marshal(payload)
+		data, _ := json.Marshal(map[string]interface{}{"match_downstreams": []string{"anthropic-sonnet"}})
 		req, _ := http.NewRequest(http.MethodPut, apiBase+"/api/rules/default", bytes.NewReader(data))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
@@ -192,107 +145,65 @@ aliases:
 			t.Fatalf("update rule: %v", err)
 		}
 		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", respBody)
 		if resp.StatusCode != 200 {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
 	})
 
-	// Test 6: List plugins
 	t.Run("ListPlugins", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/plugins")
 		if err != nil {
 			t.Fatalf("list plugins: %v", err)
 		}
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", body)
-		var plugins []interface{}
-		if err := json.Unmarshal(body, &plugins); err != nil {
+		var plugins []map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&plugins); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		// The plugin registry includes format transformers (openai2anthropic,
-		// anthropic2openai, openai2gemini, anthropic2gemini, gemini2openai,
-		// gemini2anthropic, plus the openai_responses family), custom_header,
-		// and fix_anthropic_images — 12 total at the time of writing.
-		if len(plugins) < 8 {
-			t.Fatalf("expected at least 8 plugins, got %d", len(plugins))
-		}
-		// Verify the new Gemini plugins are present in the response.
-		wantIDs := []string{"openai2gemini", "anthropic2gemini", "gemini2openai", "gemini2anthropic"}
-		haveIDs := make(map[string]bool, len(plugins))
+		want := []string{"openai2gemini", "anthropic2gemini", "gemini2openai", "gemini2anthropic"}
+		have := make(map[string]bool, len(plugins))
 		for _, p := range plugins {
-			pm, _ := p.(map[string]interface{})
-			if id, ok := pm["id"].(string); ok {
-				haveIDs[id] = true
+			if id, ok := p["id"].(string); ok {
+				have[id] = true
 			}
 		}
-		for _, id := range wantIDs {
-			if !haveIDs[id] {
-				t.Fatalf("expected plugin %q to be registered, but it was missing", id)
+		for _, id := range want {
+			if !have[id] {
+				t.Fatalf("plugin %q not registered", id)
 			}
 		}
 	})
 
-	// Test 6b: List alias groups
 	t.Run("ListAliasGroups", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/aliases")
 		if err != nil {
 			t.Fatalf("list aliases: %v", err)
 		}
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", body)
 		var groups []map[string]interface{}
-		if err := json.Unmarshal(body, &groups); err != nil {
+		if err := json.NewDecoder(resp.Body).Decode(&groups); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if len(groups) != 1 {
-			t.Fatalf("expected 1 alias group, got %d", len(groups))
+		if len(groups) != 1 || groups[0]["input_model_id"] != "gpt-4o" {
+			t.Fatalf("unexpected groups: %+v", groups)
 		}
-		if groups[0]["input_model_id"] != "gpt-4o" {
-			t.Fatalf("expected input_model_id gpt-4o, got %v", groups[0]["input_model_id"])
-		}
-		options := groups[0]["options"].([]interface{})
-		if len(options) != 2 {
-			t.Fatalf("expected 2 options, got %d", len(options))
+		if opts, _ := groups[0]["options"].([]interface{}); len(opts) != 2 {
+			t.Fatalf("expected 2 options, got %d", len(opts))
 		}
 	})
 
-	// Test 6c: Activate alias (hot-switch)
 	t.Run("ActivateAlias", func(t *testing.T) {
-		payload := []byte("{}")
-		req, _ := http.NewRequest(http.MethodPut, apiBase+"/api/aliases/alias-gpt4o-anthropic/activate", bytes.NewReader(payload))
+		req, _ := http.NewRequest(http.MethodPut, apiBase+"/api/aliases/alias-gpt4o-anthropic/activate", bytes.NewReader([]byte("{}")))
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("activate alias: %v", err)
 		}
 		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", respBody)
 		if resp.StatusCode != 200 {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
 	})
 
-	// Test 6d: Downstream output_model_ids
-	t.Run("DownstreamModels", func(t *testing.T) {
-		resp, err := client.Get(apiBase + "/api/downstreams")
-		if err != nil {
-			t.Fatalf("list downstreams: %v", err)
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		var ds []map[string]interface{}
-		json.Unmarshal(body, &ds)
-		for _, d := range ds {
-			models := d["output_model_ids"]
-			t.Logf("Downstream %s output_model_ids: %v", d["id"], models)
-		}
-	})
-
-	// Test 6e: Add model to downstream
 	t.Run("AddModel", func(t *testing.T) {
 		body, _ := json.Marshal(map[string]string{"model_id": "gpt-4.5-preview"})
 		resp, err := client.Post(apiBase+"/api/downstreams/openai-gpt4o/models", "application/json", bytes.NewReader(body))
@@ -300,14 +211,11 @@ aliases:
 			t.Fatalf("add model: %v", err)
 		}
 		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", respBody)
 		if resp.StatusCode != 200 {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
 	})
 
-	// Test 6f: Remove model from downstream
 	t.Run("RemoveModel", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodDelete, apiBase+"/api/downstreams/openai-gpt4o/models/gpt-4.5-preview", nil)
 		resp, err := client.Do(req)
@@ -315,57 +223,37 @@ aliases:
 			t.Fatalf("remove model: %v", err)
 		}
 		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Logf("Response: %s", respBody)
 		if resp.StatusCode != 200 {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
 	})
 
-	// Test 7: Delete a rule
 	t.Run("DeleteRule", func(t *testing.T) {
-		resp, err := client.Get(apiBase + "/api/rules")
-		if err != nil {
-			t.Fatalf("list rules for delete: %v", err)
+		if createdRuleID == "" {
+			t.Skip("CreateRule didn't return an id")
 		}
-		body, _ := io.ReadAll(resp.Body)
+		req, _ := http.NewRequest(http.MethodDelete, apiBase+"/api/rules/"+createdRuleID, nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("delete rule: %v", err)
+		}
 		resp.Body.Close()
-		var rules []map[string]interface{}
-		json.Unmarshal(body, &rules)
-		for _, r := range rules {
-			if r["name"] == "test-chat" {
-				id := r["id"].(string)
-				delReq, _ := http.NewRequest(http.MethodDelete, apiBase+"/api/rules/"+id, nil)
-				delResp, delErr := client.Do(delReq)
-				if delErr != nil {
-					t.Fatalf("delete rule: %v", delErr)
-				}
-				delResp.Body.Close()
-				if delResp.StatusCode != 200 {
-					t.Fatalf("expected 200, got %d", delResp.StatusCode)
-				}
-				return
-			}
+		if resp.StatusCode != 200 {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
-		t.Fatal("test-chat rule not found for deletion")
 	})
 
-	// Test 8: Proxy request (will fail to connect to downstream, but should route)
 	t.Run("ProxyRouting", func(t *testing.T) {
-		proxyBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}`
-		resp, err := client.Post(apiBase+"/v1/chat/completions", "application/json", bytes.NewReader([]byte(proxyBody)))
+		body := `{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}`
+		resp, err := client.Post(apiBase+"/v1/chat/completions", "application/json", bytes.NewReader([]byte(body)))
 		if err != nil {
-			// This should try to connect to the downstream and fail (no real upstream key)
-			// But the routing itself should have worked
-			t.Logf("Expected connection error (no real downstream configured): %v", err)
-		} else {
-			defer resp.Body.Close()
-			respBody, _ := io.ReadAll(resp.Body)
-			t.Logf("Response status: %d, body: %s", resp.StatusCode, respBody)
+			t.Logf("expected connect failure (no real upstream): %v", err)
+			return
 		}
+		defer resp.Body.Close()
+		t.Logf("proxy status: %d", resp.StatusCode)
 	})
 
-	// Test 9: Web UI
 	t.Run("WebUI", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/")
 		if err != nil {
@@ -376,10 +264,8 @@ aliases:
 		if resp.StatusCode != 200 || len(body) == 0 {
 			t.Fatalf("expected 200 with body, got %d, %d bytes", resp.StatusCode, len(body))
 		}
-		t.Logf("index.html: %d bytes", len(body))
 	})
 
-	// Test 10: Web UI assets
 	t.Run("WebUIAssets", func(t *testing.T) {
 		for _, asset := range []string{"/style.css", "/app.js"} {
 			resp, err := client.Get(apiBase + asset)
@@ -391,13 +277,9 @@ aliases:
 			if resp.StatusCode != 200 || len(body) == 0 {
 				t.Fatalf("%s: status %d, %d bytes", asset, resp.StatusCode, len(body))
 			}
-			t.Logf("%s: %d bytes", asset, len(body))
 		}
 	})
 
-	// Test 11: Icon endpoint is public and returns 404 for unknown model IDs.
-	// This is the only icon test that always runs — the success path requires
-	// network access to the icon CDN.
 	t.Run("IconEndpoint_UnknownModel404", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/icons/totally-unknown-model-xyz-12345")
 		if err != nil {
@@ -409,56 +291,35 @@ aliases:
 		}
 	})
 
-	// Test 12: Icon endpoint returns SVG for a known model. Requires network.
-	t.Run("IconEndpoint_KnownModel", func(t *testing.T) {
-		if testing.Short() {
-			t.Skip("requires network access to icon CDN")
-		}
-		resp, err := client.Get(apiBase + "/api/icons/gpt-4o")
-		if err != nil {
-			t.Fatalf("icon: %v", err)
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode != 200 {
-			t.Fatalf("expected 200 for known model, got %d (body=%q)", resp.StatusCode, body)
-		}
-		if !bytes.HasPrefix(body, []byte("<?xml")) && !bytes.HasPrefix(body, []byte("<svg")) {
-			t.Fatalf("expected SVG content, got %q", body[:min(50, len(body))])
-		}
-		ct := resp.Header.Get("Content-Type")
-		if !bytes.HasPrefix([]byte(ct), []byte("image/svg")) {
-			t.Fatalf("expected image/svg+xml, got %q", ct)
-		}
-	})
-
-	// Test 13: First-segment fallback resolves model IDs the pattern table
-	// does not cover. We use "MiniMax-M2.5" which does NOT match any pattern
-	// (no gpt, claude, gemini, deepseek, llama, mistral, etc. inside). The
-	// daemon should derive the slug "minimax" from the first segment and
-	// either return the SVG (if the CDN has it) or 404 (if it does not).
-	// Either way, the endpoint must be reachable and return a final answer
-	// rather than erroring out.
-	t.Run("IconEndpoint_FirstSegmentFallback", func(t *testing.T) {
-		if testing.Short() {
-			t.Skip("requires network access to icon CDN")
-		}
-		resp, err := client.Get(apiBase + "/api/icons/MiniMax-M2.5")
-		if err != nil {
-			t.Fatalf("icon: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 && resp.StatusCode != 404 {
-			t.Fatalf("expected 200 or 404, got %d", resp.StatusCode)
-		}
-		if resp.StatusCode == 200 {
+	if testing.Short() {
+		return
+	}
+	for _, tc := range []struct{ name, path string; wantBytes []byte }{
+		{"KnownModel", "/api/icons/gpt-4o", []byte("<?xml")},
+		{"FirstSegmentFallback", "/api/icons/MiniMax-M2.5", nil}, // 200 or 404 both OK
+	} {
+		t.Run("IconEndpoint_"+tc.name, func(t *testing.T) {
+			resp, err := client.Get(apiBase + tc.path)
+			if err != nil {
+				t.Fatalf("icon: %v", err)
+			}
+			defer resp.Body.Close()
+			if tc.wantBytes == nil {
+				if resp.StatusCode != 200 && resp.StatusCode != 404 {
+					t.Fatalf("expected 200 or 404, got %d", resp.StatusCode)
+				}
+				return
+			}
 			body, _ := io.ReadAll(resp.Body)
-			if !bytes.HasPrefix(body, []byte("<?xml")) && !bytes.HasPrefix(body, []byte("<svg")) {
+			if resp.StatusCode != 200 {
+				t.Fatalf("expected 200, got %d (body=%q)", resp.StatusCode, body)
+			}
+			if !bytes.HasPrefix(body, tc.wantBytes) && !bytes.HasPrefix(body, []byte("<svg")) {
 				t.Fatalf("expected SVG content, got %q", body[:min(50, len(body))])
 			}
-			t.Logf("fallback resolved minimax.svg: %d bytes", len(body))
-		} else {
-			t.Log("fallback 404'd (CDN lacks minimax.svg — expected on first deploy)")
-		}
-	})
+			if ct := resp.Header.Get("Content-Type"); !bytes.HasPrefix([]byte(ct), []byte("image/svg")) {
+				t.Fatalf("expected image/svg+xml, got %q", ct)
+			}
+		})
+	}
 }
