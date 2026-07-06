@@ -2,14 +2,13 @@ package plugins
 
 import (
 	"fmt"
-	"sync"
 
 	"tresor/internal/engine"
 )
 
 // registry holds all available plugin factories.
+// ponytail: maps are populated only in NewRegistry and read-only after; no lock needed.
 type registry struct {
-	mu      sync.RWMutex
 	factories map[string]engine.PluginFactory
 	info      map[string]engine.PluginInfo
 }
@@ -182,10 +181,7 @@ func (r *registry) register(id string, info engine.PluginInfo, factory engine.Pl
 
 // CreatePlugin instantiates a plugin by ID with the given configuration.
 func (r *registry) CreatePlugin(pluginID string, config map[string]interface{}) (interface{}, error) {
-	r.mu.RLock()
 	factory, ok := r.factories[pluginID]
-	r.mu.RUnlock()
-
 	if !ok {
 		return nil, fmt.Errorf("plugin %q not found", pluginID)
 	}
@@ -195,9 +191,6 @@ func (r *registry) CreatePlugin(pluginID string, config map[string]interface{}) 
 
 // ListPlugins returns metadata about all registered plugins.
 func (r *registry) ListPlugins() []engine.PluginInfo {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	plugins := make([]engine.PluginInfo, 0, len(r.info))
 	for _, info := range r.info {
 		plugins = append(plugins, info)

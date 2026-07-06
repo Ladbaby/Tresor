@@ -281,14 +281,14 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 						}
 						toolMsg["content"] = contentArray
 					} else {
-						toolMsg["content"] = joinTextParts(toolTextParts)
+						toolMsg["content"] = strings.Join(toolTextParts, "\n")
 					}
 					oaiMessages = append(oaiMessages, toolMsg)
 				}
 			}
 
 			if hasToolUse {
-				text := joinTextParts(textParts)
+				text := strings.Join(textParts, "\n")
 				if len(imageParts) > 0 {
 					var contentArray []interface{}
 					if text != "" {
@@ -323,7 +323,7 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 			} else if hasToolResult {
 				// Already handled above — tool_result messages are appended inline
 			} else {
-				text := joinTextParts(textParts)
+				text := strings.Join(textParts, "\n")
 				if len(imageParts) > 0 {
 					var contentArray []interface{}
 					if text != "" {
@@ -380,25 +380,6 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
     }
 
     return newReq, newBody, nil
-}
-
-// joinTextParts concatenates text parts with a newline.
-func joinTextParts(parts []string) string {
-    switch len(parts) {
-    case 0:
-        return ""
-    case 1:
-        return parts[0]
-    default:
-        var b bytes.Buffer
-        for i, p := range parts {
-            if i > 0 {
-                b.WriteString("\n")
-            }
-            b.WriteString(p)
-        }
-        return b.String()
-    }
 }
 
 // normalizeAnthropicBillingHeader scrubs Claude Code billing headers from system prompt text.

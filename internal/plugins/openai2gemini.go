@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -400,36 +401,9 @@ func openAIImageToGeminiInline(url string) (map[string]interface{}, bool) {
 	}, true
 }
 
-// base64Encode is a tiny wrapper so we don't need to import encoding/base64
-// at the top level (matches style of other helpers in the package).
+// base64Encode wraps encoding/base64 StdEncoding.
 func base64Encode(b []byte) string {
-	const tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	var out bytes.Buffer
-	n := len(b)
-	for i := 0; i < n; i += 3 {
-		var v uint32
-		switch n - i {
-		case 1:
-			v = uint32(b[i]) << 16
-			out.WriteByte(tbl[(v>>18)&0x3f])
-			out.WriteByte(tbl[(v>>12)&0x3f])
-			out.WriteByte('=')
-			out.WriteByte('=')
-		case 2:
-			v = uint32(b[i])<<16 | uint32(b[i+1])<<8
-			out.WriteByte(tbl[(v>>18)&0x3f])
-			out.WriteByte(tbl[(v>>12)&0x3f])
-			out.WriteByte(tbl[(v>>6)&0x3f])
-			out.WriteByte('=')
-		default:
-			v = uint32(b[i])<<16 | uint32(b[i+1])<<8 | uint32(b[i+2])
-			out.WriteByte(tbl[(v>>18)&0x3f])
-			out.WriteByte(tbl[(v>>12)&0x3f])
-			out.WriteByte(tbl[(v>>6)&0x3f])
-			out.WriteByte(tbl[v&0x3f])
-		}
-	}
-	return out.String()
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 // TransformResponse converts a Gemini GenerateContentResponse into an OpenAI

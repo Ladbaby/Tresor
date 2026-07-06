@@ -1076,15 +1076,10 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 // --- Helpers ---
 
+// writeResponsesSSE writes a Responses-API SSE event. Framing is identical to
+// Anthropic SSE (event: / data: / blank line), so it delegates.
 func writeResponsesSSE(buf *bytes.Buffer, eventType string, data interface{}) {
-	payload, err := json.Marshal(data)
-	if err != nil {
-		return
-	}
-	fmt.Fprintf(buf, "event: %s\n", eventType)
-	buf.WriteString("data: ")
-	buf.Write(payload)
-	buf.WriteString("\n\n")
+	writeAnthropicSSE(buf, eventType, data)
 }
 
 // Ensure interface compliance.

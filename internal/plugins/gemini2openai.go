@@ -296,7 +296,7 @@ func (t *Gemini2OpenAI) TransformRequest(req *http.Request, body []byte, ctx *en
 				"role": "assistant",
 			}
 			if len(textParts) > 0 {
-				msg["content"] = joinStrings(textParts, "\n")
+				msg["content"] = strings.Join(textParts, "\n")
 			}
 			msg["tool_calls"] = toolCallsToMaps(toolCalls)
 			messages = append(messages, msg)
@@ -306,7 +306,7 @@ func (t *Gemini2OpenAI) TransformRequest(req *http.Request, body []byte, ctx *en
 		if oaiRole == "assistant" {
 			messages = append(messages, map[string]interface{}{
 				"role":    "assistant",
-				"content": joinStrings(textParts, "\n"),
+				"content": strings.Join(textParts, "\n"),
 			})
 			continue
 		}
@@ -317,7 +317,7 @@ func (t *Gemini2OpenAI) TransformRequest(req *http.Request, body []byte, ctx *en
 		}
 		messages = append(messages, map[string]interface{}{
 			"role":    "user",
-			"content": joinStrings(textParts, "\n"),
+			"content": strings.Join(textParts, "\n"),
 		})
 	}
 
@@ -426,17 +426,6 @@ func indexOfContent(contents []geminiContent, target geminiContent) int {
 	return -1
 }
 
-func joinStrings(parts []string, sep string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += sep
-		}
-		out += p
-	}
-	return out
-}
-
 func toolCallsToMaps(tcs []openAIChatToolCall) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(tcs))
 	for _, tc := range tcs {
@@ -453,7 +442,7 @@ func toolCallsToMaps(tcs []openAIChatToolCall) []map[string]interface{} {
 }
 
 func isStreamRequest(path string) bool {
-	return bytes.Contains([]byte(path), []byte(":streamGenerateContent"))
+	return strings.Contains(path, ":streamGenerateContent")
 }
 
 // mapThinkingBudgetToEffort buckets a Gemini thinkingConfig.thinkingBudget

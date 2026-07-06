@@ -219,7 +219,7 @@ func TestAnthropic2OpenAI_TransformRequest_ThinkingAndToolUse(t *testing.T) {
 			map[string]interface{}{
 				"role": "assistant",
 				"content": []interface{}{
-					map[string]interface{}{"type": "thinking", "text": "Let me think about this..."},
+					map[string]interface{}{"type": "thinking", "thinking": "Let me think about this..."},
 					map[string]interface{}{"type": "text", "text": "I'll look it up."},
 					map[string]interface{}{"type": "tool_use", "id": "tu_1", "name": "get_weather", "input": map[string]interface{}{"location": "Paris"}},
 				},
