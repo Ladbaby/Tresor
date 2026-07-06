@@ -45,6 +45,17 @@ type StreamResponseTransformer interface {
 	TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error)
 }
 
+// SafeFlush calls flusher.Flush() with a panic guard. A broken or hijacked
+// client connection can make Flush() panic; the flush is best-effort so we
+// return false rather than crashing the calling goroutine (which often
+// serves a live proxy request).
+// ponytail: each call site does the same defer-recover dance — keep one copy.
+func SafeFlush(flusher http.Flusher) (ok bool) {
+	defer func() { _ = recover() }()
+	flusher.Flush()
+	return true
+}
+
 // PluginNamer is implemented by plugins that want to provide an explicit,
 // stable type name for deduplication without relying on reflection.
 type PluginNamer interface {

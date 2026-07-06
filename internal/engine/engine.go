@@ -619,21 +619,24 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		}
 		return true
 	}
-	tryFlush := func() (ok bool) {
+	tryFlush := func() bool {
 		if clientGone {
 			return false
 		}
-		// A broken or hijacked client connection can make flusher.Flush()
-		// panic. The flush is best-effort — capture any panic and treat
-		// it as "client gone" so the rest of the stream tears down
-		// cleanly rather than crashing the proxy request goroutine.
-		defer func() {
-			if r := recover(); r != nil {
-				ok = false
-			}
-		}()
-		flusher.Flush()
+		if !SafeFlush(flusher) {
+			clientGone = true
+			return false
+		}
 		return true
+	}
+	// writeAndFlush is the standard "send some bytes and flush" pair. Used at
+	// every site that writes a complete frame to the client.
+	// ponytail: 4 sites were tryWrite(p); if !ok return; if !tryFlush() return.
+	writeAndFlush := func(p []byte) bool {
+		if !tryWrite(p) {
+			return false
+		}
+		return tryFlush()
 	}
 
 	// Passthrough mode: no transformers — write each line immediately with flush
@@ -645,10 +648,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			default:
 			}
 			line := strings.TrimRight(scanner.Text(), "\r")
-			if !tryWrite([]byte(line + "\n")) {
-				return
-			}
-			if !tryFlush() {
+			if !writeAndFlush([]byte(line + "\n")) {
 				return
 			}
 		}
@@ -706,18 +706,18 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		// This handles format transformers (e.g. anthropic2openai) that produce
 		// multiple SSE events from a single upstream data line.
 		if strings.Contains(string(chunk.Data), "\n\n") {
-			return tryWrite(chunk.Data) && tryFlush()
+			return writeAndFlush(chunk.Data)
 		}
 
-		out := &bytes.Buffer{}
+		var out bytes.Buffer
 		if chunk.EventType != "" {
-			fmt.Fprintf(out, "event: %s\n", chunk.EventType)
+			fmt.Fprintf(&out, "event: %s\n", chunk.EventType)
 		}
 		out.WriteString("data: ")
 		out.Write(chunk.Data)
 		out.WriteString("\n\n")
 
-		return tryWrite(out.Bytes()) && tryFlush()
+		return writeAndFlush(out.Bytes())
 	}
 
 	for scanner.Scan() {
@@ -756,10 +756,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		}
 
 		// Unknown line type — pass through as-is
-		if !tryWrite([]byte(line + "\n")) {
-			return
-		}
-		if !tryFlush() {
+		if !writeAndFlush([]byte(line + "\n")) {
 			return
 		}
 	}
@@ -780,10 +777,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			syntheticChunk := SSEChunk{Data: []byte("[DONE]")}
 			transformed, err := ExecuteStreamResponsePipeline(syntheticChunk, ctx, pipeline.StreamResponseSteps)
 			if err == nil && len(transformed.Data) > 0 {
-				if !tryWrite(transformed.Data) {
-					return
-				}
-				tryFlush()
+				writeAndFlush(transformed.Data)
 			}
 		}
 	}
