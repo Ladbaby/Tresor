@@ -71,10 +71,7 @@
                         </section>
                     </div>
 
-                    <!-- Fetch Models Popup — shown when user clicks "⟳ Fetch Models" in the detail pane.
-                         Each row has a + Add button that commits immediately to the underlying
-                         downstream. Closing the popup (via ×, background click, or Esc) commits
-                         nothing else — only the explicit + Add selections persist. -->
+                    <!-- Fetch Models Popup — commit is per-row, × to close -->
                     <div id="fetch-models-modal" class="modal hidden">
                         <div class="modal-content" style="max-width:500px;">
                             <span class="close">&times;</span>
@@ -156,9 +153,7 @@
                                 <th>Actions</th>
                             </tr>
                         </thead>
-                        <tbody id="rules-body">
-                            <tr><td colspan="7" class="loading">Loading...</td></tr>
-                        </tbody>
+                        <tbody id="rules-body"></tbody>
                     </table>
 
                     <h2 style="margin-top:2rem">Available Plugins</h2>
@@ -170,9 +165,7 @@
                                 <th>Config Schema</th>
                             </tr>
                         </thead>
-                        <tbody id="plugins-body">
-                            <tr><td colspan="3" class="loading">Loading...</td></tr>
-                        </tbody>
+                        <tbody id="plugins-body"></tbody>
                     </table>
 
                     <!-- Rule Editor Modal -->

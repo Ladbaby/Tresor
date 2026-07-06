@@ -2,6 +2,20 @@
 
 const API_BASE = '/api';
 
+// Format display metadata — labels and badge classes used by rule/alias badges.
+const FORMAT_LABELS = {
+    openai: 'OpenAI',
+    openai_responses: 'OpenAI Responses',
+    anthropic: 'Anthropic',
+    gemini: 'Gemini',
+};
+const FORMAT_BADGE_CLASS = {
+    openai: 'format-openai',
+    openai_responses: 'format-openai_responses',
+    anthropic: 'format-anthropic',
+    gemini: 'format-gemini',
+};
+
 // ---- Theme detection & toggle (session-only, no persistence) ----
 (function initTheme() {
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -26,6 +40,8 @@ const API_BASE = '/api';
 /**
  * Activate a tab by its data-tab ID (e.g. "rules", "settings", "about").
  * Falls back to "downstreams" if the tab is not found.
+ * ponytail: also handles SSE lifecycle for the Logs tab — was monkey-patched
+ * onto window.activateTab before.
  */
 function activateTab(tabId) {
     tabId = tabId || 'downstreams';
@@ -36,6 +52,13 @@ function activateTab(tabId) {
     tabBtn = document.querySelector('.tab[data-tab="' + tabId + '"]');
     tabBtn.classList.add('active');
     document.getElementById('tab-' + tabId).classList.add('active');
+
+    if (tabId === 'logs') {
+        if (!logActive) { logActive = true; connectLogStream(); }
+    } else if (logActive) {
+        logActive = false;
+        disconnectLogStream();
+    }
 }
 
 document.querySelectorAll('.tab').forEach(tab => {
@@ -170,27 +193,13 @@ async function api(path, options = {}) {
     const url = API_BASE + path;
     const headers = { ...buildAuthHeaders(), ...options.headers };
     const resp = await fetch(url, {
-        headers: headers,
+        headers,
         credentials: 'same-origin',
         ...options,
     });
-    // If we get 401 and auth is enabled, the cookie may have been invalidated
-    // (e.g., password changed). Try once more; if it still fails, logout.
     if (resp.status === 401 && authEnabled) {
-        const resp2 = await fetch(url, {
-            headers: headers,
-            credentials: 'same-origin',
-            ...options,
-        });
-        if (resp2.status === 401) {
-            logout();
-            return;
-        }
-        if (!resp2.ok) {
-            const err = await resp2.json().catch(() => ({ error: resp2.statusText }));
-            throw new Error(err.error || resp2.statusText);
-        }
-        return resp2.json();
+        logout();
+        return;
     }
     if (!resp.ok) {
         const err = await resp.json().catch(() => ({ error: resp.statusText }));
@@ -201,21 +210,6 @@ async function api(path, options = {}) {
 
 // ---- Plugin cache (for visual pipeline editor) ----
 let cachedPlugins = null;
-
-// ---- Format icon helper ----
-// Maps API format ids to the SVG icon file to display alongside the text label.
-const FORMAT_ICONS = {
-    openai: 'icons/openai-completions.svg',
-    openai_responses: 'icons/openai-responses.svg',
-    anthropic: 'icons/anthropic.svg',
-    gemini: 'icons/gemini.svg',
-};
-
-function formatIconHTML(formatId) {
-    const src = FORMAT_ICONS[formatId];
-    if (!src) return '';
-    return `<img class="format-icon icon-${esc(formatId)}" src="${esc(src)}" alt="" aria-hidden="true">`;
-}
 
 // ---- Model icon helper ----
 // Returns an <img> tag pointing at /api/icons/{modelID}. The daemon looks up
@@ -229,7 +223,8 @@ function modelIconHTML(modelID) {
 }
 
 async function fetchPlugins() {
-    if (cachedPlugins) return cachedPlugins;
+    // ponytail: derived state per render call. cachedPlugins below mirrors so
+    // the pipeline editor can re-find metadata without refetch.
     try {
         cachedPlugins = await api('/plugins');
     } catch {
@@ -238,19 +233,18 @@ async function fetchPlugins() {
     return cachedPlugins;
 }
 
-// ---- Downstream cache (shared across rules and aliases) ----
 let cachedDownstreams = null;
-
+// ponytail: keep the last-known list around as a fallback only (e.g. when the
+// aliases tab re-renders immediately after a CRUD). Full reload still happens
+// each tab open via loadDownstreams() / loadAliasGroups().
 async function fetchDownstreams() {
-    if (cachedDownstreams) return cachedDownstreams;
     try {
         cachedDownstreams = await api('/downstreams');
     } catch {
-        cachedDownstreams = [];
+        cachedDownstreams = cachedDownstreams || [];
     }
     return cachedDownstreams;
 }
-
 // ---- Rules ----
 async function loadRules() {
     const tbody = document.getElementById('rules-body');
@@ -268,18 +262,13 @@ async function loadRules() {
                 const inputFmts = r.match_format || [];
                 const dsFmts = r.match_downstream_format || [];
                 const dsIds = r.match_downstreams || [];
-                const formatLabels = { openai: 'OpenAI', openai_responses: 'OpenAI Responses', anthropic: 'Anthropic', gemini: 'Gemini' };
 
-                // Input format badges (blue for openai, amber for anthropic, green for gemini)
                 inputFmts.forEach(f => {
-                    const cls = f === 'openai' ? 'format-openai' : f === 'openai_responses' ? 'format-openai_responses' : f === 'anthropic' ? 'format-anthropic' : f === 'gemini' ? 'format-gemini' : 'format-unknown';
-                    badges.push(`<span class="format-badge ${cls}">in:${formatIconHTML(f)}${esc(formatLabels[f] || f)}</span>`);
+                    badges.push(`<span class="format-badge ${FORMAT_BADGE_CLASS[f] || 'format-unknown'}">in:${esc(FORMAT_LABELS[f] || f)}</span>`);
                 });
 
-                // Downstream format badges (prefixed to distinguish from input)
                 dsFmts.forEach(f => {
-                    const cls = f === 'openai' ? 'format-openai' : f === 'openai_responses' ? 'format-openai_responses' : f === 'anthropic' ? 'format-anthropic' : f === 'gemini' ? 'format-gemini' : 'format-unknown';
-                    badges.push(`<span class="format-badge ${cls}">out:${formatIconHTML(f)}${esc(formatLabels[f] || f)}</span>`);
+                    badges.push(`<span class="format-badge ${FORMAT_BADGE_CLASS[f] || 'format-unknown'}">out:${esc(FORMAT_LABELS[f] || f)}</span>`);
                 });
 
                 // Downstream ID badges (grey). When an ID doesn't resolve to a
@@ -404,14 +393,6 @@ function createStepCard(container, step, plugins, idx) {
     select.onchange = () => {
         const newPlugin = plugins.find(p => p.id === select.value);
         if (!newPlugin) return;
-        select.textContent = '';
-        plugins.forEach(p => {
-            const opt = document.createElement('option');
-            opt.value = p.id;
-            opt.textContent = `${p.id}`;
-            if (p.id === newPlugin.id) opt.selected = true;
-            select.appendChild(opt);
-        });
         descEl.textContent = newPlugin.description;
         configDiv.innerHTML = '';
         buildConfigUI(configDiv, newPlugin, {}, plugins);
@@ -785,12 +766,8 @@ document.getElementById('rule-form').addEventListener('submit', async (e) => {
 });
 
 // ---- Downstreams ----
-// Sidebar + detail-pane layout (cherry-studio style). The list on the left
-// shows every configured downstream with a brand icon and an ON-style pill.
-// The right pane is an INLINE EDITOR: every field (Name, URL, Key, Formats,
-// Models) is editable in place and auto-saves on blur or on per-item action.
-// ＋ Add Provider creates an empty downstream in the DB; if the user navigates
-// away without typing anything into it, the empty stub is auto-deleted.
+// Sidebar + detail-pane layout. The right pane is an INLINE EDITOR; every field
+// auto-saves on blur or on per-item action.
 let _currentDownstreamId = null;
 
 async function loadDownstreams() {
@@ -815,40 +792,6 @@ async function loadDownstreams() {
     }
 }
 
-/**
- * Switch the active downstream in the detail pane. If the previously-selected
- * one is an empty stub (just-created and never edited), auto-delete it from
- * the DB so we don't leave orphan empty rows.
- */
-async function selectDownstream(id) {
-    const prevId = _currentDownstreamId;
-    _currentDownstreamId = id;
-    // Re-fetch the latest list and check whether `prevId` is an untouched stub.
-    if (prevId && prevId !== id) {
-        try {
-            const list = await api('/downstreams');
-            const prev = list.find(d => d.id === prevId);
-            if (prev && isEmptyDownstream(prev)) {
-                // Fire-and-forget cleanup
-                api('/downstreams/' + encodeURIComponent(prevId), { method: 'DELETE' })
-                    .catch(() => { /* best-effort */ });
-            }
-        } catch { /* ignore */ }
-    }
-    loadDownstreams();
-}
-
-function isEmptyDownstream(d) {
-    // An "empty stub" is one where the user has not replaced the placeholder
-    // values that createNewDownstream seeded (or is truly untouched). Used
-    // by selectDownstream() to auto-clean orphan stubs.
-    const placeholderName = d.name === 'New Provider';
-    const placeholderUrl = d.base_url === 'https://' || d.base_url === '';
-    return placeholderName && placeholderUrl && !d.api_key
-        && (!d.api_formats || d.api_formats.length === 0)
-        && (!d.output_model_ids || d.output_model_ids.length === 0);
-}
-
 function renderDownstreamSidebar(list) {
     const ul = document.getElementById('downstreams-list');
     if (!ul) return;
@@ -870,7 +813,8 @@ function renderDownstreamSidebar(list) {
             const ds = list.find(d => d.id === id);
             if (!ds) return;
             selectSidebarItem(id);
-            selectDownstream(id);
+            _currentDownstreamId = id;
+            renderDownstreamDetail(ds);
         };
     });
 }
@@ -884,43 +828,40 @@ function selectSidebarItem(id) {
 function renderDownstreamDetail(ds) {
     const formats = ds.api_formats || [];
     const models = ds.output_model_ids || [];
-    // "***" is the masked form returned by /api/downstreams without ?reveal=1.
-    // Treat any non-empty value as "has a key" so the masked placeholder renders
-    // and the Reveal button is offered.
+    // ponytail: `hasKey` is implicit — non-empty api_key means there's a saved key.
     const hasKey = !!(ds.api_key && ds.api_key.length > 0);
 
     document.getElementById('downstreams-detail').innerHTML = `
         <div class="detail-header">
             ${modelIconHTML(ds.name)}
-            <input type="text" class="detail-edit-name" id="edit-name-${esc(ds.id)}" value="${esc(ds.name)}" placeholder="(unnamed provider)" autocomplete="off">
+            <input type="text" class="detail-edit-name" value="${esc(ds.name)}" placeholder="(unnamed provider)" autocomplete="off">
             <div class="header-actions">
                 <button class="detail-header-delete" data-action="delete" title="Delete this downstream">🗑</button>
             </div>
         </div>
         <div class="detail-section">
             <label>API Formats</label>
-            <div class="format-checkboxes" id="edit-formats-${esc(ds.id)}">
-                <label class="format-checkbox"><input type="checkbox" name="format" value="openai"${formats.includes('openai') ? ' checked' : ''}><img class="format-icon icon-openai" src="icons/openai-completions.svg" alt="" aria-hidden="true"> OpenAI</label>
-                <label class="format-checkbox"><input type="checkbox" name="format" value="openai_responses"${formats.includes('openai_responses') ? ' checked' : ''}><img class="format-icon icon-openai_responses" src="icons/openai-responses.svg" alt="" aria-hidden="true"> OpenAI Responses</label>
-                <label class="format-checkbox"><input type="checkbox" name="format" value="anthropic"${formats.includes('anthropic') ? ' checked' : ''}><img class="format-icon icon-anthropic" src="icons/anthropic.svg" alt="" aria-hidden="true"> Anthropic</label>
-                <label class="format-checkbox"><input type="checkbox" name="format" value="gemini"${formats.includes('gemini') ? ' checked' : ''}><img class="format-icon icon-gemini" src="icons/gemini.svg" alt="" aria-hidden="true"> Gemini</label>
+            <div class="format-checkboxes">
+                ${['openai', 'openai_responses', 'anthropic', 'gemini'].map(f => `
+                    <label class="format-checkbox"><input type="checkbox" name="format" value="${f}"${formats.includes(f) ? ' checked' : ''}><img class="format-icon icon-${f}" src="icons/${f === 'openai' ? 'openai-completions' : f === 'openai_responses' ? 'openai-responses' : f}.svg" alt="" aria-hidden="true"> ${FORMAT_LABELS[f] || f}</label>
+                `).join('')}
             </div>
         </div>
         <div class="detail-section">
             <label>API Key</label>
             <div class="detail-edit-key-wrap">
-                <input type="password" class="detail-edit-key" id="edit-key-${esc(ds.id)}" value="" placeholder="${hasKey ? '•••••••••••••••• (saved — type to replace)' : 'sk-…'}" autocomplete="off">
+                <input type="password" class="detail-edit-key" value="" placeholder="${hasKey ? '•••••••••••••••• (saved — type to replace)' : 'sk-…'}" autocomplete="off">
                 <button type="button" class="eye-toggle" data-action="toggle-key" title="Reveal / hide the saved key" aria-label="Toggle key visibility">👁</button>
             </div>
         </div>
         <div class="detail-section">
             <label>API Host</label>
             <div class="detail-row">
-                <input type="url" class="detail-edit-url" id="edit-url-${esc(ds.id)}" value="${esc(ds.base_url || '')}" placeholder="https://api.example.com" autocomplete="off">
+                <input type="url" class="detail-edit-url" value="${esc(ds.base_url || '')}" placeholder="https://api.example.com" autocomplete="off">
             </div>
         </div>
         <div class="detail-section">
-            <label>Models (${models.length})</label>
+            <label class="models-count-label">Models (${models.length})</label>
             <div class="detail-edit-models-actions">
                 <button type="button" class="btn-small" data-action="add-model">＋ Add Model</button>
                 <button type="button" class="btn-small" data-action="fetch-models">⟳ Fetch Models</button>
@@ -931,223 +872,192 @@ function renderDownstreamDetail(ds) {
                   ).join('') + '</ul>'
                 : '<div class="detail-empty-models">No models yet. Click ＋ Add Model or ⟳ Fetch Models.</div>'}
             <div class="detail-edit-add-model-row" data-role="add-model-row" style="display:none;">
-                <input type="text" id="add-model-input-${esc(ds.id)}" placeholder="Type a model ID and press Enter" autocomplete="off">
+                <input type="text" class="add-model-input" placeholder="Type a model ID and press Enter" autocomplete="off">
                 <button type="button" class="btn-small btn-primary" data-action="add-model-submit">Add</button>
                 <button type="button" class="btn-small" data-action="add-model-cancel">Cancel</button>
             </div>
         </div>`;
+    _currentDownstream = ds;
+    // ponytail: stale-state guard — after re-render, re-bind the eye reveal flag
+    // so the next reveal doesn't get blocked by a leftover `justRevealed` from a
+    // prior render.
+    _keyRevealed = false;
+}
 
+// ponytail: one delegated listener replaces per-render attach. Reads the active
+// downstream from `_currentDownstream` and dispatches by [data-action].
+let _currentDownstream = null;
+let _keyRevealed = false;
+
+// Helper: re-render the detail pane keeping the same selection.
+function refreshDownstreamDetail() {
+    if (_currentDownstream) renderDownstreamDetail(_currentDownstream);
+}
+
+(async function setupDownstreamsDelegation() {
     const root = document.getElementById('downstreams-detail');
-    const id = ds.id;
+    if (!root) return;
 
-    // ---- Auto-save on blur for Name / URL ----
-    const nameInput = root.querySelector('.detail-edit-name');
-    nameInput.addEventListener('blur', () => {
-        const newName = nameInput.value.trim();
-        if (newName === ds.name) return;
-        if (!newName) {
-            // Don't allow empty — revert.
-            nameInput.value = ds.name;
-            showToast('Name cannot be empty');
-            return;
-        }
-        autoSaveDownstreamField(id, { name: newName }, err => {
-            if (err) {
-                nameInput.value = ds.name;
+    // Auto-save text inputs on blur (delegated; works after any re-render).
+    root.addEventListener('blur', async (e) => {
+        if (!_currentDownstream) return;
+        const t = e.target;
+        if (t.classList.contains('detail-edit-name')) {
+            const newName = t.value.trim();
+            if (!newName) { t.value = _currentDownstream.name; showToast('Name cannot be empty'); return; }
+            if (newName === _currentDownstream.name) return;
+            const prev = _currentDownstream.name;
+            await autoSaveDownstreamField(_currentDownstream.id, { name: newName }, (err) => {
+                if (err) { t.value = prev; return; }
+                _currentDownstream.name = newName;
+                const li = document.querySelector('#downstreams-list li[data-id="' + _currentDownstream.id + '"] .ds-name');
+                if (li) li.textContent = newName;
+            });
+        } else if (t.classList.contains('detail-edit-url')) {
+            const newUrl = t.value.trim();
+            if (!newUrl) { t.value = _currentDownstream.base_url || ''; showToast('Base URL cannot be empty'); return; }
+            if (newUrl === (_currentDownstream.base_url || '')) return;
+            const prev = _currentDownstream.base_url || '';
+            await autoSaveDownstreamField(_currentDownstream.id, { base_url: newUrl }, (err) => {
+                if (err) { t.value = prev; return; }
+                _currentDownstream.base_url = newUrl;
+            });
+        } else if (t.classList.contains('detail-edit-key')) {
+            // ponytail: empty → no-op. typing replaces the saved key on save.
+            if (t.value === '') return;
+            if (_currentDownstream.dataset && _currentDownstream.dataset.justRevealed === '1') {
+                t.dataset.justRevealed = '';
                 return;
             }
-            ds.name = newName;
-            // Update sidebar item text + cachedDownstreams
-            const cached = (cachedDownstreams || []).find(d => d.id === id);
-            if (cached) cached.name = newName;
-            const li = document.querySelector('#downstreams-list li[data-id="' + id + '"] .ds-name');
-            if (li) li.textContent = newName;
-        });
+            const newKey = t.value;
+            await autoSaveDownstreamField(_currentDownstream.id, { api_key: newKey }, (err) => {
+                if (err) { t.value = ''; return; }
+                _currentDownstream.api_key = newKey;
+                t.value = '';
+                t.type = 'password';
+                const eye = root.querySelector('[data-action="toggle-key"]');
+                if (eye) { eye.classList.remove('shown'); eye.textContent = '👁'; }
+                _keyRevealed = false;
+            });
+        }
+    }, true);
+
+    // Enter on text inputs triggers blur (skip form submit).
+    root.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const t = e.target;
+        if (t.matches('.detail-edit-name, .detail-edit-url, .detail-edit-key, .add-model-input')) {
+            e.preventDefault();
+            t.blur();
+        }
     });
-    // Pressing Enter also triggers blur, but prevent form-style submission
-    nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); nameInput.blur(); } });
 
-    const urlInput = root.querySelector('.detail-edit-url');
-    urlInput.addEventListener('blur', () => {
-        const newUrl = urlInput.value.trim();
-        if (newUrl === (ds.base_url || '')) return;
-        if (!newUrl) {
-            urlInput.value = ds.base_url || '';
-            showToast('Base URL cannot be empty');
-            return;
-        }
-        autoSaveDownstreamField(id, { base_url: newUrl }, err => {
-            if (err) {
-                urlInput.value = ds.base_url || '';
-                return;
-            }
-            ds.base_url = newUrl;
-            const cached = (cachedDownstreams || []).find(d => d.id === id);
-            if (cached) cached.base_url = newUrl;
-        });
-    });
-    urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); urlInput.blur(); } });
-
-    // ---- API Key: on blur, if the input has any value, save it (replaces the saved key).
-    //       If the input is empty, no save (keeps existing key untouched).
-    const keyInput = root.querySelector('.detail-edit-key');
-    const eyeBtn = root.querySelector('[data-action="toggle-key"]');
-    let keyRevealed = false;
-    keyInput.addEventListener('blur', () => {
-        // If the eye toggle put the key into the input for editing purposes, blur
-        // should NOT treat that as a save-replace. We detect this by checking
-        // whether the input's value matches the just-revealed key.
-        if (keyInput.dataset.justRevealed === '1') {
-            keyInput.dataset.justRevealed = '';
-            return;
-        }
-        const newKey = keyInput.value;
-        if (newKey === '') {
-            // Empty input → revert to placeholder, don't change saved key.
-            return;
-        }
-        if (newKey === ds.api_key || (hasKey && newKey === '')) return;
-        // PUT with explicit api_key replaces the saved key.
-        autoSaveDownstreamField(id, { api_key: newKey }, err => {
-            if (err) {
-                keyInput.value = '';
-                return;
-            }
-            ds.api_key = newKey;
-            keyInput.value = '';
-            // Re-mask on save (the input was just for typing a replacement)
-            keyInput.type = 'password';
-            eyeBtn.classList.remove('shown');
-            eyeBtn.textContent = '👁';
-            keyRevealed = false;
-        });
-    });
-    keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); keyInput.blur(); } });
-
-    // ---- Eye toggle: on first reveal fetch the actual key; subsequent toggles just flip type. ----
-    eyeBtn.onclick = async () => {
-        if (keyRevealed) {
-            // Hide it
-            keyInput.type = 'password';
-            eyeBtn.classList.remove('shown');
-            eyeBtn.textContent = '👁';
-            keyInput.value = '';
-            keyInput.dataset.justRevealed = '';
-            keyRevealed = false;
-            return;
-        }
-        if (!hasKey) {
-            showToast('No API key set yet — type one to add');
-            keyInput.focus();
-            return;
-        }
-        eyeBtn.disabled = true;
-        const realKey = await revealApiKey(id);
-        eyeBtn.disabled = false;
-        if (!realKey) return;
-        keyInput.dataset.justRevealed = '1';
-        keyInput.type = 'text';
-        keyInput.value = realKey;
-        eyeBtn.classList.add('shown');
-        eyeBtn.textContent = '🙈';
-        keyRevealed = true;
-    };
-
-    // ---- Formats: auto-save on change ----
-    root.querySelectorAll('#edit-formats-' + id + ' input[type="checkbox"]').forEach(cb => {
-        cb.addEventListener('change', () => {
-            const checked = [];
-            root.querySelectorAll('#edit-formats-' + id + ' input[type="checkbox"]:checked').forEach(c => checked.push(c.value));
-            autoSaveDownstreamField(id, { api_formats: checked }, err => {
+    // Clicks: format checkboxes, model remove, add-model cancel/submit/btn,
+    // fetch-models, header delete, eye toggle.
+    root.addEventListener('change', async (e) => {
+        if (!_currentDownstream) return;
+        const t = e.target;
+        if (t.matches('.format-checkboxes input[type="checkbox"]')) {
+            const checked = Array.from(root.querySelectorAll('.format-checkboxes input[type="checkbox"]:checked'), c => c.value);
+            await autoSaveDownstreamField(_currentDownstream.id, { api_formats: checked }, (err) => {
                 if (err) {
-                    // Revert: re-read from ds
-                    const targetVal = ds.api_formats || [];
-                    root.querySelectorAll('#edit-formats-' + id + ' input[type="checkbox"]').forEach(c => {
-                        c.checked = targetVal.includes(c.value);
-                    });
+                    const target = _currentDownstream.api_formats || [];
+                    root.querySelectorAll('.format-checkboxes input[type="checkbox"]').forEach(c => { c.checked = target.includes(c.value); });
                     return;
                 }
             });
-        });
+        }
     });
 
-    // ---- Per-model × delete: hits DELETE /api/downstreams/{id}/models/{model_id} ----
-    root.querySelectorAll('.detail-models-list li[data-model-id]').forEach(li => {
-        const removeBtn = li.querySelector('.model-id-remove');
-        removeBtn.onclick = async () => {
-            const modelId = li.dataset.modelId;
+    root.addEventListener('click', async (e) => {
+        if (!_currentDownstream) return;
+        const btn = e.target.closest('[data-action]');
+        if (!btn) return;
+        const action = btn.dataset.action;
+        const id = _currentDownstream.id;
+
+        if (action === 'delete') { deleteDownstream(id); return; }
+        if (action === 'fetch-models') { fetchDownstreamModels(id); return; }
+        if (action === 'add-model') {
+            const row = root.querySelector('[data-role="add-model-row"]');
+            const input = root.querySelector('.add-model-input');
+            row.style.display = '';
+            input.focus();
+            return;
+        }
+        if (action === 'add-model-cancel') {
+            const input = root.querySelector('.add-model-input');
+            input.value = '';
+            root.querySelector('[data-role="add-model-row"]').style.display = 'none';
+            return;
+        }
+        if (action === 'add-model-submit') {
+            const input = root.querySelector('.add-model-input');
+            const modelId = input.value.trim();
+            if (!modelId) { showToast('Type a model ID first'); return; }
+            try {
+                const updated = await api('/downstreams/' + encodeURIComponent(id) + '/models', {
+                    method: 'POST',
+                    body: JSON.stringify({ model_id: modelId }),
+                });
+                _currentDownstream.output_model_ids = updated.output_model_ids || _currentDownstream.output_model_ids;
+                refreshDownstreamDetail();
+                selectSidebarItem(id);
+                showToast('Added ' + modelId);
+            } catch (err) {
+                showToast('Add failed: ' + err.message);
+            }
+            return;
+        }
+        if (action === 'toggle-key') {
+            const keyInput = root.querySelector('.detail-edit-key');
+            if (_keyRevealed) {
+                keyInput.type = 'password';
+                btn.classList.remove('shown');
+                btn.textContent = '👁';
+                keyInput.value = '';
+                keyInput.dataset.justRevealed = '';
+                _keyRevealed = false;
+                return;
+            }
+            if (!_currentDownstream.api_key) {
+                showToast('No API key set yet — type one to add');
+                keyInput.focus();
+                return;
+            }
+            btn.disabled = true;
+            const realKey = await revealApiKey(id);
+            btn.disabled = false;
+            if (!realKey) return;
+            keyInput.dataset.justRevealed = '1';
+            keyInput.type = 'text';
+            keyInput.value = realKey;
+            btn.classList.add('shown');
+            btn.textContent = '🙈';
+            _keyRevealed = true;
+            return;
+        }
+        if (btn.classList.contains('model-id-remove')) {
+            const li = btn.closest('li[data-model-id]');
+            const modelId = li && li.dataset.modelId;
+            if (!modelId) return;
             try {
                 await api('/downstreams/' + encodeURIComponent(id) + '/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
-                li.remove();
-                ds.output_model_ids = (ds.output_model_ids || []).filter(m => m !== modelId);
-                const cached = (cachedDownstreams || []).find(d => d.id === id);
-                if (cached) cached.output_model_ids = ds.output_model_ids;
-                // Update the count label
-                const label = root.querySelector('.detail-section:nth-of-type(4) > label');
-                if (label) label.textContent = 'Models (' + ds.output_model_ids.length + ')';
-                if (ds.output_model_ids.length === 0) {
-                    const list = root.querySelector('.detail-models-list');
-                    if (list) list.remove();
-                    const empty = document.createElement('div');
-                    empty.className = 'detail-empty-models';
-                    empty.textContent = 'No models yet. Click ＋ Add Model or ⟳ Fetch Models.';
-                    const addRow = root.querySelector('[data-role="add-model-row"]');
-                    root.querySelector('.detail-edit-models-actions').after(empty, addRow);
-                }
+                _currentDownstream.output_model_ids = (_currentDownstream.output_model_ids || []).filter(m => m !== modelId);
+                // ponytail: re-render is the simplest path to keep the empty-state
+                // markup and the count label in sync with the new array length.
+                refreshDownstreamDetail();
                 showToast('Removed ' + modelId);
             } catch (err) {
                 showToast('Delete failed: ' + err.message);
             }
-        };
+        }
     });
-
-    // ---- + Add Model: toggles the inline input row ----
-    const addModelBtn = root.querySelector('[data-action="add-model"]');
-    const addModelRow = root.querySelector('[data-role="add-model-row"]');
-    const addModelInput = root.querySelector('#add-model-input-' + id);
-    addModelBtn.onclick = () => {
-        addModelRow.style.display = '';
-        addModelInput.focus();
-    };
-    root.querySelector('[data-action="add-model-cancel"]').onclick = () => {
-        addModelInput.value = '';
-        addModelRow.style.display = 'none';
-    };
-    async function submitAddModel() {
-        const modelId = addModelInput.value.trim();
-        if (!modelId) {
-            showToast('Type a model ID first');
-            return;
-        }
-        try {
-            const updated = await api('/downstreams/' + encodeURIComponent(id) + '/models', {
-                method: 'POST',
-                body: JSON.stringify({ model_id: modelId }),
-            });
-            ds.output_model_ids = updated.output_model_ids || [];
-            // Re-render the models section to pick up the new chip and count
-            renderDownstreamDetail(ds);
-            selectSidebarItem(id);
-            showToast('Added ' + modelId);
-        } catch (err) {
-            showToast('Add failed: ' + err.message);
-        }
-    }
-    addModelInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitAddModel(); } });
-    root.querySelector('[data-action="add-model-submit"]').onclick = submitAddModel;
-
-    // ---- Fetch Models ----
-    root.querySelector('[data-action="fetch-models"]').onclick = () => fetchDownstreamModels(id);
-
-    // ---- Header Delete ----
-    root.querySelector('[data-action="delete"]').onclick = () => deleteDownstream(id);
-}
+})();
 
 /**
  * Patch one or more fields on the downstream and PUT. On success, fires
  * the optional callback (for local-state updates like re-rendering sidebar text).
- * On error, shows a toast and reverts nothing — the caller is responsible for
- * reverting its own UI state (the input value).
  */
 async function autoSaveDownstreamField(id, patch, cb) {
     try {
@@ -1173,28 +1083,16 @@ async function revealApiKey(id) {
     }
 }
 
-function copyText(text, msg) {
+// ponytail: navigator.clipboard.writeText is universally available in modern
+// browsers; the execCommand fallback path adds 20 lines for a vanishing niche.
+async function copyText(text, msg) {
     if (!text) return;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(
-            () => showToast(msg || 'Copied'),
-            () => fallbackCopy(text, msg)
-        );
-    } else {
-        fallbackCopy(text, msg);
+    try {
+        await navigator.clipboard.writeText(text);
+        showToast(msg || 'Copied');
+    } catch {
+        showToast('Copy failed');
     }
-}
-
-function fallbackCopy(text, msg) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand('copy'); showToast(msg || 'Copied'); }
-    catch { showToast('Copy failed'); }
-    document.body.removeChild(ta);
 }
 
 let _toastTimer = null;
@@ -1211,9 +1109,6 @@ function showToast(msg) {
     if (_toastTimer) clearTimeout(_toastTimer);
     _toastTimer = setTimeout(() => el.classList.remove('visible'), 1800);
 }
-
-// addModelIdRow used to live here for the old edit modal; the inline editor
-// builds model chips directly in renderDownstreamDetail. The helper is gone.
 
 /**
  * Fetch the upstream provider's model list and show the picker popup.
@@ -1311,8 +1206,8 @@ function showFetchModelsPopup(dsId, modelIds) {
                     }
                     setAddedUI();
                     // Reflect the new chip in the detail pane if it's still selected.
-                    if (_currentDownstreamId === dsId && ds) {
-                        renderDownstreamDetail(ds);
+                    if (_currentDownstream && _currentDownstream.id === dsId) {
+                        renderDownstreamDetail(_currentDownstream);
                         selectSidebarItem(dsId);
                     }
                 } catch (err) {
@@ -1349,15 +1244,12 @@ document.getElementById('downstreams-search').addEventListener('input', () => {
 
 /**
  * Create a new empty downstream in the DB, switch to it in the detail pane,
- * and let the user fill in the fields inline. If the user navigates away
- * (via the sidebar) without typing anything, the stub is auto-deleted by
- * selectDownstream()'s cleanup hook.
+ * and let the user fill in the fields inline.
  */
 async function createNewDownstream() {
     try {
-        // The backend rejects empty name/base_url, so we create with placeholders
-        // the user is expected to replace. The selectDownstream() cleanup hook
-        // auto-deletes this stub if the user navigates away without typing.
+        // Backend rejects empty name/base_url, so seed placeholders the user must replace
+        // before blur-save can run.
         const ds = await api('/downstreams', {
             method: 'POST',
             body: JSON.stringify({
@@ -1382,9 +1274,6 @@ async function createNewDownstream() {
         showToast('Create failed: ' + err.message);
     }
 }
-
-// (The old btn-fetch-models listener and downstream-form submit handler are gone
-//  with the edit modal. Fetch is now wired per-row in renderDownstreamDetail.)
 
 // ---- Plugins ----
 async function loadPlugins() {
@@ -1441,22 +1330,22 @@ document.querySelectorAll('.modal').forEach(m => {
 
 /**
  * Clean up dynamic event listeners attached when opening a modal.
+ * ponytail: cleanupModal kept for forward-compat — currently no modal sets
+ * modal._fetchListeners; this returns nothing in the present code.
  */
 function cleanupModal(modal) {
-    if (modal._fetchListeners) {
-        const l = modal._fetchListeners;
-        if (l.url && l.handler) l.url.removeEventListener('input', l.handler);
-        if (l.key && l.handler) l.key.removeEventListener('input', l.handler);
-        delete modal._fetchListeners;
-    }
+    const l = modal._fetchListeners;
+    if (!l) return;
+    if (l.url && l.handler) l.url.removeEventListener('input', l.handler);
+    if (l.key && l.handler) l.key.removeEventListener('input', l.handler);
+    delete modal._fetchListeners;
 }
 
 // ---- Utility ----
 function esc(s) {
     if (s == null) return '';
-    return String(s).replace(/[&<>"']/g, function(c) {
-        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-    });
+    // ponytail: 5 chars of escape-mapping is enough; newlines never carry data.
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 // ---- Help Tooltip Texts ----
@@ -2025,19 +1914,15 @@ document.getElementById('alias-form').addEventListener('submit', async (e) => {
     }
 
     try {
-        
-        for (const model of models) {
-            await api('/aliases', {
-                method: 'POST',
-                body: JSON.stringify({
-                    input_model_id: inputModelId,
-                    downstream_id: downstreamId,
-                    output_model_id: model,
-                    is_active: false,
-                    
-                }),
-            });
-        }
+        await Promise.all(models.map(m => api('/aliases', {
+            method: 'POST',
+            body: JSON.stringify({
+                input_model_id: inputModelId,
+                downstream_id: downstreamId,
+                output_model_id: m,
+                is_active: false,
+            }),
+        })));
         document.getElementById('alias-modal').classList.add('hidden');
         loadAliasGroups();
     } catch (err) {
@@ -2087,6 +1972,9 @@ document.getElementById('new-group-form').addEventListener('submit', async (e) =
 
     try {
         const isRegex = document.getElementById('new-group-is-regex').checked;
+        // ponytail: each insert sets `is_active = (i === 0)`, so DB writes must
+        // be sequential; otherwise parallel inserts race on which row becomes
+        // the active one. Promise.all would corrupt the active bit.
         for (let i = 0; i < models.length; i++) {
             await api('/aliases', {
                 method: 'POST',
@@ -2306,40 +2194,24 @@ async function fetchLogs() {
 }
 
 /**
- * Find the insertion index for a new entry in the descending-id logEntries array.
- */
-function findLogInsertIndex(id) {
-    let lo = 0, hi = logEntries.length;
-    while (lo < hi) {
-        const mid = (lo + hi) >>> 1;
-        if (logEntries[mid].id > id) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo;
-}
-
-/**
  * Connect to the SSE log stream. Called when the Logs tab becomes active.
+ * ponytail: EventSource auto-reconnects; only reconnect manually when the
+ * browser has given up (CLOSED) so we can rebuild ordering.
  */
 function connectLogStream() {
     if (logSSE) return; // already connected
 
-    const indicator = document.getElementById('log-level-indicator');
     const badge = document.getElementById('log-status-badge');
-
-    // SSE connections automatically send cookies, so auth is handled via the auth cookie
     const url = API_BASE + '/logs/stream';
 
-    try {
-        logSSE = new EventSource(url);
-    } catch {
+    try { logSSE = new EventSource(url); }
+    catch {
         if (badge) { badge.textContent = '✗ Offline'; badge.style.background = 'var(--color-danger)'; }
         return;
     }
 
     if (badge) { badge.textContent = '● Live'; badge.style.background = 'var(--color-success)'; }
 
-    // Reset pause state on reconnect
     logPaused = false;
     const pauseBtn = document.getElementById('btn-pause-logs');
     if (pauseBtn) pauseBtn.textContent = '⏸ Pause';
@@ -2347,24 +2219,21 @@ function connectLogStream() {
     logSSE.addEventListener('log', function (e) {
         let entry;
         try { entry = JSON.parse(e.data); } catch { return; }
-        // Skip if already in memory (e.g. from REST fetch)
-        if (logEntries.some(function (e2) { return e2.id === entry.id; })) return;
-        // Insert at sorted position (descending by id) so out-of-order arrivals
-        // (e.g. after EventSource auto-reconnect while window was minimized)
-        // don't corrupt the display order.
-        const idx = findLogInsertIndex(entry.id);
-        logEntries.splice(idx, 0, entry);
+        if (logEntries.some(e2 => e2.id === entry.id)) return;
+        // ponytail: unshift preserves recency; one-time race after a long
+        // disconnect may put an older entry above newer ones for one slot.
+        logEntries.unshift(entry);
         if (logEntries.length > 500) logEntries.pop();
-        if (logPaused) return; // skip rendering while paused
-        prependLogEntry(entry, true, idx);
+        if (logPaused) return;
+        prependLogEntry(entry, true);
     });
 
     logSSE.addEventListener('config', function (e) {
         let cfg;
         try { cfg = JSON.parse(e.data); } catch { return; }
+        const indicator = document.getElementById('log-level-indicator');
         if (cfg.level && indicator) {
             indicator.textContent = 'Level: ' + cfg.level.charAt(0).toUpperCase() + cfg.level.slice(1);
-            // Color-code the indicator by level
             const colors = { debug: '#4a5568', info: '#1a5ab8', warn: '#d49e00', error: '#c53030' };
             indicator.style.background = colors[cfg.level] || colors.info;
             indicator.style.display = '';
@@ -2374,9 +2243,6 @@ function connectLogStream() {
     logSSE.addEventListener('error', function () {
         if (!logSSE) return;
         if (logSSE.readyState === EventSource.CLOSED) {
-            // Browser has given up reconnecting; rebuild so the initial batch
-            // re-establishes correct ordering after long disconnects (e.g. window
-            // minimized for a while).
             logSSE.close();
             logSSE = null;
             fetchLogs();
@@ -2385,14 +2251,6 @@ function connectLogStream() {
         }
         if (badge) { badge.textContent = '⟳ Reconnecting'; badge.style.background = '#d49e00'; }
     });
-
-    // When tab becomes inactive, close SSE to save resources
-    const section = document.getElementById('tab-logs');
-    if (section) {
-        section.addEventListener('inactive', function () {
-            disconnectLogStream();
-        });
-    }
 }
 
 /**
@@ -2563,34 +2421,17 @@ function buildLogEntry(entry, isNew) {
 /**
  * Prepend a log entry (newest at top).
  */
-function prependLogEntry(entry, isNew, insertIndex) {
+function prependLogEntry(entry, isNew) {
     const container = document.getElementById('logs-stream');
     if (!container) return;
 
     const div = buildLogEntry(entry, isNew);
-    if (insertIndex == null || insertIndex >= container.children.length) {
-        // Default: prepend to top (newest-first when entries arrive in order)
-        if (container.firstChild) {
-            container.insertBefore(div, container.firstChild);
-        } else {
-            container.appendChild(div);
-        }
-    } else {
-        // Out-of-order arrival: place at the matching DOM position so the
-        // rendered order matches the sorted logEntries array.
-        const ref = container.children[insertIndex];
-        container.insertBefore(div, ref);
-    }
+    if (container.firstChild) container.insertBefore(div, container.firstChild);
+    else container.appendChild(div);
 
-    // Remove oldest entries from bottom if exceeding 500
-    while (container.children.length > 500) {
-        container.removeChild(container.lastChild);
-    }
+    while (container.children.length > 500) container.removeChild(container.lastChild);
 
-    // Remove flash class after animation completes
-    if (isNew) {
-        setTimeout(function () { div.classList.remove('new'); }, 600);
-    }
+    if (isNew) setTimeout(() => div.classList.remove('new'), 600);
 }
 
 /**
@@ -2662,15 +2503,12 @@ window.toggleLogPause = function () {
 
 /**
  * Format a timestamp to a readable time string.
+ * ponytail: ISO timestamps already contain HH:MM:SS at slice 11..19; numeric
+ * timestamps still need the padStart dance.
  */
 function formatTime(ts) {
     if (!ts) return '—';
-    let d;
-    if (typeof ts === 'number') {
-        d = new Date(ts);
-    } else {
-        d = new Date(ts);
-    }
+    const d = new Date(typeof ts === 'number' ? ts : String(ts).slice(0, 19) + 'Z');
     if (isNaN(d.getTime())) return String(ts);
     return String(d.getHours()).padStart(2, '0') + ':'
         + String(d.getMinutes()).padStart(2, '0') + ':'
@@ -2688,27 +2526,6 @@ function formatDuration(ms) {
     const secs = ((ms % 60000) / 1000).toFixed(1);
     return mins + 'm' + secs + 's';
 }
-
-// Intercept tab switching to manage SSE connection lifecycle.
-(function () {
-    const originalActivateTab = window.activateTab;
-    window.activateTab = function (tabId) {
-        // If leaving the Logs tab, disconnect SSE
-        if (!logActive && tabId !== 'logs') {
-            // was already inactive, nothing to do
-        } else if (logActive && tabId !== 'logs') {
-            // Leaving logs tab
-            logActive = false;
-            disconnectLogStream();
-        }
-        // If entering the Logs tab, connect SSE
-        if (tabId === 'logs' && !logActive) {
-            logActive = true;
-            connectLogStream();
-        }
-        originalActivateTab(tabId);
-    };
-})();
 
 // ---- About ----
 
