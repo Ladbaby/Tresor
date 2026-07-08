@@ -40,6 +40,25 @@ type PluginRegistry interface {
 	ListPlugins() []PluginInfo
 }
 
+// clientIPFromAddr strips the port from an http.Request.RemoteAddr so the
+// inspector can show a clean IPv4 or IPv6 address. We use this rather than
+// the admin middleware's ExtractClientIP because the inspector is a local
+// admin tool and we don't want to trust forwarded headers from the gateway
+// traffic itself.
+func clientIPFromAddr(remoteAddr string) string {
+	if remoteAddr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		// RemoteAddr may be a bare IPv6 address (no port) in tests or
+		// unusual listeners. Return it as-is rather than the empty
+		// string; the inspector's job is to show what we saw.
+		return remoteAddr
+	}
+	return host
+}
+
 // PluginInfo describes a registered plugin.
 type PluginInfo struct {
 	ID           string        `json:"id"`
@@ -191,6 +210,7 @@ func (e *Engine) recordAndCapture(entry *RequestLogEntry, buf captureBuffer) {
 		DownstreamID:        entry.DownstreamID,
 		DownstreamName:      entry.DownstreamName,
 		Status:              entry.Status,
+		ClientIP:            entry.ClientIP,
 		RequestBody:         buf.Request,
 		ResponseBody:        buf.Response,
 		RequestContentType:  buf.RequestCT,
@@ -527,6 +547,13 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	cw := newStatusCaptureWriter(w)
 	entry := RequestLogEntry{Timestamp: start, Method: r.Method, Path: r.URL.Path}
+
+	// ClientIP is the immediate peer's address. We deliberately do NOT
+	// honour X-Forwarded-For / X-Real-IP here — the inspector is a local
+	// admin tool, and trusting forwarded headers would let any client
+	// spoof the displayed IP. The admin API's ExtractClientIP is only
+	// called on admin auth paths where the proxy is trusted.
+	entry.ClientIP = clientIPFromAddr(r.RemoteAddr)
 
 	if !e.validateProxyAuth(r, cw) {
 		entry.Status = http.StatusUnauthorized

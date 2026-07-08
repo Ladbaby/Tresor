@@ -678,14 +678,45 @@ tr:hover {
     font-style: italic;
     color: var(--text-secondary);
     white-space: pre-wrap;
+    /* Collapsed by default. The toggle adds `.open` to reveal the body. */
+    display: none;
+    margin-top: 0.25rem;
+}
+.inspect-block-thinking.open {
+    display: block;
 }
 
-.inspect-block-thinking-label {
+.inspect-block-thinking-header {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: none;
+    padding: 0.15rem 0;
+    cursor: pointer;
+    color: var(--text-muted);
     text-transform: uppercase;
     font-size: 0.7rem;
-    color: var(--text-muted);
-    margin-bottom: 0.25rem;
     font-style: normal;
+    /* Match the .inspect-block-thinking-label visual weight so the
+       header is the only label the user sees in collapsed state. */
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+.inspect-block-thinking-header:hover {
+    color: var(--text-secondary);
+}
+.inspect-block-thinking-arrow {
+    display: inline-block;
+    font-size: 0.6rem;
+    line-height: 1;
+    width: 0.7em;
+    text-align: center;
+}
+.inspect-block-thinking-label {
+    /* When nested under the toggle header, the label no longer needs
+       its own margin-bottom; the header handles spacing. */
+    margin-bottom: 0;
 }
 
 .inspect-block-tool {

@@ -83,6 +83,10 @@ type Entry struct {
 	DownstreamID   string `json:"downstream_id,omitempty"`
 	DownstreamName string `json:"downstream_name,omitempty"`
 	Status         int    `json:"status,omitempty"`
+	// ClientIP is the immediate peer's IP (port stripped) at the time
+	// the request hit the gateway. Populated by the engine from
+	// r.RemoteAddr; forwarded headers are intentionally ignored.
+	ClientIP string `json:"client_ip,omitempty"`
 }
 
 // Store is the bounded ring of captured Entries keyed by log entry id. Safe

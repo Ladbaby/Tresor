@@ -26,6 +26,7 @@ func newTestRouterWithPayloadStore(t *testing.T) (*Router, *inspect.Store) {
 		ResolvedModel:       "claude-sonnet-4-20250514",
 		DownstreamID:        "anthropic-main",
 		DownstreamName:      "Anthropic Production",
+		ClientIP:            "192.0.2.1",
 		Status:              200,
 		RequestContentType:  "application/json",
 		RequestBody:         []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`),
@@ -54,6 +55,7 @@ func TestLogInspect_ReturnsCapturedEntry(t *testing.T) {
 		ResolvedModel string `json:"resolved_model"`
 		DownstreamID   string `json:"downstream_id"`
 		DownstreamName string `json:"downstream_name"`
+		ClientIP       string `json:"client_ip"`
 		Status         int    `json:"status"`
 		Request        struct {
 			ContentType string `json:"content_type"`
@@ -90,6 +92,11 @@ func TestLogInspect_ReturnsCapturedEntry(t *testing.T) {
 	}
 	if got.DownstreamName != "Anthropic Production" {
 		t.Fatalf("expected downstream name 'Anthropic Production', got %q", got.DownstreamName)
+	}
+	// httptest.NewRequest sets RemoteAddr to "192.0.2.1:1234". The
+	// engine should strip the port and surface just the IPv4.
+	if got.ClientIP != "192.0.2.1" {
+		t.Fatalf("expected client ip '192.0.2.1' (port-stripped), got %q", got.ClientIP)
 	}
 }
 

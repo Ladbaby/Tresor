@@ -382,6 +382,7 @@ func (r *Router) handleLogInspect(w http.ResponseWriter, req *http.Request) {
 		ResolvedModel  string      `json:"resolved_model,omitempty"`
 		DownstreamID   string      `json:"downstream_id,omitempty"`
 		DownstreamName string      `json:"downstream_name,omitempty"`
+		ClientIP       string      `json:"client_ip,omitempty"`
 		Status         int         `json:"status"`
 		Request        inspectBody `json:"request"`
 		Response       inspectBody `json:"response"`
@@ -395,6 +396,7 @@ func (r *Router) handleLogInspect(w http.ResponseWriter, req *http.Request) {
 		ResolvedModel:  entry.ResolvedModel,
 		DownstreamID:   entry.DownstreamID,
 		DownstreamName: entry.DownstreamName,
+		ClientIP:       entry.ClientIP,
 		Status:         entry.Status,
 		Request: inspectBody{
 			ContentType: entry.RequestContentType,

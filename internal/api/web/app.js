@@ -2331,13 +2331,13 @@ function renderInspectMeta(d) {
     // (see engine.recordAndCapture).
     const downstream = d.downstream_name || d.downstream_id || '';
     const rows = [
-        ['ID', String(d.id)],
         ['Method', d.method || ''],
         ['Path', d.path || ''],
         ['Status', d.status != null ? String(d.status) : ''],
         ['Model', d.model || ''],
         ['Resolved model', d.resolved_model || ''],
         ['Downstream', downstream],
+        ['Client IP', d.client_ip || ''],
         ['Captured at', d.timestamp || ''],
     ];
     return rows
@@ -2464,17 +2464,10 @@ function renderInspectSectionParsed(title, body, path, kind) {
     const h4 = document.createElement('h4');
     h4.textContent = title;
     header.appendChild(h4);
-
-    // Copy-to-clipboard button — same behaviour as the raw view.
-    const copyBtn = document.createElement('button');
-    copyBtn.type = 'button';
-    copyBtn.className = 'copy-btn';
-    copyBtn.textContent = 'Copy';
-    copyBtn.addEventListener('click', function () {
-        const text = body && body.body ? body.body : '';
-        copyTextFallback(text, copyBtn);
-    });
-    header.appendChild(copyBtn);
+    // No copy button on the parsed view: the parsed body isn't a single
+    // string of plain text the user would copy (it's a tree of message
+    // blocks, usage stats, etc.). The raw view keeps its copy button
+    // for users who want to paste the wire bytes somewhere.
     wrap.appendChild(header);
 
     if (!body || !body.body) {
@@ -2737,13 +2730,32 @@ function renderContentBlock(block) {
     if (block.type === 'text') {
         w.textContent = block.text || '';
     } else if (block.type === 'thinking') {
-        const label = document.createElement('div');
+        // Thinking blocks are collapsible: collapsed by default. The
+        // header row carries the toggle so the toggle target is the
+        // whole label area, not just the bullet triangle.
+        const header = document.createElement('button');
+        header.type = 'button';
+        header.className = 'inspect-block-thinking-header';
+        header.setAttribute('aria-expanded', 'false');
+        const arrow = document.createElement('span');
+        arrow.className = 'inspect-block-thinking-arrow';
+        arrow.textContent = '\u25B6'; // ▶ collapsed
+        const label = document.createElement('span');
         label.className = 'inspect-block-thinking-label';
         label.textContent = 'Thinking';
+        header.appendChild(arrow);
+        header.appendChild(label);
         const body = document.createElement('div');
         body.className = 'inspect-block-thinking';
         body.textContent = block.thinking || block.text || '';
-        w.appendChild(label); w.appendChild(body);
+        header.addEventListener('click', function () {
+            const open = header.getAttribute('aria-expanded') === 'true';
+            header.setAttribute('aria-expanded', open ? 'false' : 'true');
+            body.classList.toggle('open', !open);
+            arrow.textContent = open ? '\u25B6' : '\u25BC';
+        });
+        w.appendChild(header);
+        w.appendChild(body);
     } else if (block.type === 'tool_use') {
         const name = document.createElement('div');
         name.className = 'inspect-block-tool-name';

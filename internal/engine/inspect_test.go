@@ -436,6 +436,93 @@ func TestEngine_HandleProxy_DownstreamNameIsCaptured(t *testing.T) {
 	}
 }
 
+// TestEngine_HandleProxy_ClientIPIsCaptured verifies that the client's IP
+// (port-stripped) is captured in the inspect entry so the inspector
+// header can show who hit the gateway. The engine pulls from
+// r.RemoteAddr directly — no X-Forwarded-For trust.
+func TestEngine_HandleProxy_ClientIPIsCaptured(t *testing.T) {
+	s := newTestStore(t)
+	ts := newTestDownstream(t, 200, `{"choices":[{"message":{"content":"hi"}}]}`, nil)
+	defer ts.Close()
+	addDownstream(t, s, "anthropic-prod", "Anthropic Production", ts.URL, "key-ds1")
+	addOutputModelIDs(t, s, "anthropic-prod", "gpt-4o")
+
+	eng := New(s)
+	store2 := inspect.New(10)
+	eng.SetPayloadStore(store2)
+	eng.SetCapturePayloads(true)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)))
+	// httptest.NewRequest sets RemoteAddr to "192.0.2.1:1234" by default
+	// (TEST-NET-1 RFC 5737). After port-stripping the inspector should
+	// see just "192.0.2.1".
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Result().StatusCode)
+	}
+
+	var capturedID int
+	for i := 0; i < 100; i++ {
+		if _, ok := store2.Get(i); ok {
+			capturedID = i
+			break
+		}
+	}
+	captured, ok := store2.Get(capturedID)
+	if !ok {
+		t.Fatalf("no captured entry found")
+	}
+	if captured.ClientIP != "192.0.2.1" {
+		t.Fatalf("expected client ip '192.0.2.1' (port-stripped), got %q", captured.ClientIP)
+	}
+}
+
+// TestEngine_HandleProxy_ClientIP_IPv6 covers the IPv6 path: an IPv6
+// address arrives as "[::1]:1234" via RemoteAddr and must be normalised
+// to "::1" by the engine's clientIPFromAddr helper.
+func TestEngine_HandleProxy_ClientIP_IPv6(t *testing.T) {
+	s := newTestStore(t)
+	ts := newTestDownstream(t, 200, `{"choices":[{"message":{"content":"hi"}}]}`, nil)
+	defer ts.Close()
+	addDownstream(t, s, "anthropic-prod", "Anthropic Production", ts.URL, "key-ds1")
+	addOutputModelIDs(t, s, "anthropic-prod", "gpt-4o")
+
+	eng := New(s)
+	store2 := inspect.New(10)
+	eng.SetPayloadStore(store2)
+	eng.SetCapturePayloads(true)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "[2001:db8::1]:4242" // RFC 3849 documentation IPv6
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Result().StatusCode)
+	}
+
+	var capturedID int
+	for i := 0; i < 100; i++ {
+		if _, ok := store2.Get(i); ok {
+			capturedID = i
+			break
+		}
+	}
+	captured, ok := store2.Get(capturedID)
+	if !ok {
+		t.Fatalf("no captured entry found")
+	}
+	if captured.ClientIP != "2001:db8::1" {
+		t.Fatalf("expected client ip '2001:db8::1', got %q", captured.ClientIP)
+	}
+}
+
 // guard against unused-import warnings if the file shrinks.
 var _ = store.Rule{}
 var _ = json.Marshal
