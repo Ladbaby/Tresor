@@ -35,6 +35,13 @@ type AppConfig struct {
 	// Entries below the selected level are filtered out. Default: info.
 	LogLevel string `yaml:"log_level,omitempty"`
 
+	// CapturePayloads enables capture of the raw incoming request body and the
+	// raw downstream response body for the most recent N requests (default 100)
+	// in memory. Captured bytes are exposed via GET /api/logs/{id}/inspect.
+	// This adds a small per-request memory cost (~tens of KB per direction for
+	// typical LLM payloads) and is therefore disabled by default.
+	CapturePayloads bool `yaml:"capture_payloads,omitempty"`
+
 	// IconCacheDir is the directory where downloaded model icon SVGs are
 	// stored. If empty, defaults to <db_dir>/tresor-icons/ (the directory
 	// holding the SQLite DB). Tilde (~) is expanded to the user's home dir.

@@ -16,8 +16,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"tresor/internal/inspect"
 	"tresor/internal/middleware"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
@@ -53,6 +55,14 @@ type Engine struct {
 	client    *http.Client
 	proxyAuth *proxyAuth
 	logger    *RequestLogger
+
+	// capturePayloads is the inspector flag, read in the hot path with
+	// atomic.LoadInt32 so the disabled state is a single cheap branch.
+	capturePayloads int32
+	// payloadStore receives raw body snapshots from HandleProxy when
+	// capturePayloads is enabled. nil when the feature is off, in which
+	// case the engine never touches it.
+	payloadStore *inspect.Store
 }
 
 // New creates a new Engine.
@@ -113,6 +123,80 @@ func (e *Engine) SetProxyAuthKeys(keys []string) {
 		keySet[k] = struct{}{}
 	}
 	e.proxyAuth = &proxyAuth{enabled: true, keys: keySet}
+}
+
+// SetCapturePayloads toggles the inspector's raw-body capture. When true,
+// HandleProxy snapshots the raw incoming request body and the raw downstream
+// response body into the engine's payload store. Default is false (no
+// per-request allocation overhead, no inspector data). The flag can be flipped
+// at runtime via PUT /api/config and is consulted in the hot path with an
+// atomic load so the disabled state stays zero-cost.
+func (e *Engine) SetCapturePayloads(enabled bool) {
+	if enabled {
+		atomic.StoreInt32(&e.capturePayloads, 1)
+	} else {
+		atomic.StoreInt32(&e.capturePayloads, 0)
+	}
+}
+
+// CapturePayloads returns the current flag state. Useful for tests.
+func (e *Engine) CapturePayloads() bool {
+	return atomic.LoadInt32(&e.capturePayloads) == 1
+}
+
+// SetPayloadStore attaches the in-memory payload store that the inspector
+// reads from. The engine calls store.Add on every recorded request (when
+// capture is enabled) keyed by the log entry id.
+func (e *Engine) SetPayloadStore(s *inspect.Store) {
+	e.payloadStore = s
+}
+
+// captureBuffer bundles the raw bytes the engine wants to hand to the
+// inspector. Both directions are optional; an empty slice is treated as
+// "no body". The caller is expected to have taken the snapshot BEFORE any
+// plugin ran — that is the whole point of the inspector.
+type captureBuffer struct {
+	Request           []byte
+	Response          []byte
+	RequestCT         string
+	ResponseCT        string
+	TruncatedRequest  bool
+	TruncatedResponse bool
+}
+
+// recordAndCapture is the single funnel for the engine's per-request log
+// write. It calls logger.Record (which assigns the entry id) and, when the
+// inspector flag is on, snapshots the raw body bytes into the payload store
+// keyed by the same id. Disabled state is a single atomic.Load branch, so
+// the per-request overhead is one instruction.
+//
+// The capture is taken **before** any plugin runs — see HandleProxy for the
+// specific call sites — so what the inspector shows is the wire bytes the
+// client sent and the wire bytes the downstream returned, with no plugin
+// transformation visible. This matches the feature requirement that "we
+// only consider raw incoming request, and the raw downstream LLM's
+// response, rather than the processed results of plugins."
+func (e *Engine) recordAndCapture(entry *RequestLogEntry, buf captureBuffer) {
+	e.logger.Record(entry)
+	if atomic.LoadInt32(&e.capturePayloads) == 0 || e.payloadStore == nil {
+		return
+	}
+	e.payloadStore.Add(inspect.Entry{
+		ID:                  entry.ID,
+		Timestamp:           entry.Timestamp,
+		Path:                entry.Path,
+		Method:              entry.Method,
+		Model:               entry.Model,
+		ResolvedModel:       entry.ResolvedModel,
+		DownstreamID:        entry.DownstreamID,
+		Status:              entry.Status,
+		RequestBody:         buf.Request,
+		ResponseBody:        buf.Response,
+		RequestContentType:  buf.RequestCT,
+		ResponseContentType: buf.ResponseCT,
+		TruncatedRequest:    buf.TruncatedRequest,
+		TruncatedResponse:   buf.TruncatedResponse,
+	})
 }
 
 // validateProxyAuth checks the proxy API key sent by the client, supporting
@@ -284,7 +368,7 @@ func (e *Engine) logAndReturnError(w *statusCaptureWriter, entry *RequestLogEntr
 	entry.Status = ge.status
 	entry.Error = ge.errLabel
 	entry.Duration = DurationMs(time.Since(start))
-	e.logger.Record(*entry)
+	e.logger.Record(entry)
 }
 
 // resolveModel reads the request body, extracts the model name, and resolves
@@ -447,7 +531,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		entry.Status = http.StatusUnauthorized
 		entry.Error = "unauthorized"
 		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
+		e.logger.Record(&entry)
 		return
 	}
 
@@ -455,7 +539,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		e.handleModels(cw)
 		entry.Status = cw.status
 		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
+		e.logger.Record(&entry)
 		return
 	}
 
@@ -467,7 +551,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		e.handleGeminiModels(r, cw)
 		entry.Status = cw.status
 		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
+		e.logger.Record(&entry)
 		return
 	}
 
@@ -482,6 +566,16 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	entry.ResolvedModel = result.resolvedModel
 	if result.alias != nil {
 		entry.AliasGroup = result.alias.InputModelID
+	}
+
+	// Snapshot the raw incoming body for the inspector. We do this **before**
+	// the request pipeline runs so the inspector shows the wire bytes the
+	// client sent, not the plugin-transformed version. The slice is taken
+	// only when capture is on; otherwise the assignment is a no-op. The
+	// store copies the bytes itself so the engine can let result.body go.
+	var rawReq []byte
+	if atomic.LoadInt32(&e.capturePayloads) == 1 && len(result.body) > 0 {
+		rawReq = append(make([]byte, 0, len(result.body)), result.body...)
 	}
 
 	// Build transformation pipeline (rule matching + auto-translation)
@@ -534,8 +628,19 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	if isEventStream(resp.Header.Get("Content-Type")) {
 		entry.Status = resp.StatusCode
 		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(entry)
-		e.handleStreamingResponse(cw, resp, ctx, &pipeline, cancel, r.Context())
+		// Streaming bodies are accumulated by the streaming handler. Pass
+		// the buffer in so it can tee raw bytes for the inspector as each
+		// SSE line arrives. We don't Record here; the streaming handler
+		// calls recordAndCapture after the stream completes.
+		var respBuf bytes.Buffer
+		var truncated bool
+		e.handleStreamingResponse(cw, resp, ctx, &pipeline, cancel, r.Context(), &captureBuffer{
+			Request:           rawReq,
+			RequestCT:         r.Header.Get("Content-Type"),
+			ResponseCT:        resp.Header.Get("Content-Type"),
+			TruncatedRequest:  false,
+			TruncatedResponse: truncated,
+		}, &respBuf, &truncated, &entry)
 		return
 	}
 
@@ -550,6 +655,24 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, errMsg, errMsg, "failed to read response", err})
 		return
+	}
+
+	// Snapshot the raw downstream response **before** the response pipeline
+	// runs. ExecuteResponsePipeline is allowed to mutate the slice in place
+	// (plugins commonly do `append(body, marker)`), so we must copy the
+	// bytes here — by the time ExecuteResponsePipeline returns, the
+	// underlying array may already be the post-transformer bytes. This is
+	// what makes the inspector show the original downstream response, not
+	// the post-plugin output.
+	var rawResp []byte
+	var respTrunc bool
+	if atomic.LoadInt32(&e.capturePayloads) == 1 && len(respBody) > 0 {
+		if len(respBody) > inspect.MaxBodyBytes {
+			rawResp = append(make([]byte, 0, inspect.MaxBodyBytes), respBody[:inspect.MaxBodyBytes]...)
+			respTrunc = true
+		} else {
+			rawResp = append(make([]byte, 0, len(respBody)), respBody...)
+		}
 	}
 
 	transformedBody, err := ExecuteResponsePipeline(resp, respBody, ctx, pipeline.ResponseSteps)
@@ -570,7 +693,20 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	cw.Header().Set("Content-Length", strconv.Itoa(len(transformedBody)))
 	entry.Status = resp.StatusCode
 	entry.Duration = DurationMs(time.Since(start))
-	e.logger.Record(entry)
+
+	// rawResp / respTrunc were captured earlier (before the response
+	// pipeline mutates respBody in place). Wire them into the capture
+	// buffer here. The store copies bytes defensively, so handing it the
+	// pre-plugin snapshot is what makes the inspector show the original
+	// downstream response.
+	e.recordAndCapture(&entry, captureBuffer{
+		Request:           rawReq,
+		Response:          rawResp,
+		RequestCT:         r.Header.Get("Content-Type"),
+		ResponseCT:        resp.Header.Get("Content-Type"),
+		TruncatedRequest:  false,
+		TruncatedResponse: respTrunc,
+	})
 	cw.WriteHeader(resp.StatusCode)
 	cw.Write(transformedBody)
 }
@@ -579,9 +715,32 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 // If stream transformers exist, each SSE event is transformed before sending.
 // Without stream transformers, the response is passed through line-by-line (no buffering).
 // The cancel function is called after the stream completes to clean up the downstream context.
-func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context) {
+//
+// When the inspector is enabled, respBuf is filled with the raw downstream
+// SSE bytes (pre-transformer) up to inspect.MaxBodyBytes, truncated is set
+// when the cap was hit, and entry is the live log entry that gets
+// recorded with the captured body via recordAndCapture. The caller owns the
+// entry pointer and is expected to read its ID and downstream ID from it
+// after we return.
+func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context, capture *captureBuffer, respBuf *bytes.Buffer, truncated *bool, entry *RequestLogEntry) {
 	defer resp.Body.Close()
 	defer cancel()
+	// streamFinished is set to true right before the function returns, so
+	// the deferred recordAndCapture below always runs exactly once.
+	streamFinished := false
+	defer func() {
+		if streamFinished {
+			return
+		}
+		streamFinished = true
+		// Stream ended (client gone, scanner error, or context cancel).
+		// Record what we captured so the inspector can still see the body.
+		if atomic.LoadInt32(&e.capturePayloads) == 1 {
+			capture.Response = respBuf.Bytes()
+			capture.TruncatedResponse = *truncated
+		}
+		e.recordAndCapture(entry, *capture)
+	}()
 
 	// Copy SSE-relevant headers to the client response
 	for _, header := range []string{"Content-Type", "Cache-Control", "Connection"} {
@@ -603,6 +762,35 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	scanner := bufio.NewScanner(resp.Body)
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 1024*1024)
+
+	// teeLine writes the raw line to the inspector buffer (subject to the
+	// per-entry byte cap). The cap protects us from runaway streaming
+	// downstreams that produce hundreds of MB of SSE.
+	captureOn := atomic.LoadInt32(&e.capturePayloads) == 1
+	teeLine := func(line string) {
+		if !captureOn || respBuf == nil {
+			return
+		}
+		if respBuf.Len() >= inspect.MaxBodyBytes {
+			if !*truncated {
+				*truncated = true
+			}
+			return
+		}
+		// Write the line + the trailing newline the scanner consumed.
+		room := inspect.MaxBodyBytes - respBuf.Len()
+		chunk := []byte(line)
+		// Account for the trailing '\n' we will append.
+		need := len(chunk) + 1
+		if need > room {
+			respBuf.Write(chunk[:room-1])
+			respBuf.WriteByte('\n')
+			*truncated = true
+			return
+		}
+		respBuf.Write(chunk)
+		respBuf.WriteByte('\n')
+	}
 
 	hasTransformers := len(pipeline.StreamResponseSteps) > 0
 
@@ -647,7 +835,8 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 				return
 			default:
 			}
-			line := strings.TrimRight(scanner.Text(), "\r")
+			line := scanner.Text()
+			teeLine(strings.TrimRight(line, "\r"))
 			if !writeAndFlush([]byte(line + "\n")) {
 				return
 			}
@@ -655,6 +844,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		if err := scanner.Err(); err != nil {
 			log.Printf("Stream ended: %v", err)
 		}
+		streamFinished = true
+		if captureOn {
+			capture.Response = respBuf.Bytes()
+			capture.TruncatedResponse = *truncated
+		}
+		e.recordAndCapture(entry, *capture)
 		return
 	}
 
@@ -727,7 +922,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		default:
 		}
 
-		line := strings.TrimRight(scanner.Text(), "\r")
+		rawLine := scanner.Text()
+		// The scanner returns lines without the trailing '\n'. We tee the
+		// CR-trimmed line + '\n' to the inspector so the captured raw
+		// stream is byte-identical to what the downstream sent.
+		teeLine(strings.TrimRight(rawLine, "\r"))
+		line := strings.TrimRight(rawLine, "\r")
 
 		if line == "" {
 			// Empty line terminates an SSE event — flush it
@@ -785,6 +985,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	if err := scanner.Err(); err != nil {
 		log.Printf("Stream ended: %v", err)
 	}
+	streamFinished = true
+	if captureOn {
+		capture.Response = respBuf.Bytes()
+		capture.TruncatedResponse = *truncated
+	}
+	e.recordAndCapture(entry, *capture)
 }
 
 // forwardRequest sends the (possibly transformed) request to the target downstream.

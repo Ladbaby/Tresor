@@ -434,6 +434,148 @@ tr:hover {
 }
 
 /* ============================================================
+   Log Inspect Modal
+   ============================================================ */
+
+.inspect-modal-content {
+    max-width: 960px;
+    width: 95%;
+}
+
+.inspect-meta {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.25rem 1rem;
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+
+.inspect-meta .meta-key {
+    color: var(--text-muted);
+}
+
+.inspect-meta .meta-val {
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    word-break: break-all;
+}
+
+.inspect-status {
+    margin-bottom: 1rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    display: none;
+}
+
+.inspect-status.error {
+    display: block;
+    background: rgba(197, 48, 48, 0.15);
+    color: var(--color-danger, #c53030);
+    border: 1px solid var(--color-danger, #c53030);
+}
+
+.inspect-section {
+    margin-bottom: 1.25rem;
+}
+
+.inspect-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.inspect-section-header h4 {
+    margin: 0;
+    color: var(--text-heading);
+    font-size: 0.95rem;
+}
+
+.inspect-section-header .badges {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+.inspect-section-header .badge-truncated {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    background: rgba(212, 158, 0, 0.18);
+    color: #d49e00;
+    border: 1px solid rgba(212, 158, 0, 0.4);
+}
+
+.inspect-section-header .badge-ct {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.inspect-section-header .copy-btn {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+}
+
+.inspect-section-header .copy-btn:hover {
+    color: var(--text-heading);
+    border-color: var(--text-secondary);
+}
+
+.inspect-section-header .copy-btn.copied {
+    color: var(--color-success, #1a5ab8);
+    border-color: var(--color-success, #1a5ab8);
+}
+
+.inspect-pre {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    max-height: 360px;
+    overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+}
+
+.inspect-pre.sse {
+    white-space: pre;
+}
+
+.inspect-empty {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    padding: 0.5rem 0;
+    font-style: italic;
+}
+
+.log-entry.clickable {
+    cursor: pointer;
+}
+
+.log-entry.clickable:hover {
+    background: var(--bg-primary);
+}
+
+/* ============================================================
    Forms
    ============================================================ */
 

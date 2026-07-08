@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"tresor/internal/config"
 	"tresor/internal/engine"
 	"tresor/internal/icons"
+	"tresor/internal/inspect"
 	"tresor/internal/middleware"
 	"tresor/internal/store"
 )
@@ -28,14 +30,15 @@ func clearAuthCookie(w http.ResponseWriter) {
 
 // Router holds dependencies for the admin API handlers.
 type Router struct {
-	store     *store.Store
-	engine    *engine.Engine
-	logger    *engine.RequestLogger
-	cfg       *config.AppConfig
-	authMW    *middleware.AuthMiddleware
-	iconFetcher *icons.Fetcher
-	version   string
-	buildTime string
+	store        *store.Store
+	engine       *engine.Engine
+	logger       *engine.RequestLogger
+	payloadStore *inspect.Store
+	cfg          *config.AppConfig
+	authMW       *middleware.AuthMiddleware
+	iconFetcher  *icons.Fetcher
+	version      string
+	buildTime    string
 
 	// Config write debounce: delays YAML write-back to avoid excessive disk I/O
 	// when multiple mutations occur in rapid succession.
@@ -46,7 +49,8 @@ type Router struct {
 // NewRouter creates an admin API router with all API endpoints.
 // It wires up session token persistence so all auth cookies survive daemon restarts.
 // iconFetcher may be nil in tests; when nil, /api/icons/ responds with 404.
-func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger, iconFetcher *icons.Fetcher, cfg *config.AppConfig, version, buildTime string) *Router {
+// payloadStore may be nil; when nil, /api/logs/{id}/inspect responds with 404.
+func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger, payloadStore *inspect.Store, iconFetcher *icons.Fetcher, cfg *config.AppConfig, version, buildTime string) *Router {
 	authMW := middleware.NewAuthMiddleware(cfg.AdminPassword)
 
 	// Wire persistence hooks so every session token is saved to SQLite,
@@ -65,14 +69,15 @@ func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger,
 	}
 
 	return &Router{
-		store:       s,
-		engine:      eng,
-		logger:      logger,
-		cfg:         cfg,
-		authMW:      authMW,
-		iconFetcher: iconFetcher,
-		version:     version,
-		buildTime:   buildTime,
+		store:        s,
+		engine:       eng,
+		logger:       logger,
+		payloadStore: payloadStore,
+		cfg:          cfg,
+		authMW:       authMW,
+		iconFetcher:  iconFetcher,
+		version:      version,
+		buildTime:    buildTime,
 	}
 }
 
@@ -172,6 +177,8 @@ func (r *Router) Handler() http.Handler {
 			StreamLogs(r.logger)(w, req)
 		case path == "logs":
 			GetRecentLogs(r.logger)(w, req)
+		case strings.HasPrefix(path, "logs/") && strings.HasSuffix(path, "/inspect"):
+			r.handleLogInspect(w, req)
 		default:
 			http.NotFound(w, req)
 		}
@@ -190,6 +197,7 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/icons/refresh", protected)
 	mux.Handle("/api/logs/stream", protected)
 	mux.Handle("/api/logs", protected)
+	mux.Handle("/api/logs/", protected)
 
 	return mux
 }
@@ -318,4 +326,83 @@ func writeJSONWithWarning(w http.ResponseWriter, status int, ds store.Downstream
 		dw.Warning = "base_url uses a bare IP address: traffic is sent unencrypted and may be interceptible"
 	}
 	writeJSON(w, status, dw)
+}
+
+// handleLogInspect returns the captured raw request and response bodies for
+// a single log entry. The id is parsed from the URL path
+// (e.g. /api/logs/123/inspect). Returns 404 when the id is unknown, has
+// been evicted from the in-memory store, or the capture flag was off at
+// the time the request came in.
+//
+// The response body is base64-encoded in the wire JSON when its content
+// type isn't recognized as text, so the inspector can render JSON and SSE
+// inline (no round-trip to a separate URL). Body bytes are the **pre-
+// transformer** wire bytes captured by the engine.
+func (r *Router) handleLogInspect(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if r.payloadStore == nil {
+		writeError(w, http.StatusNotFound, "payload capture is not enabled")
+		return
+	}
+
+	// /api/logs/{id}/inspect → id is the second path segment after the
+	// "logs" prefix. Split on "/" and grab the middle component.
+	path := strings.TrimPrefix(req.URL.Path, "/api/logs/")
+	path = strings.TrimSuffix(path, "/inspect")
+	id, err := strconv.Atoi(path)
+	if err != nil || id < 0 {
+		writeError(w, http.StatusBadRequest, "invalid log id")
+		return
+	}
+
+	entry, ok := r.payloadStore.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "no captured payload for this log entry (capture off, evicted, or unknown id)")
+		return
+	}
+
+	// Build the response. Body bytes are returned as strings — they are
+	// always text (JSON, SSE, plain). Bytes that aren't valid UTF-8 would
+	// be returned as replacement chars by json.Marshal; this is fine for
+	// the inspector's purpose and avoids the base64 round-trip.
+	type inspectBody struct {
+		ContentType string `json:"content_type"`
+		Body        string `json:"body"`
+		Truncated   bool   `json:"truncated,omitempty"`
+	}
+	type inspectResponse struct {
+		ID            int         `json:"id"`
+		Timestamp     string      `json:"timestamp"`
+		Path          string      `json:"path"`
+		Method        string      `json:"method"`
+		Model         string      `json:"model,omitempty"`
+		ResolvedModel string      `json:"resolved_model,omitempty"`
+		DownstreamID  string      `json:"downstream_id,omitempty"`
+		Status        int         `json:"status"`
+		Request       inspectBody `json:"request"`
+		Response      inspectBody `json:"response"`
+	}
+	writeJSON(w, http.StatusOK, inspectResponse{
+		ID:            entry.ID,
+		Timestamp:     entry.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
+		Path:          entry.Path,
+		Method:        entry.Method,
+		Model:         entry.Model,
+		ResolvedModel: entry.ResolvedModel,
+		DownstreamID:  entry.DownstreamID,
+		Status:        entry.Status,
+		Request: inspectBody{
+			ContentType: entry.RequestContentType,
+			Body:        string(entry.RequestBody),
+			Truncated:   entry.TruncatedRequest,
+		},
+		Response: inspectBody{
+			ContentType: entry.ResponseContentType,
+			Body:        string(entry.ResponseBody),
+			Truncated:   entry.TruncatedResponse,
+		},
+	})
 }

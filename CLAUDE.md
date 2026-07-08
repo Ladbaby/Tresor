@@ -32,6 +32,7 @@ proxy_api_keys:                 # Optional: require clients to authenticate prox
 proxy_mode: "auto"              # Outbound proxy: auto, env, windows, none
 default_tab: "downstreams"      # Dashboard tab on load (values: downstreams, aliases, rules, settings, about)
 log_level: "info"               # Request logging verbosity: debug, info, warn, error
+capture_payloads: false         # Capture raw request/response bodies for the Logs inspector (claude-tap-style)
 
 downstreams:                    # LLM provider endpoints
   - id: my-provider
@@ -165,7 +166,7 @@ Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plu
 | GET | `/api/health` | Health check (public) |
 | GET | `/api/version` | Print version and build info (public) |
 | GET/PUT | `/api/log_level` | Get/set request logging verbosity |
-| GET/PUT | `/api/config` | Get/set runtime config (proxy_mode, proxy_api_keys, admin_password, default_tab, log_level) |
+| GET/PUT | `/api/config` | Get/set runtime config (proxy_mode, proxy_api_keys, admin_password, default_tab, log_level, capture_payloads) |
 | POST | `/api/fetch-models` | Fetch available models from a provider (body: base_url + api_key) |
 | GET | `/api/rules` | List all rules |
 | POST | `/api/rules` | Create a new rule |
@@ -191,6 +192,7 @@ Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plu
 | DELETE | `/api/aliases/group/{inputModelId}` | Delete all aliases for an input model |
 | GET | `/api/logs` | Get recent log entries (newest first) |
 | GET | `/api/logs/stream` | SSE stream of log entries |
+| GET | `/api/logs/{id}/inspect` | Get captured raw request and response bodies for a log entry (only when `capture_payloads: true`; 404 if evicted or capture was off) |
 | GET | `/v1/models` | Aggregated model listing (OpenAI format, gateway path) |
 
 

@@ -16,11 +16,12 @@ var ValidDefaultTabs = []string{"downstreams", "aliases", "rules", "settings", "
 
 // RuntimeConfig exposes the mutable runtime settings via the admin API.
 type RuntimeConfig struct {
-	ProxyMode     string   `json:"proxy_mode"`
-	ProxyAPIKeys  []string `json:"proxy_api_keys"`
-	AdminPassword string   `json:"admin_password,omitempty"`
-	DefaultTab    string   `json:"default_tab,omitempty"`
-	LogLevel      string   `json:"log_level,omitempty"`
+	ProxyMode       string   `json:"proxy_mode"`
+	ProxyAPIKeys    []string `json:"proxy_api_keys"`
+	AdminPassword   string   `json:"admin_password,omitempty"`
+	DefaultTab      string   `json:"default_tab,omitempty"`
+	LogLevel        string   `json:"log_level,omitempty"`
+	CapturePayloads bool     `json:"capture_payloads,omitempty"`
 }
 
 // RuntimeConfigResponse is what GET /api/config returns.
@@ -31,6 +32,7 @@ type RuntimeConfigResponse struct {
 	AdminPasswordSet bool     `json:"admin_password_set"`
 	DefaultTab       string   `json:"default_tab,omitempty"`
 	LogLevel         string   `json:"log_level,omitempty"`
+	CapturePayloads  bool     `json:"capture_payloads,omitempty"`
 }
 
 var (
@@ -40,13 +42,14 @@ var (
 
 // InitRuntimeConfig sets the initial runtime config from the YAML config so the
 // API reflects what the engine was started with.
-func InitRuntimeConfig(mode string, proxyAPIKeys []string, adminPassword string, defaultTab string, logLevel string) {
+func InitRuntimeConfig(mode string, proxyAPIKeys []string, adminPassword string, defaultTab string, logLevel string, capturePayloads bool) {
 	runtimeCfgMu.Lock()
 	runtimeCfg.ProxyMode = mode
 	runtimeCfg.ProxyAPIKeys = proxyAPIKeys
 	runtimeCfg.AdminPassword = adminPassword
 	runtimeCfg.DefaultTab = defaultTab
 	runtimeCfg.LogLevel = logLevel
+	runtimeCfg.CapturePayloads = capturePayloads
 	runtimeCfgMu.Unlock()
 }
 
@@ -62,6 +65,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			AdminPasswordSet: cfg.AdminPassword != "",
 			DefaultTab:       cfg.DefaultTab,
 			LogLevel:         cfg.LogLevel,
+			CapturePayloads:  cfg.CapturePayloads,
 		})
 
 	case http.MethodPut:
@@ -131,11 +135,15 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		}
 		runtimeCfg.DefaultTab = incoming.DefaultTab
 		runtimeCfg.LogLevel = incoming.LogLevel
+		runtimeCfg.CapturePayloads = incoming.CapturePayloads
 		runtimeCfgMu.Unlock()
 
 		// Push the change to the running engine live.
 		r.engine.SetProxyMode(mode)
 		r.engine.SetProxyAuthKeys(incoming.ProxyAPIKeys)
+		// Push the capture-payloads flag live; this controls whether the
+		// engine snapshots raw request/response bodies for the inspector.
+		r.engine.SetCapturePayloads(incoming.CapturePayloads)
 		if r.iconFetcher != nil {
 			r.iconFetcher.SetProxyMode(mode)
 		}
@@ -145,11 +153,16 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			r.authMW.SetPassword(incoming.AdminPassword)
 		}
 
-		// Persist admin_password to YAML config (so it survives restart).
-		// Proxy settings (proxy_mode, proxy_api_keys, log_level, default_tab)
-		// are runtime-only and not written back to YAML.
+		// Persist admin_password and capture_payloads to YAML config (so they
+		// survive restart). capture_payloads is global system state, unlike
+		// proxy_mode/proxy_api_keys/log_level/default_tab which are
+		// environment-specific and not written back.
 		if passwordProvided {
 			r.cfg.AdminPassword = incoming.AdminPassword
+			r.requestConfigWrite()
+		}
+		if r.cfg.CapturePayloads != incoming.CapturePayloads {
+			r.cfg.CapturePayloads = incoming.CapturePayloads
 			r.requestConfigWrite()
 		}
 
@@ -159,6 +172,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			AdminPasswordSet: passwordProvided && incoming.AdminPassword != "",
 			DefaultTab:       incoming.DefaultTab,
 			LogLevel:         incoming.LogLevel,
+			CapturePayloads:  incoming.CapturePayloads,
 		})
 
 	default:

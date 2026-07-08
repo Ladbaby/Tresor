@@ -2035,6 +2035,13 @@ async function loadSettings() {
         if (logLevelEl) {
             logLevelEl.value = cfg.log_level || 'info';
         }
+        // Populate the payload-capture checkbox
+        const captureEl = document.getElementById('setting-capture-payloads');
+        if (captureEl) {
+            captureEl.checked = !!cfg.capture_payloads;
+        }
+        // Update the runtime flag that gates row clickability.
+        capturePayloadsEnabled = !!cfg.capture_payloads;
     } catch (err) {
         statusEl.textContent = 'Failed to load settings: ' + err.message;
         statusEl.className = 'settings-status error';
@@ -2134,6 +2141,11 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
         if (logLevelEl) {
             body.log_level = logLevelEl.value;
         }
+        // Include the payload-capture flag if the checkbox exists
+        const captureEl = document.getElementById('setting-capture-payloads');
+        if (captureEl) {
+            body.capture_payloads = captureEl.checked;
+        }
         // Only send admin_password if the user entered something or wants to clear it
         if (newPassword || clearPassword) {
             body.admin_password = newPassword;
@@ -2171,14 +2183,206 @@ let logSSE = null;          // current EventSource connection
 let logEntries = [];        // in-memory log entries (mirrors server buffer)
 let logActive = false;      // whether the Logs tab is currently visible
 let logPaused = false;      // whether log rendering is paused
+// capturePayloadsEnabled is populated from /api/config in loadSettings().
+// When true, log rows are clickable and the inspect modal is enabled.
+let capturePayloadsEnabled = false;
 
 /**
  * Initialize the Logs tab. Called once on dashboard load.
- * Sets up SSE connection management and loads initial entries.
+ * Sets up SSE connection management, loads initial entries, and wires the
+ * delegated click handler for the inspector modal.
  */
 function initLogs() {
     // Load recent entries from the REST API (for initial render)
     fetchLogs();
+    setupLogInspect();
+}
+
+/**
+ * Wire a single delegated click handler on the log stream container.
+ * When a clickable row is clicked we open the inspector modal. This is
+ * delegated so streaming SSE updates do not pile up listeners.
+ */
+function setupLogInspect() {
+    const container = document.getElementById('logs-stream');
+    if (!container || container._inspectWired) return;
+    container._inspectWired = true;
+    container.addEventListener('click', function (ev) {
+        const row = ev.target.closest('.log-entry.clickable');
+        if (!row) return;
+        const id = parseInt(row.dataset.id, 10);
+        if (!isNaN(id)) openLogInspect(id);
+    });
+}
+
+/**
+ * Open the inspector modal for the given log id. Fetches
+ * /api/logs/{id}/inspect and renders the captured raw request and
+ * response bodies. Body rendering rules:
+ *   - application/json (request or response): pretty-print with 2-space indent
+ *   - text/event-stream: render verbatim, preserving the `data: ...\n\n` framing
+ *   - anything else: render as plain text inside a <pre>
+ * Truncation and missing-capture states are surfaced as banners.
+ */
+async function openLogInspect(id) {
+    const modal = document.getElementById('log-inspect-modal');
+    const metaEl = document.getElementById('log-inspect-meta');
+    const statusEl = document.getElementById('log-inspect-status');
+    const bodyEl = document.getElementById('log-inspect-body');
+    if (!modal || !metaEl || !statusEl || !bodyEl) return;
+
+    // Reset state for the new entry
+    metaEl.innerHTML = '';
+    statusEl.className = 'inspect-status';
+    statusEl.style.display = 'none';
+    bodyEl.innerHTML = '<div class="inspect-empty">Loading\u2026</div>';
+    modal.classList.remove('hidden');
+
+    let data;
+    try {
+        const resp = await fetch(API_BASE + '/logs/' + id + '/inspect', { credentials: 'same-origin' });
+        if (resp.status === 404) {
+            bodyEl.innerHTML = '';
+            statusEl.textContent = 'No captured payload for this request. Either the inspector was disabled when the request came in, or the entry has aged out of the in-memory cache (most recent 100 only).';
+            statusEl.className = 'inspect-status error';
+            statusEl.style.display = 'block';
+            return;
+        }
+        if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error('HTTP ' + resp.status + ': ' + text);
+        }
+        data = await resp.json();
+    } catch (err) {
+        bodyEl.innerHTML = '';
+        statusEl.textContent = 'Failed to fetch captured payload: ' + err.message;
+        statusEl.className = 'inspect-status error';
+        statusEl.style.display = 'block';
+        return;
+    }
+
+    // Header meta
+    metaEl.innerHTML = renderInspectMeta(data);
+    // Two sections: raw client request, raw downstream response
+    bodyEl.innerHTML = '';
+    bodyEl.appendChild(renderInspectSection('Raw client request (before plugins)', data.request));
+    bodyEl.appendChild(renderInspectSection('Raw downstream response (before plugins)', data.response));
+}
+
+function renderInspectMeta(d) {
+    const rows = [
+        ['ID', String(d.id)],
+        ['Method', d.method || ''],
+        ['Path', d.path || ''],
+        ['Status', d.status != null ? String(d.status) : ''],
+        ['Model', d.model || ''],
+        ['Resolved model', d.resolved_model || ''],
+        ['Downstream', d.downstream_id || ''],
+        ['Captured at', d.timestamp || ''],
+    ];
+    return rows
+        .filter(function (r) { return r[1] && r[1] !== ''; })
+        .map(function (r) {
+            return '<div class="meta-key">' + esc(r[0]) + '</div>' +
+                '<div class="meta-val">' + esc(r[1]) + '</div>';
+        }).join('');
+}
+
+function renderInspectSection(title, body) {
+    const wrap = document.createElement('div');
+    wrap.className = 'inspect-section';
+
+    const header = document.createElement('div');
+    header.className = 'inspect-section-header';
+
+    const titleEl = document.createElement('h4');
+    titleEl.textContent = title;
+    header.appendChild(titleEl);
+
+    const badges = document.createElement('div');
+    badges.className = 'badges';
+    if (body && body.content_type) {
+        const ct = document.createElement('span');
+        ct.className = 'badge-ct';
+        ct.textContent = body.content_type;
+        badges.appendChild(ct);
+    }
+    if (body && body.truncated) {
+        const tr = document.createElement('span');
+        tr.className = 'badge-truncated';
+        tr.textContent = 'truncated';
+        badges.appendChild(tr);
+    }
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'copy-btn';
+    copyBtn.textContent = 'Copy';
+    copyBtn.onclick = function () {
+        const text = body && typeof body.body === 'string' ? body.body : '';
+        if (!text) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+                copyBtn.textContent = 'Copied';
+                copyBtn.classList.add('copied');
+                setTimeout(function () {
+                    copyBtn.textContent = 'Copy';
+                    copyBtn.classList.remove('copied');
+                }, 1200);
+            }, function () {
+                copyBtn.textContent = 'Copy failed';
+                setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1200);
+            });
+        } else {
+            // Fallback for browsers without async clipboard
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); copyBtn.textContent = 'Copied'; } catch (e) { copyBtn.textContent = 'Copy failed'; }
+            document.body.removeChild(ta);
+            setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1200);
+        }
+    };
+    badges.appendChild(copyBtn);
+    header.appendChild(badges);
+    wrap.appendChild(header);
+
+    if (!body || !body.body) {
+        const empty = document.createElement('div');
+        empty.className = 'inspect-empty';
+        empty.textContent = '(no body captured)';
+        wrap.appendChild(empty);
+        return wrap;
+    }
+
+    const pre = document.createElement('pre');
+    pre.className = 'inspect-pre';
+    const ct = (body.content_type || '').toLowerCase();
+    if (ct.indexOf('application/json') !== -1) {
+        pre.classList.add('json');
+        // Step 1: if Content-Type: application/json, parse the body and pretty-print
+        pre.textContent = prettyPrintJSON(body.body);
+    } else if (ct.indexOf('text/event-stream') !== -1) {
+        // SSE: keep verbatim, monospace without wrapping so data: lines align
+        pre.classList.add('sse');
+        pre.textContent = body.body;
+    } else {
+        // Step 2: non-JSON / non-SSE — render as <pre> text
+        pre.textContent = body.body;
+    }
+    wrap.appendChild(pre);
+    return wrap;
+}
+
+function prettyPrintJSON(s) {
+    try {
+        return JSON.stringify(JSON.parse(s), null, 2);
+    } catch (e) {
+        // Not valid JSON — return raw. The server already stored the wire
+        // bytes; if they aren't valid JSON, that's what the operator needs
+        // to see.
+        return s;
+    }
 }
 
 /**
@@ -2337,6 +2541,14 @@ function buildLogEntry(entry, isNew) {
     div.className = 'log-entry';
     div.dataset.id = entry.id;
     if (isNew) div.classList.add('new');
+    // When the inspector is enabled, every log row is clickable. We do
+    // this via a delegated click handler on the container (see
+    // setupLogInspect) rather than per-row listeners, so streaming SSE
+    // updates do not pile up listeners.
+    if (capturePayloadsEnabled && entry.id !== undefined) {
+        div.classList.add('clickable');
+        div.title = 'Click to inspect raw request and response';
+    }
 
     // Timestamp
     const timeSpan = document.createElement('span');

@@ -14,6 +14,7 @@ import (
 	"tresor/internal/config"
 	"tresor/internal/engine"
 	"tresor/internal/icons"
+	"tresor/internal/inspect"
 	"tresor/internal/plugins"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
@@ -105,11 +106,17 @@ func runDaemon(cfg *config.AppConfig) error {
 	}
 	eng.SetLogger(logger)
 
+	// Build the in-memory payload store for the inspector. It's bounded so a
+	// chatty gateway cannot exhaust memory; the cap is enforced by the store.
+	payloadStore := inspect.New(inspect.DefaultMaxEntries)
+	eng.SetPayloadStore(payloadStore)
+	eng.SetCapturePayloads(cfg.CapturePayloads)
+
 	// Initialize runtime config state in the API layer
-	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel)
+	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel, cfg.CapturePayloads)
 
 	// Build admin API router
-	adminRouter := api.NewRouter(s, eng, logger, iconFetcher, cfg, Version, BuildTime)
+	adminRouter := api.NewRouter(s, eng, logger, payloadStore, iconFetcher, cfg, Version, BuildTime)
 	webHandler := api.WebHandler()
 
 	// Start listening

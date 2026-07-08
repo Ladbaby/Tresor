@@ -290,6 +290,18 @@
                         </div>
 
                         <div class="settings-group">
+                            <h3>Payload Capture</h3>
+                            <p class="settings-description">
+                                When enabled, Tresor stores the <strong>raw incoming request body</strong> and the <strong>raw downstream response body</strong> for the most recent <span id="capture-max-entries">100</span> requests in memory. Click a row in the <em>Logs</em> tab to inspect prompts, messages, and tool calls. <em>Disabled by default</em> because it adds a small per-request memory cost. The capture is always taken <strong>before</strong> any plugin runs &mdash; you see the original client payload and the original downstream response, not the plugin-transformed version.
+                            </p>
+                            <div class="settings-row">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="setting-capture-payloads"> Enable payload capture (inspect raw prompts and responses from the Logs tab)
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="settings-group">
                             <h3>Dashboard</h3>
                             <p class="settings-description">
                                 Choose which tab the dashboard opens to on page load or refresh.
@@ -333,6 +345,17 @@
                     </div>
                     <p style="color:var(--text-muted);font-size:0.8rem;margin-top:0.5rem;">Up to 500 recent entries shown in real-time via SSE</p>
                 </section>
+
+                <!-- Log Inspect Modal -->
+                <div id="log-inspect-modal" class="modal hidden">
+                    <div class="modal-content inspect-modal-content">
+                        <span class="close" data-close="log-inspect-modal">&times;</span>
+                        <h3 id="log-inspect-title">Inspect Log Entry</h3>
+                        <div id="log-inspect-meta" class="inspect-meta"></div>
+                        <div id="log-inspect-status" class="inspect-status"></div>
+                        <div id="log-inspect-body" class="inspect-body"></div>
+                    </div>
+                </div>
 
                 <!-- About Tab -->
                 <section id="tab-about" class="tab-content">

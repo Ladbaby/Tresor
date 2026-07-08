@@ -139,7 +139,7 @@ func (l *RequestLogger) Debug(format string, args ...interface{}) {
 	if l == nil {
 		return
 	}
-	l.Record(RequestLogEntry{
+	l.Record(&RequestLogEntry{
 		Timestamp: time.Now(),
 		Level:     "debug",
 		Message:   fmt.Sprintf(format, args...),
@@ -147,8 +147,12 @@ func (l *RequestLogger) Debug(format string, args ...interface{}) {
 }
 
 // Record adds a new log entry and notifies SSE subscribers.
-func (l *RequestLogger) Record(entry RequestLogEntry) {
-	if l == nil {
+// The entry's ID field is assigned by Record (atomically incrementing
+// nextID) so the caller can read the assigned id back from the same
+// pointer. Callers that need the assigned id (e.g. the inspector store)
+// must pass a pointer; the helper recordAndCapture relies on this.
+func (l *RequestLogger) Record(entry *RequestLogEntry) {
+	if l == nil || entry == nil {
 		return
 	}
 	l.mu.Lock()
@@ -161,7 +165,7 @@ func (l *RequestLogger) Record(entry RequestLogEntry) {
 		return
 	}
 
-	l.entries = append(l.entries, entry)
+	l.entries = append(l.entries, *entry)
 	if len(l.entries) > maxLogEntries {
 		l.entries = l.entries[len(l.entries)-maxLogEntries:]
 	}
@@ -171,10 +175,11 @@ func (l *RequestLogger) Record(entry RequestLogEntry) {
 	copy(writers, l.writers)
 	l.mu.Unlock()
 
-	// Iterate the snapshot without holding the lock
+	// Iterate the snapshot without holding the lock. We pass *entry so the
+	// serialized JSON includes the assigned id.
 	var failed []logWriter
 	for _, w := range writers {
-		if err := sendSSEEvent(w.writer, w.flusher, "log", entry); err != nil {
+		if err := sendSSEEvent(w.writer, w.flusher, "log", *entry); err != nil {
 			failed = append(failed, w)
 		}
 	}

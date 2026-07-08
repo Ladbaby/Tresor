@@ -29,6 +29,15 @@ default_tab: "downstreams"
 # Request log verbosity: debug, info, warn, error (default: info)
 # log_level: "info"
 
+# Capture the raw incoming request body and the raw downstream response body
+# for the most recent 100 requests in memory, and expose them via the Web UI
+# Logs tab (click any row to inspect). The capture is taken **before** any
+# plugin runs, so the inspector shows the original client payload and the
+# original downstream response, not the post-pipeline output. Disabled by
+# default because it adds a small per-request memory cost (capped at ~1 MiB
+# per direction). Persisted to YAML so the choice survives daemon restarts.
+# capture_payloads: false
+
 # Directory for cached model icon SVGs (fetched at runtime from a public CDN).
 # If empty/unset, defaults to <db_dir>/tresor-icons (e.g. ~/.config/tresor/tresor-icons/).
 # Tilde (~) is expanded to the user's home directory.
