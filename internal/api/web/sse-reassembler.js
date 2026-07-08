@@ -642,24 +642,61 @@
         // conversation into the canonical `system` slot — that's how
         // Anthropic and Gemini expose it, and lets the inspector render
         // system instructions in a distinct colour.
+        //
+        // The lifted system content is normalised to a list of
+        // {type:'text', text} blocks so the renderer doesn't have to
+        // JSON.stringify it (which would dump the whole array as a
+        // single wrapped text block).
         const messages = [];
-        let system = null;
+        const systemBlocks = [];
         for (const m of (body.messages || [])) {
             if (m && m.role === 'system') {
-                if (system == null) system = m.content;
-                else if (typeof system === 'string' && typeof m.content === 'string') {
-                    system += '\n' + m.content;
-                }
+                appendSystemContent(systemBlocks, m.content);
                 continue;
             }
             messages.push({ role: m.role || 'user', content: m.content });
         }
-        if (typeof system === 'object') system = JSON.stringify(system);
-        return { system: system, messages: messages };
+        return {
+            system: systemBlocks.length ? systemBlocks : null,
+            messages: messages,
+        };
+    }
+
+    // appendSystemContent pushes one or more text blocks from a system
+    // message's content into `out`. The content can be a string, an
+    // array of {type:'text', text} blocks (OpenAI Chat), or a single
+    // object (rare). Anything else is coerced via String() so the
+    // operator still sees the system instructions in the inspector.
+    function appendSystemContent(out, content) {
+        if (content == null) return;
+        if (typeof content === 'string') {
+            if (content) out.push({ type: 'text', text: content });
+            return;
+        }
+        if (Array.isArray(content)) {
+            for (const b of content) {
+                if (b == null) continue;
+                if (typeof b === 'string') {
+                    if (b) out.push({ type: 'text', text: b });
+                } else if (typeof b === 'object') {
+                    out.push({ type: 'text', text: b.text || '' });
+                }
+            }
+            return;
+        }
+        if (typeof content === 'object') {
+            out.push({ type: 'text', text: content.text || '' });
+            return;
+        }
+        out.push({ type: 'text', text: String(content) });
     }
 
     function normalizeResponsesRequest(body) {
-        const out = { system: body.instructions || null, messages: [] };
+        // `instructions` is documented as a string but the OpenAI
+        // Responses API can also accept a list of structured blocks
+        // (matching the chat completion content shape). Normalise to a
+        // list of {type:'text', text} so the renderer doesn't have to.
+        const out = { system: normalizeInstructionsField(body.instructions), messages: [] };
         for (const item of (body.input || [])) {
             if (!isDict(item)) continue;
             // Three well-known input item types: 'message' (text/image),
@@ -700,12 +737,64 @@
 
     function normalizeAnthropicRequest(body) {
         return {
-            system: body.system || null,
+            // Anthropic `system` can be either a string or an array of
+            // structured blocks (each {type:'text', text, cache_control?}).
+            // Normalise to an array of plain text blocks so the renderer
+            // doesn't have to special-case both shapes — and so a request
+            // that arrived as the array form renders as readable text
+            // blocks instead of a `JSON.stringify` dump starting with `[{`.
+            // We drop `cache_control` here because the renderer doesn't
+            // surface it (it's a prompt-cache marker, not content) and
+            // because some clients (notably Claude Code) attach
+            // cache_control to system blocks between turns, which would
+            // otherwise produce duplicate-looking blocks.
+            system: normalizeAnthropicSystem(body.system),
             messages: (body.messages || []).map(m => ({
                 role: m.role || 'user',
                 content: m.content, // string or array
             })),
         };
+    }
+
+    function normalizeAnthropicSystem(system) {
+        if (system == null) return null;
+        if (typeof system === 'string') {
+            return [{ type: 'text', text: system }];
+        }
+        if (Array.isArray(system)) {
+            return system
+                .filter(b => b && typeof b === 'object')
+                .map(b => ({ type: 'text', text: b.text || '' }));
+        }
+        // Unknown shape: fall through to a single-block render rather
+        // than dropping the system prompt entirely.
+        return [{ type: 'text', text: String(system) }];
+    }
+
+    // normalizeInstructionsField is the Responses-API equivalent of
+    // normalizeAnthropicSystem. `instructions` is documented as a
+    // string but in practice some clients post an array of structured
+    // blocks. We always return either null or an array of {type:'text',
+    // text} so the renderer's `Array.isArray(req.system)` branch
+    // always handles things consistently.
+    function normalizeInstructionsField(instructions) {
+        if (instructions == null) return null;
+        if (typeof instructions === 'string') {
+            return instructions ? [{ type: 'text', text: instructions }] : null;
+        }
+        if (Array.isArray(instructions)) {
+            const out = [];
+            for (const b of instructions) {
+                if (b == null) continue;
+                if (typeof b === 'string') {
+                    if (b) out.push({ type: 'text', text: b });
+                } else if (typeof b === 'object') {
+                    out.push({ type: 'text', text: b.text || '' });
+                }
+            }
+            return out.length ? out : null;
+        }
+        return [{ type: 'text', text: String(instructions) }];
     }
 
     function normalizeGeminiRequest(body) {

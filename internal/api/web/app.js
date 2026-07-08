@@ -2585,7 +2585,21 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
         if (!req) return { messages: [], complete: true, format: format };
         const messages = [];
         if (req.system) {
-            messages.push({ role: 'system', content: [{ type: 'text', text: typeof req.system === 'string' ? req.system : JSON.stringify(req.system) }] });
+            // req.system is now a list of {type:'text', text} blocks
+            // (string form is wrapped upstream by normalizeAnthropicSystem
+            // and the equivalent for chat_completions / responses). Each
+            // block becomes one inspect-msg with role 'system', so a
+            // Anthropic request with two system blocks renders as two
+            // distinct system turns rather than one mashed-together
+            // string.
+            const sysBlocks = Array.isArray(req.system) ? req.system : null;
+            if (sysBlocks && sysBlocks.length) {
+                for (const sb of sysBlocks) {
+                    messages.push({ role: 'system', content: [sb] });
+                }
+            } else if (typeof req.system === 'string') {
+                messages.push({ role: 'system', content: [{ type: 'text', text: req.system }] });
+            }
         }
         for (const m of (req.messages || [])) messages.push(m);
         return { messages: messages, complete: true, format: format };
@@ -2684,45 +2698,12 @@ function renderOneMessage(m) {
     return wrap;
 }
 
-function normaliseContentBlocks(content) {
-    if (content == null) return [];
-    if (typeof content === 'string') {
-        return content ? [{ type: 'text', text: content }] : [];
-    }
-    if (Array.isArray(content)) {
-        // Two shapes appear:
-        //   - OpenAI Chat: parts can be strings (rare) or {type, text,...}.
-        //   - Anthropic/OpenAI Responses: parts are objects {type, text, ...}.
-        //   - Gemini: parts are objects {text} | {functionCall}.
-        const out = [];
-        for (const p of content) {
-            if (p == null) continue;
-            if (typeof p === 'string') { out.push({ type: 'text', text: p }); continue; }
-            if (typeof p !== 'object') continue;
-            if (p.type === 'thinking' || p.type === 'thinking_delta' || p.thinking != null) {
-                out.push({ type: 'thinking', thinking: p.thinking || p.text || '' });
-            } else if (p.type === 'tool_use' || p.functionCall || p.tool_call || p.type === 'function_call') {
-                const fn = p.functionCall || p;
-                out.push({
-                    type: 'tool_use',
-                    id: p.id || '',
-                    name: (fn && (fn.name || fn.function)) || 'tool_use',
-                    input: fn && (fn.args || fn.input || fn.arguments) || {},
-                });
-            } else if (p.type === 'image' || p.type === 'input_image' || p.type === 'image_url') {
-                const url = (p.image_url && p.image_url.url) || p.url || p.source_url;
-                out.push({ type: 'image', url: url });
-            } else if (p.type === 'text' || p.text != null) {
-                out.push({ type: 'text', text: p.text || '' });
-            } else {
-                out.push({ type: 'raw', value: p });
-            }
-        }
-        return out;
-    }
-    // Single object — treat as a single block in its declared shape.
-    return [content];
-}
+// normaliseContentBlocks lives in content-normalise.js (loaded as a
+// <script> before this file via index.html) so it can be unit-tested
+// under Node without dragging in the DOM-heavy app.js. It's exposed
+// as the global `normaliseContentBlocks` and called directly where
+// needed.
+
 
 function renderContentBlock(block) {
     const w = document.createElement('div');
@@ -2756,6 +2737,41 @@ function renderContentBlock(block) {
         });
         w.appendChild(header);
         w.appendChild(body);
+    } else if (block.type === 'system_reminder') {
+        // Injected-by-client block (Claude Code wraps context in
+        // <system-reminder>, local commands in <local-command-caveat>,
+        // etc.). Render as a small dimmed callout with a label, body
+        // verbatim. Collapsed by default because the wrapped content is
+        // often long and the user usually just wants to see the
+        // surrounding user turn.
+        w.className = 'inspect-block inspect-block-system-reminder';
+        const header = document.createElement('button');
+        header.type = 'button';
+        header.className = 'inspect-block-system-reminder-header';
+        header.setAttribute('aria-expanded', 'false');
+        const arrow = document.createElement('span');
+        arrow.className = 'inspect-block-system-reminder-arrow';
+        arrow.textContent = '\u25B6';
+        const label = document.createElement('span');
+        label.className = 'inspect-block-system-reminder-label';
+        label.textContent = block.label || 'Injected';
+        const tagBadge = document.createElement('span');
+        tagBadge.className = 'inspect-block-system-reminder-tag';
+        tagBadge.textContent = '<' + (block.tag || 'injected') + '>';
+        header.appendChild(arrow);
+        header.appendChild(label);
+        header.appendChild(tagBadge);
+        const body = document.createElement('div');
+        body.className = 'inspect-block-system-reminder-body';
+        body.textContent = block.text || '';
+        header.addEventListener('click', function () {
+            const open = header.getAttribute('aria-expanded') === 'true';
+            header.setAttribute('aria-expanded', open ? 'false' : 'true');
+            body.classList.toggle('open', !open);
+            arrow.textContent = open ? '\u25B6' : '\u25BC';
+        });
+        w.appendChild(header);
+        w.appendChild(body);
     } else if (block.type === 'tool_use') {
         const name = document.createElement('div');
         name.className = 'inspect-block-tool-name';
@@ -2767,6 +2783,84 @@ function renderContentBlock(block) {
             ? JSON.stringify(input, null, 2)
             : (typeof input === 'string' ? input : '');
         w.appendChild(name); w.appendChild(args);
+    } else if (block.type === 'tool_result') {
+        // Anthropic tool_result block: a labelled body with the
+        // tool_use_id as the link back to the matching tool_use. The
+        // body is either a string (most bash/file outputs) or an
+        // array of blocks (when a tool returned images, e.g. a
+        // screenshot from a headless browser).
+        w.className = 'inspect-block inspect-block-tool-result'
+            + (block.is_error ? ' inspect-block-tool-result-error' : '');
+        const header = document.createElement('div');
+        header.className = 'inspect-block-tool-result-header';
+        const label = document.createElement('span');
+        label.className = 'inspect-block-tool-result-label';
+        label.textContent = block.is_error ? 'Tool result (error)' : 'Tool result';
+        if (block.tool_use_id) {
+            const id = document.createElement('span');
+            id.className = 'inspect-block-tool-result-id';
+            id.textContent = block.tool_use_id;
+            header.appendChild(label);
+            header.appendChild(id);
+        } else {
+            header.appendChild(label);
+        }
+        w.appendChild(header);
+        const body = document.createElement('div');
+        body.className = 'inspect-block-tool-result-body';
+        // Empty results get a quiet "(empty)" marker so the operator
+        // can tell the tool returned nothing from a missing block.
+        if (block.content == null || block.content === '') {
+            body.textContent = '(empty result)';
+            body.classList.add('inspect-block-tool-result-empty');
+        } else if (typeof block.content === 'string') {
+            const pre = document.createElement('pre');
+            pre.className = 'inspect-block-tool-result-pre';
+            pre.textContent = block.content;
+            body.appendChild(pre);
+        } else if (Array.isArray(block.content)) {
+            for (const c of block.content) {
+                if (c == null) continue;
+                if (typeof c === 'string') {
+                    const pre = document.createElement('pre');
+                    pre.className = 'inspect-block-tool-result-pre';
+                    pre.textContent = c;
+                    body.appendChild(pre);
+                } else if (typeof c === 'object') {
+                    if (c.type === 'text' || c.text != null) {
+                        const pre = document.createElement('pre');
+                        pre.className = 'inspect-block-tool-result-pre';
+                        pre.textContent = c.text || '';
+                        body.appendChild(pre);
+                    } else if (c.type === 'image' || c.type === 'input_image' || c.type === 'image_url') {
+                        const imgWrap = document.createElement('div');
+                        imgWrap.className = 'inspect-block-tool-result-image';
+                        const url = (c.image_url && c.image_url.url) || c.url || c.source_url;
+                        if (url) {
+                            const img = document.createElement('img');
+                            img.src = url;
+                            img.alt = '(tool result image)';
+                            imgWrap.appendChild(img);
+                        } else {
+                            imgWrap.textContent = '(image — no url)';
+                        }
+                        body.appendChild(imgWrap);
+                    } else {
+                        const pre = document.createElement('pre');
+                        pre.className = 'inspect-block-tool-result-pre';
+                        pre.textContent = JSON.stringify(c, null, 2);
+                        body.appendChild(pre);
+                    }
+                }
+            }
+        } else {
+            // Object content (rare). Dump as JSON for visibility.
+            const pre = document.createElement('pre');
+            pre.className = 'inspect-block-tool-result-pre';
+            pre.textContent = JSON.stringify(block.content, null, 2);
+            body.appendChild(pre);
+        }
+        w.appendChild(body);
     } else if (block.type === 'image') {
         const img = document.createElement('div');
         img.className = 'inspect-block-image';

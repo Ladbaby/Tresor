@@ -719,6 +719,64 @@ tr:hover {
     margin-bottom: 0;
 }
 
+/* Injected-by-client wrappers (Claude Code's <system-reminder>,
+   <local-command-caveat>, etc.) — dimmed callout, collapsed by default. */
+.inspect-block-system-reminder {
+    margin-bottom: 0.5rem;
+}
+.inspect-block-system-reminder-header {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: 1px solid rgba(108, 117, 125, 0.3);
+    border-radius: 4px;
+    padding: 0.2rem 0.5rem;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-style: normal;
+    font-weight: 500;
+    line-height: 1.4;
+}
+.inspect-block-system-reminder-header:hover {
+    background: rgba(108, 117, 125, 0.06);
+    color: var(--text-secondary);
+}
+.inspect-block-system-reminder-arrow {
+    display: inline-block;
+    font-size: 0.55rem;
+    line-height: 1;
+    width: 0.7em;
+    text-align: center;
+}
+.inspect-block-system-reminder-label {
+    /* e.g. "System reminder" */
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.inspect-block-system-reminder-tag {
+    font-family: monospace;
+    color: var(--text-muted);
+    opacity: 0.7;
+    margin-left: 0.2rem;
+}
+.inspect-block-system-reminder-body {
+    display: none;
+    margin-top: 0.4rem;
+    padding: 0.5rem 0.7rem;
+    background: rgba(108, 117, 125, 0.06);
+    border-left: 3px solid var(--text-muted);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-style: italic;
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+}
+.inspect-block-system-reminder-body.open {
+    display: block;
+}
+
 .inspect-block-tool {
     background: rgba(212, 158, 0, 0.08);
     border-left: 3px solid #d49e00;
@@ -742,6 +800,76 @@ tr:hover {
     padding: 0.4rem 0.5rem;
     white-space: pre-wrap;
     word-break: break-word;
+}
+
+/* Tool result (response to a tool_use). Visually paired with
+   .inspect-block-tool so an operator reading a multi-turn trace can
+   scan a result next to its call. Error variant uses a red border
+   for fast triage. */
+.inspect-block-tool-result {
+    background: rgba(26, 90, 184, 0.06);
+    border-left: 3px solid #1a5ab8;
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    margin-bottom: 0.5rem;
+}
+.inspect-block-tool-result-error {
+    background: rgba(220, 53, 69, 0.06);
+    border-left-color: #dc3545;
+}
+.inspect-block-tool-result-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.3rem;
+}
+.inspect-block-tool-result-label {
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    color: #1a5ab8;
+}
+.inspect-block-tool-result-error .inspect-block-tool-result-label {
+    color: #dc3545;
+}
+.inspect-block-tool-result-id {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    word-break: break-all;
+}
+.inspect-block-tool-result-body {
+    /* Body may contain <pre> and <div class="...image"> children. */
+}
+.inspect-block-tool-result-pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 0.4rem 0.5rem;
+    margin: 0 0 0.4rem 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 20rem;
+    overflow-y: auto;
+}
+.inspect-block-tool-result-pre:last-child { margin-bottom: 0; }
+.inspect-block-tool-result-empty {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 0.85rem;
+    padding: 0.2rem 0;
+}
+.inspect-block-tool-result-image {
+    margin: 0.3rem 0;
+}
+.inspect-block-tool-result-image img {
+    max-width: 100%;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
 }
 
 .inspect-block-image img {

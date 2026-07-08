@@ -21,6 +21,17 @@ const window = {};
 // eslint-disable-next-line no-new-func
 new Function('window', source)(window);
 
+// wrapper-detect.js is loaded as a script in the browser (before app.js).
+// Under Node we eval it in the same way. The IIFE attaches
+// `detectInjectedWrapper` to globalThis.
+const wrapperSource = fs.readFileSync(path.join(__dirname, 'wrapper-detect.js'), 'utf8');
+new Function(wrapperSource)();
+
+// content-normalise.js is loaded after wrapper-detect.js (because it
+// depends on the global `detectInjectedWrapper`). Order matters here.
+const normaliseSource = fs.readFileSync(path.join(__dirname, 'content-normalise.js'), 'utf8');
+new Function(normaliseSource)();
+
 const SSEReassembler = window.SSEReassembler;
 const normalizeRequest = window.normalizeRequest;
 const normalizeResponse = window.normalizeResponse;
@@ -265,12 +276,88 @@ function eq(name, got, want) {
         ],
     }, '/v1/chat/completions');
     // System-role messages are lifted into the top-level `system` slot;
-    // messages array should contain only the user turn here.
+    // messages array should contain only the user turn here. The system
+    // field is normalised to a list of {type:'text', text} blocks so the
+    // renderer can treat every format's system field the same way.
     check('norm-req: shape', req && req.messages && req.messages.length === 1,
         'messages=' + JSON.stringify(req && req.messages));
-    eq('norm-req: system extracted', req && req.system, 'You are helpful.');
+    check('norm-req: system extracted as blocks',
+        req && Array.isArray(req.system) && req.system.length === 1 &&
+        req.system[0].type === 'text' && req.system[0].text === 'You are helpful.',
+        'system=' + JSON.stringify(req && req.system));
     eq('norm-req: user message preserved',
         req && req.messages && req.messages[0] && req.messages[0].content, 'Hi');
+}
+
+// System field as a structured array of blocks (OpenAI Chat Completions
+// accepts this shape, and Anthropic also accepts it). Both should be
+// normalised to [{type:'text', text:'...'}] so the renderer doesn't
+// JSON.stringify the array.
+{
+    const req = normalizeRequest({
+        messages: [
+            { role: 'system', content: [
+                { type: 'text', text: 'You are helpful.' },
+                { type: 'text', text: 'Be concise.' },
+            ]},
+            { role: 'user', content: 'Hi' },
+        ],
+    }, '/v1/chat/completions');
+    check('norm-req-chat-array: system flattened',
+        req && Array.isArray(req.system) && req.system.length === 2 &&
+        req.system[0].text === 'You are helpful.' && req.system[1].text === 'Be concise.',
+        'system=' + JSON.stringify(req && req.system));
+}
+
+{
+    // Multiple system messages in chat_completions are preserved as a
+    // list of blocks (rather than concatenated into one string). This
+    // matches what the operator would want to see: the system prompt is
+    // often delivered in pieces and the pieces may have different
+    // metadata (cache_control) attached to each.
+    const req = normalizeRequest({
+        messages: [
+            { role: 'system', content: 'First.' },
+            { role: 'system', content: 'Second.' },
+            { role: 'user', content: 'Hi' },
+        ],
+    }, '/v1/chat/completions');
+    check('norm-req-chat-multi: multiple system blocks',
+        req && Array.isArray(req.system) && req.system.length === 2 &&
+        req.system[0].text === 'First.' && req.system[1].text === 'Second.',
+        'system=' + JSON.stringify(req && req.system));
+}
+
+{
+    // Anthropic system field as an array of {type:'text', text, cache_control}
+    // blocks. cache_control is dropped because the renderer doesn't
+    // surface it (it's a prompt-cache marker, not content) and
+    // including it would produce duplicate-looking blocks across turns.
+    const req = normalizeRequest({
+        system: [
+            { type: 'text', text: 'You are Claude Code.', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'Be concise.', cache_control: { type: 'ephemeral' } },
+        ],
+        messages: [{ role: 'user', content: 'hi' }],
+    }, '/v1/messages');
+    check('norm-req-anthropic-array: system flattened, cache_control dropped',
+        req && Array.isArray(req.system) && req.system.length === 2 &&
+        req.system[0].text === 'You are Claude Code.' &&
+        req.system[0].cache_control === undefined &&
+        req.system[1].text === 'Be concise.',
+        'system=' + JSON.stringify(req && req.system));
+}
+
+{
+    // Anthropic system as a plain string (the simpler request shape).
+    const req = normalizeRequest({
+        system: 'You are Claude Code.',
+        messages: [{ role: 'user', content: 'hi' }],
+    }, '/v1/messages');
+    check('norm-req-anthropic-string: wrapped in single block',
+        req && Array.isArray(req.system) && req.system.length === 1 &&
+        req.system[0].text === 'You are Claude Code.',
+        'system=' + JSON.stringify(req && req.system));
 }
 
 {
@@ -279,7 +366,10 @@ function eq(name, got, want) {
         messages: [{ role: 'user', content: 'hi' }],
     }, '/v1/messages');
     check('norm-req-anthropic: detected', req != null);
-    eq('norm-req-anthropic: system', req && req.system, 'helpful');
+    check('norm-req-anthropic: system is wrapped block array',
+        req && Array.isArray(req.system) && req.system.length === 1 &&
+        req.system[0].text === 'helpful',
+        'system=' + JSON.stringify(req && req.system));
 }
 
 // OpenAI Responses API request — input items do NOT carry an explicit
@@ -553,6 +643,166 @@ function eq(name, got, want) {
         norm.content[0].type === 'thinking' &&
         norm.content[0].thinking === 'Just thinking...',
         'blocks=' + JSON.stringify(norm && norm.content));
+}
+
+// ---------- Injected XML wrapper detection (Claude Code) ----------
+//
+// Claude Code's user messages sometimes contain content blocks whose
+// text is wrapped in <system-reminder>...</system-reminder> (or
+// similar wrapper tags). The inspector's normaliser tags those blocks
+// with type='system_reminder' so the renderer can show them as a
+// dimmed callout. We do NOT filter the wrapped content out — the
+// inspector's job is to show what was actually sent, and a malicious
+// client could use a system-reminder to influence the operator's
+// reading of the trace.
+{
+    const block = { type: 'text', text: '<system-reminder>As you answer the user\'s questions, you can use the following context:\n\n# foo</system-reminder>' };
+    const out = detectInjectedWrapper(block);
+    eq('wrapper: system-reminder type', out.type, 'system_reminder');
+    eq('wrapper: system-reminder tag', out.tag, 'system-reminder');
+    eq('wrapper: system-reminder label', out.label, 'System reminder');
+    eq('wrapper: system-reminder inner text', out.text, "As you answer the user's questions, you can use the following context:\n\n# foo");
+}
+{
+    // local-command-caveat is the tag Claude Code wraps around /local
+    // command instructions. Same treatment.
+    const out = detectInjectedWrapper({ type: 'text', text: '<local-command-caveat>caveat body here</local-command-caveat>' });
+    eq('wrapper: local-command-caveat', out.type, 'system_reminder');
+    eq('wrapper: local-command-caveat label', out.label, 'Local command caveat');
+}
+{
+    // Unknown wrapper tag (e.g. a tag the user typed in chat) must NOT
+    // be wrapped. Only the whitelist is touched.
+    const original = { type: 'text', text: '<my-custom-tag>hello</my-custom-tag>' };
+    const out = detectInjectedWrapper(original);
+    eq('wrapper: unknown tag passes through', out, original);
+}
+{
+    // Partial wrap (text starts with a tag but doesn't end with the
+    // matching close) must NOT be wrapped — only full wraps are tagged.
+    const original = { type: 'text', text: '<system-reminder>incomplete' };
+    const out = detectInjectedWrapper(original);
+    eq('wrapper: partial wrap passes through', out, original);
+}
+{
+    // Plain text passes through untouched.
+    const original = { type: 'text', text: 'hi' };
+    const out = detectInjectedWrapper(original);
+    eq('wrapper: plain text passes through', out, original);
+}
+{
+    // Non-text blocks (image, tool_use) must not be touched.
+    const img = { type: 'image', url: 'http://x' };
+    const tu = { type: 'tool_use', name: 'f' };
+    eq('wrapper: image untouched', detectInjectedWrapper(img), img);
+    eq('wrapper: tool_use untouched', detectInjectedWrapper(tu), tu);
+}
+{
+    // The exact scenario the user reported: a Claude Code turn where
+    // the system-reminder is the first text block and the actual user
+    // text is the second. Both blocks survive normaliseContentBlocks;
+    // only the first is re-tagged.
+    const blocks = [
+        { type: 'text', text: '<system-reminder>As you answer the user\'s questions, you can use the following context: # TodoWrite, # Read, # Bash</system-reminder>' },
+        { type: 'text', text: 'hi' },
+    ];
+    const normalised = blocks.map(detectInjectedWrapper);
+    eq('scenario: reminder block tagged', normalised[0].type, 'system_reminder');
+    eq('scenario: user text untouched', normalised[1].type, 'text');
+    eq('scenario: user text preserved', normalised[1].text, 'hi');
+}
+
+// ---------- tool_result normalisation ----------
+//
+// tool_result is the Anthropic user-turn block that carries the
+// output of a previous tool_use. The user's actual file
+// (claude_code_request.txt) has one of these — a string payload
+// (the contents of setup.sh) tagged with tool_use_id. The
+// normaliser must turn it into a structured block so the renderer
+// can show "Tool result (id)" + the body, instead of dumping the
+// whole object as a JSON <pre>.
+{
+    const blocks = normaliseContentBlocks([
+        {
+            type: 'tool_result',
+            tool_use_id: 'abc123',
+            content: '1\t#!/usr/bin/env bash\n2\t# Tresor — setup\n',
+            cache_control: { type: 'ephemeral' },
+        },
+    ]);
+    eq('tool_result: count', blocks.length, 1);
+    eq('tool_result: type', blocks[0].type, 'tool_result');
+    eq('tool_result: tool_use_id preserved', blocks[0].tool_use_id, 'abc123');
+    check('tool_result: content preserved as string',
+        typeof blocks[0].content === 'string' &&
+        blocks[0].content.indexOf('Tresor') !== -1,
+        'content=' + JSON.stringify(blocks[0].content).slice(0, 80));
+    check('tool_result: cache_control dropped (prompt-cache marker, not content)',
+        blocks[0].cache_control === undefined,
+        'block=' + JSON.stringify(blocks[0]));
+    eq('tool_result: is_error defaults false', blocks[0].is_error, false);
+}
+{
+    // is_error: true must be coerced to a boolean.
+    const blocks = normaliseContentBlocks([
+        { type: 'tool_result', tool_use_id: 'x', content: 'oops', is_error: 1 },
+    ]);
+    eq('tool_result: is_error coerced to bool', blocks[0].is_error, true);
+}
+{
+    // Array-of-blocks content (text + image) survives unchanged.
+    const blocks = normaliseContentBlocks([
+        {
+            type: 'tool_result',
+            tool_use_id: 'screenshot',
+            content: [
+                { type: 'text', text: 'captured 1280x720' },
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: '...' } },
+            ],
+        },
+    ]);
+    eq('tool_result-array: count', blocks.length, 1);
+    eq('tool_result-array: type', blocks[0].type, 'tool_result');
+    check('tool_result-array: content array preserved',
+        Array.isArray(blocks[0].content) && blocks[0].content.length === 2 &&
+        blocks[0].content[0].text === 'captured 1280x720' &&
+        blocks[0].content[1].source && blocks[0].content[1].source.media_type === 'image/png',
+        'content=' + JSON.stringify(blocks[0].content).slice(0, 100));
+}
+{
+    // Empty content should still produce a tool_result block (the
+    // renderer shows "(empty result)" rather than dropping the
+    // entry).
+    const blocks = normaliseContentBlocks([
+        { type: 'tool_result', tool_use_id: 'empty', content: '' },
+    ]);
+    eq('tool_result-empty: count', blocks.length, 1);
+    eq('tool_result-empty: type', blocks[0].type, 'tool_result');
+    eq('tool_result-empty: content is empty string', blocks[0].content, '');
+}
+{
+    // The exact user scenario: a Claude Code user-turn whose
+    // content is a tool_result carrying a long bash file as
+    // string. Must not fall through to {type:'raw'}.
+    const userContent = [
+        { type: 'tool_result', tool_use_id: '124JP', content: '#!/usr/bin/env bash\nset -e' },
+    ];
+    const blocks = normaliseContentBlocks(userContent);
+    eq('user-scenario: tool_result NOT raw',
+        blocks[0].type === 'tool_result' && blocks[0].type !== 'raw', true);
+    eq('user-scenario: content preserved',
+        typeof blocks[0].content === 'string' && blocks[0].content.indexOf('bash') !== -1, true);
+}
+{
+    // Mixed content: text + tool_result in the same user message
+    // should both be normalised correctly, in order.
+    const blocks = normaliseContentBlocks([
+        { type: 'text', text: 'hi' },
+        { type: 'tool_result', tool_use_id: 'x', content: 'result' },
+    ]);
+    eq('mixed: first block text', blocks[0].type, 'text');
+    eq('mixed: second block tool_result', blocks[1].type, 'tool_result');
+    eq('mixed: order preserved', blocks[1].content, 'result');
 }
 
 // ---------- summarise ----------
