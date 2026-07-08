@@ -292,11 +292,11 @@
                         <div class="settings-group">
                             <h3>Payload Capture</h3>
                             <p class="settings-description">
-                                When enabled, Tresor stores the <strong>raw incoming request body</strong> and the <strong>raw downstream response body</strong> for the most recent <span id="capture-max-entries">100</span> requests in memory. Click a row in the <em>Logs</em> tab to inspect prompts, messages, and tool calls. <em>Disabled by default</em> because it adds a small per-request memory cost. The capture is always taken <strong>before</strong> any plugin runs &mdash; you see the original client payload and the original downstream response, not the plugin-transformed version.
+                                When enabled, Tresor stores the <strong>raw incoming request body</strong> and the <strong>raw downstream response body</strong> for the most recent <span id="capture-max-entries">100</span> requests in memory. Click a row in the <em>Logs</em> tab to inspect prompts, messages, and tool calls. The capture is always taken <strong>before</strong> any plugin runs &mdash; you see the original client payload and the original downstream response, not the plugin-transformed version.
                             </p>
                             <div class="settings-row">
                                 <label class="checkbox-label">
-                                    <input type="checkbox" id="setting-capture-payloads"> Enable payload capture (inspect raw prompts and responses from the Logs tab)
+                                    <input type="checkbox" id="setting-capture-payloads"> Enable payload capture
                                 </label>
                             </div>
                         </div>
@@ -353,6 +353,10 @@
                         <h3 id="log-inspect-title">Inspect Log Entry</h3>
                         <div id="log-inspect-meta" class="inspect-meta"></div>
                         <div id="log-inspect-status" class="inspect-status"></div>
+                        <div class="inspect-view-toggle" role="tablist" aria-label="Inspector view">
+                            <button type="button" id="inspect-view-parsed" class="inspect-view-btn active" role="tab" aria-selected="true" data-view="parsed">Parsed</button>
+                            <button type="button" id="inspect-view-raw" class="inspect-view-btn" role="tab" aria-selected="false" data-view="raw">Raw</button>
+                        </div>
                         <div id="log-inspect-body" class="inspect-body"></div>
                     </div>
                 </div>
@@ -392,6 +396,7 @@
         </div>
     </div> <!-- /dashboard-view -->
 
-    <script src="app.js"></script>
+    <script src="sse-reassembler.js?v=7"></script>
+    <script src="app.js?v=7"></script>
 </body>
 </html>

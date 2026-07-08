@@ -189,6 +189,7 @@ func (e *Engine) recordAndCapture(entry *RequestLogEntry, buf captureBuffer) {
 		Model:               entry.Model,
 		ResolvedModel:       entry.ResolvedModel,
 		DownstreamID:        entry.DownstreamID,
+		DownstreamName:      entry.DownstreamName,
 		Status:              entry.Status,
 		RequestBody:         buf.Request,
 		ResponseBody:        buf.Response,

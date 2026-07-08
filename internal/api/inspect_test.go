@@ -19,17 +19,18 @@ func newTestRouterWithPayloadStore(t *testing.T) (*Router, *inspect.Store) {
 	store := inspect.New(10)
 	router.payloadStore = store
 	store.Add(inspect.Entry{
-		ID:                 42,
-		Path:               "/v1/chat/completions",
-		Method:             "POST",
-		Model:              "gpt-4o",
-		ResolvedModel:      "claude-sonnet-4-20250514",
-		DownstreamID:       "anthropic-main",
-		Status:             200,
-		RequestContentType: "application/json",
-		RequestBody:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`),
+		ID:                  42,
+		Path:                "/v1/chat/completions",
+		Method:              "POST",
+		Model:               "gpt-4o",
+		ResolvedModel:       "claude-sonnet-4-20250514",
+		DownstreamID:        "anthropic-main",
+		DownstreamName:      "Anthropic Production",
+		Status:              200,
+		RequestContentType:  "application/json",
+		RequestBody:         []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`),
 		ResponseContentType: "application/json",
-		ResponseBody:       []byte(`{"content":[{"text":"hi back"}]}`),
+		ResponseBody:        []byte(`{"content":[{"text":"hi back"}]}`),
 	})
 	return router, store
 }
@@ -51,9 +52,10 @@ func TestLogInspect_ReturnsCapturedEntry(t *testing.T) {
 		Method        string `json:"method"`
 		Model         string `json:"model"`
 		ResolvedModel string `json:"resolved_model"`
-		DownstreamID  string `json:"downstream_id"`
-		Status        int    `json:"status"`
-		Request       struct {
+		DownstreamID   string `json:"downstream_id"`
+		DownstreamName string `json:"downstream_name"`
+		Status         int    `json:"status"`
+		Request        struct {
 			ContentType string `json:"content_type"`
 			Body        string `json:"body"`
 		} `json:"request"`
@@ -82,6 +84,12 @@ func TestLogInspect_ReturnsCapturedEntry(t *testing.T) {
 	}
 	if got.Status != 200 {
 		t.Fatalf("expected status 200, got %d", got.Status)
+	}
+	if got.DownstreamID != "anthropic-main" {
+		t.Fatalf("expected downstream id 'anthropic-main', got %q", got.DownstreamID)
+	}
+	if got.DownstreamName != "Anthropic Production" {
+		t.Fatalf("expected downstream name 'Anthropic Production', got %q", got.DownstreamName)
 	}
 }
 

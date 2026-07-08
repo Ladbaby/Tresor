@@ -374,26 +374,28 @@ func (r *Router) handleLogInspect(w http.ResponseWriter, req *http.Request) {
 		Truncated   bool   `json:"truncated,omitempty"`
 	}
 	type inspectResponse struct {
-		ID            int         `json:"id"`
-		Timestamp     string      `json:"timestamp"`
-		Path          string      `json:"path"`
-		Method        string      `json:"method"`
-		Model         string      `json:"model,omitempty"`
-		ResolvedModel string      `json:"resolved_model,omitempty"`
-		DownstreamID  string      `json:"downstream_id,omitempty"`
-		Status        int         `json:"status"`
-		Request       inspectBody `json:"request"`
-		Response      inspectBody `json:"response"`
+		ID             int         `json:"id"`
+		Timestamp      string      `json:"timestamp"`
+		Path           string      `json:"path"`
+		Method         string      `json:"method"`
+		Model          string      `json:"model,omitempty"`
+		ResolvedModel  string      `json:"resolved_model,omitempty"`
+		DownstreamID   string      `json:"downstream_id,omitempty"`
+		DownstreamName string      `json:"downstream_name,omitempty"`
+		Status         int         `json:"status"`
+		Request        inspectBody `json:"request"`
+		Response       inspectBody `json:"response"`
 	}
 	writeJSON(w, http.StatusOK, inspectResponse{
-		ID:            entry.ID,
-		Timestamp:     entry.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
-		Path:          entry.Path,
-		Method:        entry.Method,
-		Model:         entry.Model,
-		ResolvedModel: entry.ResolvedModel,
-		DownstreamID:  entry.DownstreamID,
-		Status:        entry.Status,
+		ID:             entry.ID,
+		Timestamp:      entry.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
+		Path:           entry.Path,
+		Method:         entry.Method,
+		Model:          entry.Model,
+		ResolvedModel:  entry.ResolvedModel,
+		DownstreamID:   entry.DownstreamID,
+		DownstreamName: entry.DownstreamName,
+		Status:         entry.Status,
 		Request: inspectBody{
 			ContentType: entry.RequestContentType,
 			Body:        string(entry.RequestBody),

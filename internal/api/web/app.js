@@ -2196,6 +2196,7 @@ function initLogs() {
     // Load recent entries from the REST API (for initial render)
     fetchLogs();
     setupLogInspect();
+    setupInspectViewToggle();
 }
 
 /**
@@ -2224,6 +2225,13 @@ function setupLogInspect() {
  *   - anything else: render as plain text inside a <pre>
  * Truncation and missing-capture states are surfaced as banners.
  */
+// State for the inspector modal. The view toggle re-renders from
+// currentInspectData without re-fetching, so flipping between Raw and
+// Parsed is instant and never hits the network.
+let currentInspectData = null;
+let currentInspectPath = '';
+let currentInspectView = 'raw'; // 'raw' | 'parsed'
+
 async function openLogInspect(id) {
     const modal = document.getElementById('log-inspect-modal');
     const metaEl = document.getElementById('log-inspect-meta');
@@ -2232,6 +2240,9 @@ async function openLogInspect(id) {
     if (!modal || !metaEl || !statusEl || !bodyEl) return;
 
     // Reset state for the new entry
+    currentInspectData = null;
+    currentInspectView = 'parsed';
+    setActiveInspectView('parsed');
     metaEl.innerHTML = '';
     statusEl.className = 'inspect-status';
     statusEl.style.display = 'none';
@@ -2263,13 +2274,62 @@ async function openLogInspect(id) {
 
     // Header meta
     metaEl.innerHTML = renderInspectMeta(data);
-    // Two sections: raw client request, raw downstream response
+    currentInspectData = data;
+    currentInspectPath = data.path || '';
+    renderInspectBody();
+}
+
+function setupInspectViewToggle() {
+    const raw = document.getElementById('inspect-view-raw');
+    const parsed = document.getElementById('inspect-view-parsed');
+    if (!raw || !parsed) return;
+    if (raw._toggleWired) return;
+    raw._toggleWired = parsed._toggleWired = true;
+    raw.addEventListener('click', function () {
+        if (currentInspectView === 'raw') return;
+        setActiveInspectView('raw');
+        currentInspectView = 'raw';
+        renderInspectBody();
+    });
+    parsed.addEventListener('click', function () {
+        if (currentInspectView === 'parsed') return;
+        setActiveInspectView('parsed');
+        currentInspectView = 'parsed';
+        renderInspectBody();
+    });
+}
+
+function setActiveInspectView(view) {
+    const raw = document.getElementById('inspect-view-raw');
+    const parsed = document.getElementById('inspect-view-parsed');
+    if (!raw || !parsed) return;
+    if (view === 'raw') {
+        raw.classList.add('active'); raw.setAttribute('aria-selected', 'true');
+        parsed.classList.remove('active'); parsed.setAttribute('aria-selected', 'false');
+    } else {
+        parsed.classList.add('active'); parsed.setAttribute('aria-selected', 'true');
+        raw.classList.remove('active'); raw.setAttribute('aria-selected', 'false');
+    }
+}
+
+function renderInspectBody() {
+    const bodyEl = document.getElementById('log-inspect-body');
+    if (!bodyEl || !currentInspectData) return;
     bodyEl.innerHTML = '';
-    bodyEl.appendChild(renderInspectSection('Raw client request (before plugins)', data.request));
-    bodyEl.appendChild(renderInspectSection('Raw downstream response (before plugins)', data.response));
+    if (currentInspectView === 'parsed') {
+        bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request'));
+        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response'));
+    } else {
+        bodyEl.appendChild(renderInspectSection('Raw client request (before plugins)', currentInspectData.request));
+        bodyEl.appendChild(renderInspectSection('Raw downstream response (before plugins)', currentInspectData.response));
+    }
 }
 
 function renderInspectMeta(d) {
+    // Downstream: prefer the human-readable name when present, fall back
+    // to the ID. The engine populates downstream_name at capture time
+    // (see engine.recordAndCapture).
+    const downstream = d.downstream_name || d.downstream_id || '';
     const rows = [
         ['ID', String(d.id)],
         ['Method', d.method || ''],
@@ -2277,7 +2337,7 @@ function renderInspectMeta(d) {
         ['Status', d.status != null ? String(d.status) : ''],
         ['Model', d.model || ''],
         ['Resolved model', d.resolved_model || ''],
-        ['Downstream', d.downstream_id || ''],
+        ['Downstream', downstream],
         ['Captured at', d.timestamp || ''],
     ];
     return rows
@@ -2383,6 +2443,338 @@ function prettyPrintJSON(s) {
         // to see.
         return s;
     }
+}
+
+/**
+ * Build a parsed-section element. Reconstructs a streaming response into
+ * one human-readable view (text + thinking + tool_use blocks) without
+ * the wall of `data: {...}` lines that the Raw view produces.
+ *
+ * Falls back to the raw view when the body doesn't parse as JSON, when
+ * it isn't a recognised format, or when reassembly produces nothing
+ * (e.g. a non-streaming OpenAI Responses JSON body — still pretty-
+ * printed but reported in the parsed tab as a single shape).
+ */
+function renderInspectSectionParsed(title, body, path, kind) {
+    const wrap = document.createElement('div');
+    wrap.className = 'inspect-section';
+
+    const header = document.createElement('div');
+    header.className = 'inspect-section-header';
+    const h4 = document.createElement('h4');
+    h4.textContent = title;
+    header.appendChild(h4);
+
+    // Copy-to-clipboard button — same behaviour as the raw view.
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'copy-btn';
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', function () {
+        const text = body && body.body ? body.body : '';
+        copyTextFallback(text, copyBtn);
+    });
+    header.appendChild(copyBtn);
+    wrap.appendChild(header);
+
+    if (!body || !body.body) {
+        const empty = document.createElement('div');
+        empty.className = 'inspect-empty';
+        empty.textContent = '(no body captured)';
+        wrap.appendChild(empty);
+        return wrap;
+    }
+
+    const contentType = (body.content_type || '').toLowerCase();
+    let isStreaming = contentType.indexOf('text/event-stream') !== -1;
+    // Some servers lie about the content-type when streaming — they send
+    // `application/json` while the body is still SSE. Detect by shape:
+    // a body that begins with `data: ` and contains a blank line is SSE.
+    if (!isStreaming && body.body && /^\s*data:\s/m.test(body.body) &&
+        body.body.indexOf('\n\n') !== -1) {
+        isStreaming = true;
+    }
+
+    let parsedView = null;
+    let parseError = null;
+    try {
+        parsedView = buildParsedView(body.body, path, kind, isStreaming);
+    } catch (e) {
+        parseError = e && e.message ? e.message : String(e);
+        if (e && e.stack) console.error('[inspect] parser threw: ' + title + ' error=' + parseError);
+    }
+
+    if (parsedView && parsedView.messages && parsedView.messages.length) {
+        wrap.appendChild(renderParsedMessages(parsedView));
+        return wrap;
+    }
+    if (isStreaming && parsedView && parsedView.complete === false) {
+        // Mid-stream snapshot: render what we have, plus a note that the
+        // final response may differ.
+        const warn = document.createElement('div');
+        warn.className = 'inspect-fallback';
+        warn.textContent = 'Stream incomplete — showing partial reconstruction.';
+        wrap.appendChild(warn);
+        if (parsedView.messages && parsedView.messages.length) {
+            wrap.appendChild(renderParsedMessages(parsedView));
+        } else {
+            wrap.appendChild(buildRawFallback(body));
+        }
+        return wrap;
+    }
+    if (parseError || !parsedView) {
+        const note = document.createElement('div');
+        note.className = 'inspect-fallback';
+        note.textContent = 'Parser unavailable for this body'
+            + (parseError ? (': ' + parseError) : '')
+            + '. Showing raw.';
+        wrap.appendChild(note);
+        wrap.appendChild(buildRawFallback(body));
+        return wrap;
+    }
+    // Reached the empty-messages path: the parser ran without error but
+    // couldn't reconstruct any visible content. This happens when the
+    // reassembler produced a snapshot with all-empty text fields, or the
+    // body shape isn't one we recognise. Show the raw view so the
+    // operator isn't stranded.
+    const note = document.createElement('div');
+    note.className = 'inspect-fallback';
+    note.textContent = 'No parsed content reconstructed. Showing raw.';
+    wrap.appendChild(note);
+    wrap.appendChild(buildRawFallback(body));
+    return wrap;
+}
+
+/**
+ * Reconstruct a parsed view of a request or response body.
+ * For a streaming body, run it through the SSE reassembler; for a
+ * non-streaming JSON body, normalise once via the format-specific helpers.
+ * Returns { messages: [...], usage?: {...}, complete: bool, format?: string }
+ */
+function buildParsedView(rawBody, path, kind, isStreaming) {
+    // Try to detect the format even before parsing, so the error message
+    // can hint "unknown format" rather than "JSON parse error".
+    let preview = rawBody;
+    // Pull out the first SSE data line for format sniffing if streaming.
+    if (isStreaming) {
+        const first = firstSseDataLine(rawBody);
+        if (first) preview = first;
+    }
+
+    const format = (typeof detectRequestFormat === 'function')
+        ? detectRequestFormat(path, (function () { try { return JSON.parse(preview); } catch (e) { return {}; } })())
+        : null;
+
+    if (!format) {
+        return { messages: [], complete: false, format: null };
+    }
+
+    if (isStreaming) {
+        const r = new SSEReassembler();
+        r.feed(rawBody);
+        const snapshot = r.reconstruct();
+        if (!snapshot) return { messages: [], complete: false, format: format };
+        const norm = (kind === 'response')
+            ? normalizeResponse(snapshot, path)
+            : null;
+        if (norm) return { messages: [norm], usage: norm.usage || null, complete: true, format: format };
+        // For requests, snapshots from the reassembler don't apply — fall
+        // through to the non-streaming parser.
+        return { messages: [], complete: false, format: format };
+    }
+
+    let parsed;
+    try { parsed = JSON.parse(rawBody); }
+    catch (e) { return { messages: [], complete: false, format: format, error: 'JSON parse failed' }; }
+
+    if (kind === 'request') {
+        const req = normalizeRequest(parsed, path);
+        if (!req) return { messages: [], complete: true, format: format };
+        const messages = [];
+        if (req.system) {
+            messages.push({ role: 'system', content: [{ type: 'text', text: typeof req.system === 'string' ? req.system : JSON.stringify(req.system) }] });
+        }
+        for (const m of (req.messages || [])) messages.push(m);
+        return { messages: messages, complete: true, format: format };
+    }
+
+    // response
+    const resp = normalizeResponse(parsed, path);
+    if (!resp) return { messages: [], complete: true, format: format };
+    return { messages: [resp], usage: resp.usage || null, complete: true, format: format };
+}
+
+function firstSseDataLine(s) {
+    // Pull the first event's first non-empty data: line so format detection
+    // can run on a single sample, which is enough to identify the four
+    // supported protocols.
+    const lines = s.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.indexOf('data:') !== 0) continue;
+        let rest = line.slice(5);
+        if (rest.charAt(0) === ' ') rest = rest.slice(1);
+        if (rest && rest !== '[DONE]') return rest;
+    }
+    return null;
+}
+
+function buildRawFallback(body) {
+    const pre = document.createElement('pre');
+    pre.className = 'inspect-pre';
+    const ct = (body.content_type || '').toLowerCase();
+    if (ct.indexOf('application/json') !== -1) {
+        pre.classList.add('json');
+        pre.textContent = prettyPrintJSON(body.body);
+    } else if (ct.indexOf('text/event-stream') !== -1) {
+        pre.classList.add('sse');
+        pre.textContent = body.body;
+    } else {
+        pre.textContent = body.body;
+    }
+    return pre;
+}
+
+function renderParsedMessages(view) {
+    const out = document.createElement('div');
+    out.className = 'inspect-parsed';
+    for (const m of view.messages) {
+        out.appendChild(renderOneMessage(m));
+    }
+    if (view.usage) {
+        const u = view.usage;
+        const parts = [];
+        if (u.input_tokens != null)      parts.push('<strong>' + u.input_tokens + '</strong> in');
+        if (u.output_tokens != null)     parts.push('<strong>' + u.output_tokens + '</strong> out');
+        if (u.cache_read_input_tokens)    parts.push('<strong>' + u.cache_read_input_tokens + '</strong> cached');
+        if (parts.length) {
+            const d = document.createElement('div');
+            d.className = 'inspect-usage';
+            d.innerHTML = parts.join(' \u00b7 ');
+            out.appendChild(d);
+        }
+    }
+    return out;
+}
+
+function renderOneMessage(m) {
+    const wrap = document.createElement('div');
+    const role = (m.role || 'user').toLowerCase();
+    wrap.className = 'inspect-msg';
+
+    const header = document.createElement('div');
+    header.className = 'inspect-msg-header inspect-msg-role-' + role;
+    header.textContent = role;
+    wrap.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'inspect-msg-body';
+
+    // Content can be: string, array of blocks, array of OpenAI-style
+    // chat parts, image parts, etc. Normalise to a list of content blocks
+    // we can render.
+    const blocks = normaliseContentBlocks(m.content);
+    if (!blocks.length) {
+        const raw = m.raw;
+        if (raw) {
+            const pre = document.createElement('pre');
+            pre.className = 'inspect-block-tool-args';
+            pre.textContent = JSON.stringify(raw, null, 2);
+            body.appendChild(pre);
+        } else {
+            body.textContent = '(empty)';
+        }
+    } else {
+        for (const block of blocks) body.appendChild(renderContentBlock(block));
+    }
+    wrap.appendChild(body);
+    return wrap;
+}
+
+function normaliseContentBlocks(content) {
+    if (content == null) return [];
+    if (typeof content === 'string') {
+        return content ? [{ type: 'text', text: content }] : [];
+    }
+    if (Array.isArray(content)) {
+        // Two shapes appear:
+        //   - OpenAI Chat: parts can be strings (rare) or {type, text,...}.
+        //   - Anthropic/OpenAI Responses: parts are objects {type, text, ...}.
+        //   - Gemini: parts are objects {text} | {functionCall}.
+        const out = [];
+        for (const p of content) {
+            if (p == null) continue;
+            if (typeof p === 'string') { out.push({ type: 'text', text: p }); continue; }
+            if (typeof p !== 'object') continue;
+            if (p.type === 'thinking' || p.type === 'thinking_delta' || p.thinking != null) {
+                out.push({ type: 'thinking', thinking: p.thinking || p.text || '' });
+            } else if (p.type === 'tool_use' || p.functionCall || p.tool_call || p.type === 'function_call') {
+                const fn = p.functionCall || p;
+                out.push({
+                    type: 'tool_use',
+                    id: p.id || '',
+                    name: (fn && (fn.name || fn.function)) || 'tool_use',
+                    input: fn && (fn.args || fn.input || fn.arguments) || {},
+                });
+            } else if (p.type === 'image' || p.type === 'input_image' || p.type === 'image_url') {
+                const url = (p.image_url && p.image_url.url) || p.url || p.source_url;
+                out.push({ type: 'image', url: url });
+            } else if (p.type === 'text' || p.text != null) {
+                out.push({ type: 'text', text: p.text || '' });
+            } else {
+                out.push({ type: 'raw', value: p });
+            }
+        }
+        return out;
+    }
+    // Single object — treat as a single block in its declared shape.
+    return [content];
+}
+
+function renderContentBlock(block) {
+    const w = document.createElement('div');
+    w.className = 'inspect-block';
+    if (block.type === 'text') {
+        w.textContent = block.text || '';
+    } else if (block.type === 'thinking') {
+        const label = document.createElement('div');
+        label.className = 'inspect-block-thinking-label';
+        label.textContent = 'Thinking';
+        const body = document.createElement('div');
+        body.className = 'inspect-block-thinking';
+        body.textContent = block.thinking || block.text || '';
+        w.appendChild(label); w.appendChild(body);
+    } else if (block.type === 'tool_use') {
+        const name = document.createElement('div');
+        name.className = 'inspect-block-tool-name';
+        name.textContent = block.name ? ('Tool call: ' + block.name) : 'Tool call';
+        const args = document.createElement('pre');
+        args.className = 'inspect-block-tool-args';
+        const input = block.input;
+        args.textContent = (input && typeof input === 'object')
+            ? JSON.stringify(input, null, 2)
+            : (typeof input === 'string' ? input : '');
+        w.appendChild(name); w.appendChild(args);
+    } else if (block.type === 'image') {
+        const img = document.createElement('div');
+        img.className = 'inspect-block-image';
+        if (block.url) {
+            const i = document.createElement('img');
+            i.src = block.url;
+            i.alt = '(image)';
+            img.appendChild(i);
+        } else {
+            img.textContent = '(image)';
+        }
+        w.appendChild(img);
+    } else {
+        // raw / unknown
+        const pre = document.createElement('pre');
+        pre.className = 'inspect-block-tool-args';
+        pre.textContent = JSON.stringify(block.value || block, null, 2);
+        w.appendChild(pre);
+    }
+    return w;
 }
 
 /**
@@ -2545,7 +2937,11 @@ function buildLogEntry(entry, isNew) {
     // this via a delegated click handler on the container (see
     // setupLogInspect) rather than per-row listeners, so streaming SSE
     // updates do not pile up listeners.
-    if (capturePayloadsEnabled && entry.id !== undefined) {
+    if (capturePayloadsEnabled && entry.id !== undefined && entry.level !== 'debug') {
+        // Only request-level entries (not debug system messages) get the
+        // clickable class. Debug entries are router/rule/pipeline trace
+        // messages, not full request/response captures — clicking them
+        // would just open the modal with "not captured" noise.
         div.classList.add('clickable');
         div.title = 'Click to inspect raw request and response';
     }

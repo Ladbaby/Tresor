@@ -71,15 +71,18 @@ type Entry struct {
 	TruncatedRequest  bool `json:"truncated_request,omitempty"`
 	TruncatedResponse bool `json:"truncated_response,omitempty"`
 
-	// Path, Method, Model, ResolvedModel, DownstreamID, Status mirror fields
-	// from RequestLogEntry so the inspector can render a header without an
-	// extra /api/logs round-trip.
-	Path          string `json:"path,omitempty"`
-	Method        string `json:"method,omitempty"`
-	Model         string `json:"model,omitempty"`
-	ResolvedModel string `json:"resolved_model,omitempty"`
-	DownstreamID  string `json:"downstream_id,omitempty"`
-	Status        int    `json:"status,omitempty"`
+	// Path, Method, Model, ResolvedModel, DownstreamID, DownstreamName, Status
+	// mirror fields from RequestLogEntry so the inspector can render a
+	// header without an extra /api/logs round-trip. DownstreamName is the
+	// human-readable label (e.g. "OpenAI production") rather than the ID
+	// ("openai-prod") so the inspector header is self-explanatory.
+	Path           string `json:"path,omitempty"`
+	Method         string `json:"method,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
+	DownstreamID   string `json:"downstream_id,omitempty"`
+	DownstreamName string `json:"downstream_name,omitempty"`
+	Status         int    `json:"status,omitempty"`
 }
 
 // Store is the bounded ring of captured Entries keyed by log entry id. Safe

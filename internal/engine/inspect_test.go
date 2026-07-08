@@ -389,6 +389,53 @@ func hasID0(s *inspect.Store) bool {
 	return ok
 }
 
+// TestEngine_HandleProxy_DownstreamNameIsCaptured verifies that the human-
+// readable downstream name propagates into the inspect entry so the UI can
+// render "Anthropic Production" rather than "anthropic-prod" in the
+// inspector header.
+func TestEngine_HandleProxy_DownstreamNameIsCaptured(t *testing.T) {
+	s := newTestStore(t)
+	ts := newTestDownstream(t, 200, `{"choices":[{"message":{"content":"hi"}}]}`, nil)
+	defer ts.Close()
+	// Distinct id and name. The name is what the inspector header should
+	// surface — this is the regression case that motivated the field.
+	addDownstream(t, s, "anthropic-prod", "Anthropic Production", ts.URL, "key-ds1")
+	addOutputModelIDs(t, s, "anthropic-prod", "gpt-4o")
+
+	eng := New(s)
+	store2 := inspect.New(10)
+	eng.SetPayloadStore(store2)
+	eng.SetCapturePayloads(true)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Result().StatusCode)
+	}
+
+	var capturedID int
+	for i := 0; i < 100; i++ {
+		if _, ok := store2.Get(i); ok {
+			capturedID = i
+			break
+		}
+	}
+	captured, ok := store2.Get(capturedID)
+	if !ok {
+		t.Fatalf("no captured entry found")
+	}
+	if captured.DownstreamID != "anthropic-prod" {
+		t.Fatalf("expected downstream id 'anthropic-prod', got %q", captured.DownstreamID)
+	}
+	if captured.DownstreamName != "Anthropic Production" {
+		t.Fatalf("expected downstream name 'Anthropic Production', got %q", captured.DownstreamName)
+	}
+}
+
 // guard against unused-import warnings if the file shrinks.
 var _ = store.Rule{}
 var _ = json.Marshal

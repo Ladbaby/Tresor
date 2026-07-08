@@ -576,6 +576,173 @@ tr:hover {
 }
 
 /* ============================================================
+   Inspect view toggle (Raw / Parsed)
+   ============================================================ */
+
+.inspect-view-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-bottom: 0.75rem;
+    padding: 0.25rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    width: fit-content;
+}
+
+.inspect-view-btn {
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid transparent;
+    padding: 0.3rem 0.8rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.inspect-view-btn:hover {
+    color: var(--text-heading);
+}
+
+.inspect-view-btn.active {
+    background: var(--bg-secondary);
+    color: var(--text-heading);
+    border-color: var(--border-color);
+}
+
+.inspect-view-hint {
+    margin-left: 0.5rem;
+    padding-left: 0.5rem;
+    border-left: 1px solid var(--border-color);
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}
+
+/* Parsed view: messages and content blocks */
+
+.inspect-parsed {
+    font-size: 0.85rem;
+}
+
+.inspect-msg {
+    margin-bottom: 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    overflow: hidden;
+}
+
+.inspect-msg-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.inspect-msg-role-user    { background: rgba(26, 90, 184, 0.10); color: var(--color-success, #1a5ab8); border-left: 3px solid var(--color-success, #1a5ab8); }
+.inspect-msg-role-assistant { background: rgba(122, 90, 168, 0.10); color: #7a5aa8; border-left: 3px solid #7a5aa8; }
+.inspect-msg-role-system  { background: rgba(108, 117, 125, 0.10); color: var(--text-muted); border-left: 3px solid var(--text-muted); }
+.inspect-msg-role-tool    { background: rgba(212, 158, 0, 0.10); color: #d49e00; border-left: 3px solid #d49e00; }
+.inspect-msg-role-developer { background: rgba(108, 117, 125, 0.10); color: var(--text-muted); border-left: 3px solid var(--text-muted); }
+
+.inspect-msg-body {
+    padding: 0.6rem 0.75rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+}
+
+.inspect-msg-body img {
+    max-width: 100%;
+    border-radius: 4px;
+    margin-top: 0.5rem;
+}
+
+.inspect-block {
+    margin-bottom: 0.5rem;
+}
+.inspect-block:last-child { margin-bottom: 0; }
+
+.inspect-block-thinking {
+    background: rgba(108, 117, 125, 0.10);
+    border-left: 3px solid var(--text-muted);
+    padding: 0.4rem 0.6rem;
+    border-radius: 4px;
+    font-style: italic;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+}
+
+.inspect-block-thinking-label {
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+    font-style: normal;
+}
+
+.inspect-block-tool {
+    background: rgba(212, 158, 0, 0.08);
+    border-left: 3px solid #d49e00;
+    padding: 0.4rem 0.6rem;
+    border-radius: 4px;
+}
+
+.inspect-block-tool-name {
+    font-weight: 600;
+    color: #d49e00;
+    font-size: 0.8rem;
+    margin-bottom: 0.25rem;
+}
+
+.inspect-block-tool-args {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 0.4rem 0.5rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.inspect-block-image img {
+    max-width: 100%;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+}
+
+.inspect-fallback {
+    color: var(--text-muted);
+    font-style: italic;
+    padding: 0.5rem 0;
+    font-size: 0.85rem;
+}
+
+.inspect-usage {
+    display: flex;
+    gap: 1rem;
+    padding: 0.5rem 0.75rem;
+    margin-top: 0.5rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.inspect-usage strong {
+    color: var(--text-heading);
+}
+
+/* ============================================================
    Forms
    ============================================================ */
 
