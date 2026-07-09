@@ -2521,7 +2521,17 @@ function renderInspectSectionParsed(title, body, path, kind) {
         if (e && e.stack) console.error('[inspect] parser threw: ' + title + ' error=' + parseError);
     }
 
+    if (parsedView && parsedView.sections && parsedView.sections.length) {
+        // Request side: render in document order so the tools[] array
+        // lands at the same index it occupies in the raw body. The
+        // section walker handles system/tools/messages/unknown-key
+        // dispatch.
+        wrap.appendChild(renderParsedSections(parsedView.sections));
+        return wrap;
+    }
     if (parsedView && parsedView.messages && parsedView.messages.length) {
+        // Response side (and streaming fallback): flat message list
+        // with a possible usage footer.
         wrap.appendChild(renderParsedMessages(parsedView));
         return wrap;
     }
@@ -2605,34 +2615,207 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
     catch (e) { return { messages: [], complete: false, format: format, error: 'JSON parse failed' }; }
 
     if (kind === 'request') {
-        const req = normalizeRequest(parsed, path);
-        if (!req) return { messages: [], complete: true, format: format };
+        const sections = buildRequestSections(parsed, format, path);
+        // Legacy callers (and streaming code) still expect a `messages`
+        // array. The renderer uses `sections` directly when present and
+        // falls back to `messages` otherwise. Synthesise `messages` here
+        // so any future caller that only knows the old shape still works.
         const messages = [];
-        if (req.system) {
-            // req.system is now a list of {type:'text', text} blocks
-            // (string form is wrapped upstream by normalizeAnthropicSystem
-            // and the equivalent for chat_completions / responses). Each
-            // block becomes one inspect-msg with role 'system', so a
-            // Anthropic request with two system blocks renders as two
-            // distinct system turns rather than one mashed-together
-            // string.
-            const sysBlocks = Array.isArray(req.system) ? req.system : null;
-            if (sysBlocks && sysBlocks.length) {
-                for (const sb of sysBlocks) {
-                    messages.push({ role: 'system', content: [sb] });
+        for (const sec of sections) {
+            if (sec.type === 'system') {
+                for (const blk of (sec.content || [])) {
+                    messages.push({ role: 'system', content: [blk] });
                 }
-            } else if (typeof req.system === 'string') {
-                messages.push({ role: 'system', content: [{ type: 'text', text: req.system }] });
+            } else if (sec.type === 'messages') {
+                for (const m of (sec.messages || [])) messages.push(m);
             }
         }
-        for (const m of (req.messages || [])) messages.push(m);
-        return { messages: messages, complete: true, format: format };
+        return { messages: messages, sections: sections, complete: true, format: format };
     }
 
     // response
     const resp = normalizeResponse(parsed, path);
     if (!resp) return { messages: [], complete: true, format: format };
     return { messages: [resp], usage: resp.usage || null, complete: true, format: format };
+}
+
+// Walk the top-level keys of a parsed request body in their original
+// document order, emitting a flat list of sections the inspector can
+// render in place. The order preservation matters: an Anthropic
+// request has `system` then `tools` then `messages` (in the wild it
+// can also be `messages` first, then `system` after — see
+// claude-tap's prompt_snapshot for the full enumeration), and the
+// operator reading the inspector expects the tools[] array to sit
+// exactly where it does in the raw bytes.
+//
+// Keys we know how to render:
+//   - system / system_instruction: becomes a 'system' section
+//   - tools: becomes a 'tools' section
+//   - messages / input / contents: becomes a 'messages' section
+//   - model, stream, max_tokens, metadata, thinking, output_config, ...
+//     are skipped (they're already in the meta header or are
+//     operational controls the inspector doesn't need to show again)
+//   - anything else: pretty-printed as JSON under its own label
+function buildRequestSections(parsed, format, path) {
+    const sections = [];
+    if (!parsed || typeof parsed !== 'object') return sections;
+
+    // We still call normalizeRequest because it gives us the
+    // format-specific flat shapes (system blocks, normalised message
+    // list, etc.) without us duplicating the per-format logic.
+    const req = (typeof normalizeRequest === 'function')
+        ? normalizeRequest(parsed, path)
+        : null;
+
+    // Pre-extract the bits the renderers need so we don't re-parse
+    // the body inside the loop.
+    const sysBlocks = req ? (Array.isArray(req.system) ? req.system
+        : (typeof req.system === 'string' ? [{ type: 'text', text: req.system }] : null)) : null;
+    const messages = (req && Array.isArray(req.messages)) ? req.messages : null;
+    const tools = extractTools(parsed, format);
+
+    // Detect the request-side message key per format. Different formats
+    // store the user/assistant turns under different field names.
+    const messageKey = (format === 'gemini') ? 'contents'
+        : (format === 'responses') ? 'input'
+        : 'messages';
+
+    // Detect the system-prompt field. The Gemini format splits system
+    // out into system_instruction / systemInstruction; the others use
+    // `system` (string or list).
+    const systemKey = (format === 'gemini')
+        ? (parsed.system_instruction ? 'system_instruction' : (parsed.systemInstruction ? 'systemInstruction' : null))
+        : 'system';
+
+    // Keys we hide from the inspector — they're either redundant with
+    // the meta header or are operational controls that don't add
+    // value when shown in line with the messages.
+    const HIDDEN = {
+        model: 1, id: 1, stream: 1, max_tokens: 1, temperature: 1, top_p: 1,
+        top_k: 1, stop: 1, metadata: 1, output_config: 1, thinking: 1,
+        // Format-specific operational fields
+        anthropic_version: 1, metadata_user_id: 1, safety_identifier: 1,
+    };
+
+    const keys = Object.keys(parsed);
+    for (const k of keys) {
+        if (Object.prototype.hasOwnProperty.call(HIDDEN, k)) continue;
+        if (k === systemKey && sysBlocks && sysBlocks.length) {
+            sections.push({ type: 'system', content: sysBlocks });
+        } else if (k === 'tools' && tools.length) {
+            sections.push({ type: 'tools', tools: tools });
+        } else if (k === messageKey && messages && messages.length) {
+            sections.push({ type: 'messages', messages: messages });
+        } else if (k === systemKey || k === messageKey || k === 'tools') {
+            // The key is one of the recognised ones but has no
+            // content. Skip rather than printing an empty placeholder
+            // — operators can see absence in the raw view.
+            continue;
+        } else {
+            // Unrecognised top-level key. Show it as pretty JSON so
+            // nothing in the body is hidden from the operator.
+            const v = parsed[k];
+            if (v == null) continue;
+            if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+                sections.push({ type: 'json', label: k, value: v });
+            } else if (Array.isArray(v) && v.every(x => x == null || typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean')) {
+                // Trivial array of scalars — render compactly without
+                // wrapping in JSON braces.
+                sections.push({ type: 'json', label: k, value: v });
+            } else {
+                sections.push({ type: 'json', label: k, value: v });
+            }
+        }
+    }
+
+    // If nothing matched (e.g. the format normaliser didn't recognise
+    // the body), synthesise a single raw section so the caller still
+    // has something to show.
+    if (!sections.length) {
+        sections.push({ type: 'json', label: 'body', value: parsed });
+    }
+
+    return sections;
+}
+
+// Pull the available-tool definitions out of a request body, normalised
+// into a common {name, description, schema, raw} shape regardless of
+// which of the four supported formats the client spoke. Returns an
+// empty list when the body has no tools array or the format is
+// unknown. The returned order matches the wire order so the inspector
+// can render the tools section in the same position the operator would
+// see them in the raw body.
+//
+// Formats handled:
+//   - anthropic:      tools: [{name, description, input_schema}, ...]
+//   - chat_completions / responses:
+//                     tools: [{type:'function', function:{name, description, parameters}}, ...]
+//                     (also accepts the bare-function shape {name, description, parameters})
+//   - gemini:         tools: [{function_declarations: [{name, description, parameters}, ...]}, ...]
+//                     (falls back to {name} per group when no declarations)
+function extractTools(body, format) {
+    const out = [];
+    if (!body || typeof body !== 'object') return out;
+    if (format === 'anthropic') {
+        const tools = body.tools;
+        if (Array.isArray(tools)) {
+            for (const t of tools) {
+                if (!t || typeof t !== 'object') continue;
+                out.push({
+                    name: t.name || t.type || '',
+                    description: typeof t.description === 'string' ? t.description : '',
+                    schema: (t.input_schema && typeof t.input_schema === 'object') ? t.input_schema : {},
+                    raw: t,
+                });
+            }
+        }
+    } else if (format === 'chat_completions' || format === 'responses') {
+        const tools = body.tools;
+        if (Array.isArray(tools)) {
+            for (const t of tools) {
+                if (!t || typeof t !== 'object') continue;
+                // OpenAI Chat: {type:'function', function:{...}}.
+                // Some clients emit the bare function: {name, description, parameters}.
+                const fn = (t.function && typeof t.function === 'object') ? t.function : t;
+                const schema = (fn.parameters && typeof fn.parameters === 'object')
+                    ? fn.parameters
+                    : (fn.input_schema && typeof fn.input_schema === 'object' ? fn.input_schema : {});
+                out.push({
+                    name: fn.name || fn.type || t.name || t.type || '',
+                    description: typeof fn.description === 'string' ? fn.description : '',
+                    schema: schema,
+                    raw: t,
+                });
+            }
+        }
+    } else if (format === 'gemini') {
+        const tools = body.tools;
+        if (Array.isArray(tools)) {
+            for (const tool of tools) {
+                if (!tool || typeof tool !== 'object') continue;
+                const decls = tool.function_declarations || tool.functionDeclarations;
+                if (Array.isArray(decls)) {
+                    for (const d of decls) {
+                        if (!d || typeof d !== 'object') continue;
+                        out.push({
+                            name: d.name || '',
+                            description: typeof d.description === 'string' ? d.description : '',
+                            schema: (d.parameters && typeof d.parameters === 'object') ? d.parameters : {},
+                            raw: d,
+                        });
+                    }
+                } else {
+                    out.push({
+                        name: tool.name || tool.type || '',
+                        description: '',
+                        schema: {},
+                        raw: tool,
+                    });
+                }
+            }
+        }
+    }
+    return out;
 }
 
 function firstSseDataLine(s) {
@@ -2901,6 +3084,181 @@ function renderContentBlock(block) {
         w.appendChild(pre);
     }
     return w;
+}
+
+// Render the 'Available Tools' section. Each tool is collapsed by
+// default (name + short description only); clicking the header expands
+// it to reveal the full description (run through the markdown pipeline
+// when the toggle is on) and the input_schema pretty-printed as JSON.
+//
+// Long descriptions get truncated in the collapsed state to keep the
+// inspector scannable. We pick a single-line cut and append an ellipsis
+// so the operator can see at a glance how meaty each tool's docs are.
+function renderToolsSection(tools) {
+    const wrap = document.createElement('div');
+    wrap.className = 'inspect-tools';
+
+    if (!tools || !tools.length) {
+        const empty = document.createElement('div');
+        empty.className = 'inspect-tools-empty';
+        empty.textContent = '(no tools)';
+        wrap.appendChild(empty);
+        return wrap;
+    }
+
+    const summary = document.createElement('div');
+    summary.className = 'inspect-tools-summary';
+    summary.textContent = 'Available Tools (' + tools.length + ')';
+    wrap.appendChild(summary);
+
+    const list = document.createElement('div');
+    list.className = 'inspect-tools-list';
+    for (const t of tools) list.appendChild(renderToolCard(t));
+    wrap.appendChild(list);
+
+    return wrap;
+}
+
+function renderToolCard(tool) {
+    const card = document.createElement('div');
+    card.className = 'inspect-tool';
+
+    const header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'inspect-tool-header';
+    header.setAttribute('aria-expanded', 'false');
+
+    const arrow = document.createElement('span');
+    arrow.className = 'inspect-tool-arrow';
+    arrow.textContent = '▶'; // collapsed
+
+    const name = document.createElement('span');
+    name.className = 'inspect-tool-name';
+    name.textContent = tool.name || '(unnamed)';
+
+    const desc = document.createElement('span');
+    desc.className = 'inspect-tool-desc';
+    desc.textContent = shortDescription(tool.description);
+
+    header.appendChild(arrow);
+    header.appendChild(name);
+    header.appendChild(desc);
+    card.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'inspect-tool-body';
+
+    if (tool.description) {
+        // The full description often comes from a tool author and
+        // contains markdown (headings, code fences, lists). Pipe it
+        // through renderInspectText so the markdown toggle on the
+        // inspector header controls formatting here too.
+        const descWrap = document.createElement('div');
+        descWrap.className = 'inspect-tool-desc-full';
+        descWrap.appendChild(renderInspectText(tool.description, 'tool_description'));
+        body.appendChild(descWrap);
+    }
+
+    if (tool.schema && Object.keys(tool.schema).length) {
+        const schemaHeader = document.createElement('div');
+        schemaHeader.className = 'inspect-tool-schema-header';
+        schemaHeader.textContent = 'Input schema';
+        body.appendChild(schemaHeader);
+
+        const pre = document.createElement('pre');
+        pre.className = 'inspect-tool-schema';
+        pre.textContent = JSON.stringify(tool.schema, null, 2);
+        body.appendChild(pre);
+    }
+
+    header.addEventListener('click', function () {
+        const open = header.getAttribute('aria-expanded') === 'true';
+        header.setAttribute('aria-expanded', open ? 'false' : 'true');
+        body.classList.toggle('open', !open);
+        arrow.textContent = open ? '▶' : '▼';
+    });
+    card.appendChild(body);
+
+    return card;
+}
+
+// Compact one-line description for the collapsed card header. Tries
+// the first sentence (split on '. ' or newline), then falls back to a
+// character-based truncation. The full text is always preserved in
+// the expanded view, so this is just a UI hint.
+function shortDescription(desc) {
+    if (!desc) return '';
+    const s = String(desc).replace(/\s+/g, ' ').trim();
+    if (!s) return '';
+    if (s.length <= 120) return s;
+    // Prefer a sentence boundary if it falls in the first 200 chars.
+    const sentenceEnd = s.search(/[.!?]\s/);
+    if (sentenceEnd > 30 && sentenceEnd < 200) {
+        return s.slice(0, sentenceEnd + 1) + ' …';
+    }
+    return s.slice(0, 117) + '…';
+}
+
+// Walk a list of parsed-body sections in their original document
+// order, rendering each through the matching dispatch. The request
+// side now returns a section list (buildParsedView) so the tools[]
+// array lands at its actual JSON index instead of being hoisted
+// below the message list.
+//
+// section shapes:
+//   { type: 'system',      content: [block, ...] }     // existing system block(s)
+//   { type: 'tools',       tools: [{name, description, schema, raw}, ...] }
+//   { type: 'messages',    messages: [...] }            // existing message list (incl. usage)
+//   { type: 'usage',       usage: {...} }              // token-usage footer (messages carries its own)
+//   { type: 'json',        value: <unknown object> }   // pretty-printed JSON for unhandled top-level keys
+//   { type: 'skip' }                                    // placeholder, no output (e.g. model)
+function renderParsedSections(sections) {
+    const out = document.createElement('div');
+    out.className = 'inspect-parsed';
+    for (const sec of sections) {
+        if (!sec || sec.type === 'skip') continue;
+        if (sec.type === 'system') {
+            // One or more system turns — render each as its own
+            // .inspect-msg (consistent with the old behaviour where
+            // an Anthropic request with two system blocks became two
+            // system messages).
+            for (const blk of (sec.content || [])) {
+                out.appendChild(renderOneMessage({ role: 'system', content: [blk] }));
+            }
+        } else if (sec.type === 'tools') {
+            out.appendChild(renderToolsSection(sec.tools || []));
+        } else if (sec.type === 'messages') {
+            for (const m of (sec.messages || [])) out.appendChild(renderOneMessage(m));
+            if (sec.usage) {
+                const u = sec.usage;
+                const parts = [];
+                if (u.input_tokens != null)       parts.push('<strong>' + u.input_tokens + '</strong> in');
+                if (u.output_tokens != null)      parts.push('<strong>' + u.output_tokens + '</strong> out');
+                if (u.cache_read_input_tokens)    parts.push('<strong>' + u.cache_read_input_tokens + '</strong> cached');
+                if (parts.length) {
+                    const d = document.createElement('div');
+                    d.className = 'inspect-usage';
+                    d.innerHTML = parts.join(' · ');
+                    out.appendChild(d);
+                }
+            }
+        } else if (sec.type === 'json') {
+            const wrap = document.createElement('div');
+            wrap.className = 'inspect-section-json';
+            if (sec.label) {
+                const h = document.createElement('div');
+                h.className = 'inspect-section-json-label';
+                h.textContent = sec.label;
+                wrap.appendChild(h);
+            }
+            const pre = document.createElement('pre');
+            pre.className = 'inspect-pre json';
+            pre.textContent = prettyPrintJSON(JSON.stringify(sec.value));
+            wrap.appendChild(pre);
+            out.appendChild(wrap);
+        }
+    }
+    return out;
 }
 
 // Render a free-text body. Default is plain textContent (preserves
