@@ -902,6 +902,198 @@ tr:hover {
 }
 
 /* ============================================================
+   Inspect: markdown rendering toggle (sits above Parsed view)
+   ============================================================ */
+
+.inspect-md-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0 0 0.6rem 0;
+    padding: 0.3rem 0.6rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.inspect-md-toggle input[type="checkbox"] {
+    /* Use the browser default checkbox but make it slightly bigger so
+       it visually matches the .inspect-view-btn row above. */
+    margin: 0;
+    cursor: pointer;
+}
+
+.inspect-md-toggle:hover {
+    border-color: var(--text-muted);
+}
+
+.inspect-md-toggle-label {
+    font-weight: 500;
+}
+
+/* ============================================================
+   Inspect: markdown-rendered content (when toggle is on)
+   ============================================================
+   The default .inspect-msg-body applies white-space: pre-wrap so plain
+   text preserves whitespace. For markdown we need normal flow with
+   real <p>/<ul>/<pre> elements. Override that here, scoped under
+   .inspect-md so plain-text blocks remain unaffected. */
+
+.inspect-text-plain {
+    /* Plain-text fallback inside text/thinking/system_reminder blocks.
+       Acts like the original textContent write: preserves whitespace
+       and line breaks within the message body. */
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.inspect-md {
+    /* Reset the surrounding .inspect-msg-body pre-wrap so block
+       elements flow normally. */
+    white-space: normal;
+    word-break: normal;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+
+.inspect-md > *:first-child { margin-top: 0; }
+.inspect-md > *:last-child  { margin-bottom: 0; }
+
+.inspect-md p {
+    margin: 0 0 0.6em 0;
+}
+
+.inspect-md h1,
+.inspect-md h2,
+.inspect-md h3,
+.inspect-md h4,
+.inspect-md h5,
+.inspect-md h6 {
+    margin: 0.8em 0 0.4em 0;
+    font-weight: 600;
+    line-height: 1.25;
+    color: var(--text-heading);
+}
+
+.inspect-md h1 { font-size: 1.2em; }
+.inspect-md h2 { font-size: 1.1em; }
+.inspect-md h3 { font-size: 1.0em; }
+.inspect-md h4,
+.inspect-md h5,
+.inspect-md h6 { font-size: 0.95em; }
+
+.inspect-md ul,
+.inspect-md ol {
+    margin: 0 0 0.6em 0;
+    padding-left: 1.5em;
+}
+
+.inspect-md li {
+    margin-bottom: 0.15em;
+}
+
+/* GFM task lists */
+.inspect-md input[type="checkbox"] {
+    margin-right: 0.3em;
+    /* marked emits readonly disabled checkboxes; honor that. */
+}
+
+.inspect-md blockquote {
+    margin: 0 0 0.6em 0;
+    padding: 0.3em 0.7em;
+    border-left: 3px solid var(--border-color);
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border-radius: 0 4px 4px 0;
+}
+
+.inspect-md code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+    padding: 0.1em 0.3em;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    color: var(--text-heading);
+}
+
+.inspect-md pre {
+    margin: 0 0 0.6em 0;
+    padding: 0.6rem 0.7rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    overflow-x: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    white-space: pre;
+}
+
+.inspect-md pre code {
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 0;
+    font-size: inherit;
+    color: inherit;
+    white-space: pre;
+}
+
+.inspect-md a {
+    color: var(--color-link, #1a5ab8);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.inspect-md a:hover {
+    color: var(--color-link-hover, #0d4a99);
+}
+
+.inspect-md hr {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 1em 0;
+}
+
+.inspect-md table {
+    border-collapse: collapse;
+    margin: 0 0 0.6em 0;
+    font-size: 0.85em;
+}
+
+.inspect-md th,
+.inspect-md td {
+    border: 1px solid var(--border-color);
+    padding: 0.3em 0.6em;
+    text-align: left;
+}
+
+.inspect-md th {
+    background: var(--bg-secondary);
+    font-weight: 600;
+}
+
+.inspect-md img {
+    max-width: 100%;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    margin: 0.3em 0;
+}
+
+/* Markdown rendered inside thinking bodies: italic + dimmed, but
+   still allow headings/links to use the standard colors when a model
+   emits structured notes. */
+.inspect-block-thinking .inspect-md {
+    color: var(--text-secondary);
+}
+
+/* ============================================================
    Forms
    ============================================================ */
 

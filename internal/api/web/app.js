@@ -2217,6 +2217,10 @@ function setupLogInspect() {
 let currentInspectData = null;
 let currentInspectPath = '';
 let currentInspectView = 'raw'; // 'raw' | 'parsed'
+// Single global toggle: when true, text/thinking/tool_result text bodies
+// in the Parsed view are rendered as markdown via marked+DOMPurify instead
+// of as plain textContent. Default to true, since it is most user-friendly
+let currentInspectMarkdown = true;
 
 async function openLogInspect(id) {
     const modal = document.getElementById('log-inspect-modal');
@@ -2228,6 +2232,7 @@ async function openLogInspect(id) {
     // Reset state for the new entry
     currentInspectData = null;
     currentInspectView = 'parsed';
+    currentInspectMarkdown = true;
     setActiveInspectView('parsed');
     metaEl.innerHTML = '';
     statusEl.className = 'inspect-status';
@@ -2299,12 +2304,49 @@ function renderInspectBody() {
     if (!bodyEl || !currentInspectData) return;
     bodyEl.innerHTML = '';
     if (currentInspectView === 'parsed') {
+        bodyEl.appendChild(buildInspectMarkdownToggle());
         bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request'));
         bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response'));
     } else {
         bodyEl.appendChild(renderInspectSection('Raw client request (before plugins)', currentInspectData.request));
         bodyEl.appendChild(renderInspectSection('Raw downstream response (before plugins)', currentInspectData.response));
     }
+}
+
+// Build the small "Render as Markdown" checkbox that sits at the top of
+// the Parsed view. When toggled, re-renders the body in place so the
+// current view (already loaded payloads) is just re-painted; no
+// re-fetch. The flag is global for the current modal — flipping it
+// affects every text/thinking/tool_result block on both Request and
+// Response.
+function buildInspectMarkdownToggle() {
+    const wrap = document.createElement('label');
+    wrap.className = 'inspect-md-toggle';
+    wrap.title = 'Render text/thinking/tool result bodies as Markdown (bold, code, lists, etc.). DOMPurify sanitizes the output.';
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.id = 'inspect-md-toggle-cb';
+    cb.checked = !!currentInspectMarkdown;
+    cb.addEventListener('change', function () {
+        currentInspectMarkdown = cb.checked;
+        // Re-paint only the parsed children, not the toggle itself, so
+        // the checkbox doesn't flicker out from under the user.
+        const bodyEl = document.getElementById('log-inspect-body');
+        if (!bodyEl) return;
+        // Remove everything after the toggle and re-render.
+        while (bodyEl.children.length > 1) bodyEl.removeChild(bodyEl.lastChild);
+        bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request'));
+        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response'));
+    });
+
+    const span = document.createElement('span');
+    span.className = 'inspect-md-toggle-label';
+    span.textContent = 'Render text blocks as Markdown';
+
+    wrap.appendChild(cb);
+    wrap.appendChild(span);
+    return wrap;
 }
 
 function renderInspectMeta(d) {
@@ -2691,7 +2733,7 @@ function renderContentBlock(block) {
     const w = document.createElement('div');
     w.className = 'inspect-block';
     if (block.type === 'text') {
-        w.textContent = block.text || '';
+        w.appendChild(renderInspectText(block.text, 'text'));
     } else if (block.type === 'thinking') {
         // Thinking blocks are collapsible: collapsed by default. The
         // header row carries the toggle so the toggle target is the
@@ -2710,7 +2752,7 @@ function renderContentBlock(block) {
         header.appendChild(label);
         const body = document.createElement('div');
         body.className = 'inspect-block-thinking';
-        body.textContent = block.thinking || block.text || '';
+        body.appendChild(renderInspectText(block.thinking || block.text || '', 'thinking'));
         header.addEventListener('click', function () {
             const open = header.getAttribute('aria-expanded') === 'true';
             header.setAttribute('aria-expanded', open ? 'false' : 'true');
@@ -2745,7 +2787,7 @@ function renderContentBlock(block) {
         header.appendChild(tagBadge);
         const body = document.createElement('div');
         body.className = 'inspect-block-system-reminder-body';
-        body.textContent = block.text || '';
+        body.appendChild(renderInspectText(block.text || '', 'system_reminder'));
         header.addEventListener('click', function () {
             const open = header.getAttribute('aria-expanded') === 'true';
             header.setAttribute('aria-expanded', open ? 'false' : 'true');
@@ -2798,22 +2840,18 @@ function renderContentBlock(block) {
         } else if (typeof block.content === 'string') {
             const pre = document.createElement('pre');
             pre.className = 'inspect-block-tool-result-pre';
-            pre.textContent = block.content;
-            body.appendChild(pre);
+            body.appendChild(renderInspectText(block.content, 'tool_result'));
         } else if (Array.isArray(block.content)) {
             for (const c of block.content) {
                 if (c == null) continue;
                 if (typeof c === 'string') {
-                    const pre = document.createElement('pre');
-                    pre.className = 'inspect-block-tool-result-pre';
-                    pre.textContent = c;
-                    body.appendChild(pre);
+                    body.appendChild(renderInspectText(c, 'tool_result'));
+                    // Note: was a <pre> for monospace alignment, but markdown rendering
+                    // expects block-flow elements. renderInspectText returns a <div>; we
+                    // rely on .inspect-md styling to keep readability.
                 } else if (typeof c === 'object') {
                     if (c.type === 'text' || c.text != null) {
-                        const pre = document.createElement('pre');
-                        pre.className = 'inspect-block-tool-result-pre';
-                        pre.textContent = c.text || '';
-                        body.appendChild(pre);
+                        body.appendChild(renderInspectText(c.text || '', 'tool_result'));
                     } else if (c.type === 'image' || c.type === 'input_image' || c.type === 'image_url') {
                         const imgWrap = document.createElement('div');
                         imgWrap.className = 'inspect-block-tool-result-image';
@@ -2863,6 +2901,52 @@ function renderContentBlock(block) {
         w.appendChild(pre);
     }
     return w;
+}
+
+// Render a free-text body. Default is plain textContent (preserves
+// the historical behaviour where the operator sees the exact bytes the
+// client sent). When the markdown toggle is on, pipe the text through
+// marked -> DOMPurify so the operator sees the formatted result while
+// staying safe against XSS in untrusted LLM output. CSS targets the
+// returned element via `.inspect-md` for spacing overrides.
+function renderInspectText(text, kind) {
+    const s = text == null ? '' : String(text);
+    if (!currentInspectMarkdown) {
+        const pre = document.createElement('div');
+        pre.className = 'inspect-text-plain';
+        pre.textContent = s;
+        return pre;
+    }
+    const wrap = document.createElement('div');
+    wrap.className = 'inspect-md inspect-md-' + (kind || 'text');
+    try {
+        // marked v12 exposes marked.parse(); DOMPurify strips scripts,
+        // on* handlers, and javascript:/data: URLs.
+        const rawHtml = (window.marked && typeof window.marked.parse === 'function')
+            ? window.marked.parse(s, { gfm: true, breaks: true })
+            : null;
+        const safe = (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function')
+            ? DOMPurify.sanitize(rawHtml != null ? rawHtml : esc(s), {
+                USE_PROFILES: { html: true },
+                ADD_ATTR: ['target', 'rel'],
+            })
+            : esc(s);
+        wrap.innerHTML = safe;
+        // Force links to open in a new tab so the inspector stays open.
+        // DOMPurify strips href=javascript: but doesn't add rel/target.
+        wrap.querySelectorAll('a').forEach(function (a) {
+            a.setAttribute('target', '_blank');
+            a.setAttribute('rel', 'noopener noreferrer');
+        });
+        return wrap;
+    } catch (e) {
+        // Library missing or threw — fall back to plain text so the
+        // operator still sees the body.
+        const pre = document.createElement('div');
+        pre.className = 'inspect-text-plain';
+        pre.textContent = s;
+        return pre;
+    }
 }
 
 /**
