@@ -141,9 +141,12 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		// Push the change to the running engine live.
 		r.engine.SetProxyMode(mode)
 		r.engine.SetProxyAuthKeys(incoming.ProxyAPIKeys)
-		// Push the capture-payloads flag live; this controls whether the
-		// engine snapshots raw request/response bodies for the inspector.
-		r.engine.SetCapturePayloads(incoming.CapturePayloads)
+		// Attach/detach the inspector's payload store to match the toggle.
+		if incoming.CapturePayloads && r.payloadStore != nil {
+			r.engine.SetPayloadStore(r.payloadStore)
+		} else {
+			r.engine.SetPayloadStore(nil)
+		}
 		if r.iconFetcher != nil {
 			r.iconFetcher.SetProxyMode(mode)
 		}

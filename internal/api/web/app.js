@@ -2039,9 +2039,8 @@ async function loadSettings() {
         const captureEl = document.getElementById('setting-capture-payloads');
         if (captureEl) {
             captureEl.checked = !!cfg.capture_payloads;
+            capturePayloadsEnabled = captureEl.checked;
         }
-        // Update the runtime flag that gates row clickability.
-        capturePayloadsEnabled = !!cfg.capture_payloads;
     } catch (err) {
         statusEl.textContent = 'Failed to load settings: ' + err.message;
         statusEl.className = 'settings-status error';
@@ -2183,15 +2182,7 @@ let logSSE = null;          // current EventSource connection
 let logEntries = [];        // in-memory log entries (mirrors server buffer)
 let logActive = false;      // whether the Logs tab is currently visible
 let logPaused = false;      // whether log rendering is paused
-// capturePayloadsEnabled is populated from /api/config in loadSettings().
-// When true, log rows are clickable and the inspect modal is enabled.
-let capturePayloadsEnabled = false;
 
-/**
- * Initialize the Logs tab. Called once on dashboard load.
- * Sets up SSE connection management, loads initial entries, and wires the
- * delegated click handler for the inspector modal.
- */
 function initLogs() {
     // Load recent entries from the REST API (for initial render)
     fetchLogs();
@@ -2199,15 +2190,10 @@ function initLogs() {
     setupInspectViewToggle();
 }
 
-/**
- * Wire a single delegated click handler on the log stream container.
- * When a clickable row is clicked we open the inspector modal. This is
- * delegated so streaming SSE updates do not pile up listeners.
- */
+// Delegated click handler for clickable log rows. initLogs runs once.
 function setupLogInspect() {
     const container = document.getElementById('logs-stream');
-    if (!container || container._inspectWired) return;
-    container._inspectWired = true;
+    if (!container) return;
     container.addEventListener('click', function (ev) {
         const row = ev.target.closest('.log-entry.clickable');
         if (!row) return;
@@ -2283,16 +2269,12 @@ function setupInspectViewToggle() {
     const raw = document.getElementById('inspect-view-raw');
     const parsed = document.getElementById('inspect-view-parsed');
     if (!raw || !parsed) return;
-    if (raw._toggleWired) return;
-    raw._toggleWired = parsed._toggleWired = true;
     raw.addEventListener('click', function () {
-        if (currentInspectView === 'raw') return;
         setActiveInspectView('raw');
         currentInspectView = 'raw';
         renderInspectBody();
     });
     parsed.addEventListener('click', function () {
-        if (currentInspectView === 'parsed') return;
         setActiveInspectView('parsed');
         currentInspectView = 'parsed';
         renderInspectBody();

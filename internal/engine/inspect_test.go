@@ -79,7 +79,7 @@ func TestEngine_HandleProxy_CaptureReflectsPreTransformerBytes(t *testing.T) {
 	eng.SetRegistry(&mockRegistryWithMutator{})
 	store2 := inspect.New(10)
 	eng.SetPayloadStore(store2)
-	eng.SetCapturePayloads(true)
+	// capture is on (store attached).
 
 	originalBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(originalBody)))
@@ -152,8 +152,8 @@ func TestEngine_HandleProxy_CaptureDisabledStaysAtZeroCost(t *testing.T) {
 	eng.SetRegistry(&mockRegistryWithMutator{})
 	store2 := inspect.New(10)
 	eng.SetPayloadStore(store2)
-	// capture off
-	eng.SetCapturePayloads(false)
+	// capture off — detach the store so the engine sees nil.
+	eng.SetPayloadStore(nil)
 
 	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
@@ -184,7 +184,7 @@ func TestEngine_HandleProxy_ToggleCaptureAtRuntime(t *testing.T) {
 	eng.SetPayloadStore(store2)
 	// Start with capture OFF, just like a fresh daemon with
 	// capture_payloads: false in config.yaml.
-	eng.SetCapturePayloads(false)
+	eng.SetPayloadStore(nil)
 
 	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
 
@@ -196,11 +196,10 @@ func TestEngine_HandleProxy_ToggleCaptureAtRuntime(t *testing.T) {
 		t.Fatalf("after request 1 (capture off) expected empty store, got %d entries", got)
 	}
 
-	// Operator flips the toggle in the UI; the API handler does
-	// r.engine.SetCapturePayloads(true). Mirror that here.
-	eng.SetCapturePayloads(true)
-	if !eng.CapturePayloads() {
-		t.Fatalf("CapturePayloads() returned false after SetCapturePayloads(true)")
+	// "operator flips the toggle" → engine now sees the store.
+	eng.SetPayloadStore(store2)
+	if eng.payloadStore == nil {
+		t.Fatalf("engine.payloadStore nil after re-attach")
 	}
 
 	// Request 2: capture is on, store must now contain an entry.
@@ -219,8 +218,8 @@ func TestEngine_HandleProxy_ToggleCaptureAtRuntime(t *testing.T) {
 		t.Fatalf("after request 3 (capture on) expected 2 entries in store, got %d", got)
 	}
 
-// Flip back off, verify the next request is not captured.
-	eng.SetCapturePayloads(false)
+// Flip back off (detach store) and verify the next request is not captured.
+	eng.SetPayloadStore(nil)
 	req4 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
 	w4 := httptest.NewRecorder()
 	eng.HandleProxy(w4, req4)
@@ -266,8 +265,8 @@ func TestEngine_HandleProxy_StreamingToggleCaptureAtRuntime(t *testing.T) {
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryWithMutator{})
 	store2 := inspect.New(10)
-	eng.SetPayloadStore(store2)
-	eng.SetCapturePayloads(false)
+	// capture off — no store attached.
+	eng.SetPayloadStore(nil)
 
 	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 
@@ -279,8 +278,8 @@ func TestEngine_HandleProxy_StreamingToggleCaptureAtRuntime(t *testing.T) {
 		t.Fatalf("after stream 1 (capture off) expected empty store, got %d", got)
 	}
 
-	// Toggle on
-	eng.SetCapturePayloads(true)
+	// Toggle on — attach the store.
+	eng.SetPayloadStore(store2)
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
 	w2 := httptest.NewRecorder()
 	eng.HandleProxy(w2, req2)
@@ -336,7 +335,7 @@ func TestEngine_HandleProxy_StreamingCaptureTeesRawBytes(t *testing.T) {
 	eng.SetRegistry(&mockRegistryWithMutator{})
 	store2 := inspect.New(10)
 	eng.SetPayloadStore(store2)
-	eng.SetCapturePayloads(true)
+	// capture is on (store attached).
 
 	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
@@ -405,7 +404,7 @@ func TestEngine_HandleProxy_DownstreamNameIsCaptured(t *testing.T) {
 	eng := New(s)
 	store2 := inspect.New(10)
 	eng.SetPayloadStore(store2)
-	eng.SetCapturePayloads(true)
+	// capture is on (store attached).
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)))
@@ -450,7 +449,7 @@ func TestEngine_HandleProxy_ClientIPIsCaptured(t *testing.T) {
 	eng := New(s)
 	store2 := inspect.New(10)
 	eng.SetPayloadStore(store2)
-	eng.SetCapturePayloads(true)
+	// capture is on (store attached).
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)))
@@ -494,7 +493,7 @@ func TestEngine_HandleProxy_ClientIP_IPv6(t *testing.T) {
 	eng := New(s)
 	store2 := inspect.New(10)
 	eng.SetPayloadStore(store2)
-	eng.SetCapturePayloads(true)
+	// capture is on (store attached).
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)))

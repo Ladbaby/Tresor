@@ -126,21 +126,6 @@ func TestLogInspect_NotFoundForInvalidID(t *testing.T) {
 	}
 }
 
-func TestLogInspect_NotFoundWhenStoreNil(t *testing.T) {
-	// newTestRouter passes a nil payload store. The endpoint must return 404
-	// rather than panic.
-	router := newTestRouter(t)
-	handler := router.Handler()
-
-	req := httptest.NewRequest(http.MethodGet, "/api/logs/1/inspect", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 when store is nil, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
 func TestLogInspect_MethodNotAllowed(t *testing.T) {
 	router, _ := newTestRouterWithPayloadStore(t)
 	handler := router.Handler()

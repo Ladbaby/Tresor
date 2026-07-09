@@ -109,8 +109,9 @@ func runDaemon(cfg *config.AppConfig) error {
 	// Build the in-memory payload store for the inspector. It's bounded so a
 	// chatty gateway cannot exhaust memory; the cap is enforced by the store.
 	payloadStore := inspect.New(inspect.DefaultMaxEntries)
-	eng.SetPayloadStore(payloadStore)
-	eng.SetCapturePayloads(cfg.CapturePayloads)
+	if cfg.CapturePayloads {
+		eng.SetPayloadStore(payloadStore)
+	}
 
 	// Initialize runtime config state in the API layer
 	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel, cfg.CapturePayloads)
