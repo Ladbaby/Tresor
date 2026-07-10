@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 
 	"tresor/internal/engine"
@@ -406,8 +407,18 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 	var reasoningContent string
 	var reasoningItemSent bool
 	var summaryPartSent bool
-	const reasoningItemID = "rs_0" // sentinel; replaced with id-prefixed ID below
 	var reasoningID string
+
+	// Per-item output_index tracking. The Responses API requires every
+	// output item to have a stable output_index that matches between its
+	// `.added` and `.done` events. The previous implementation always
+	// used output_index 0 in the close events, which caused Codex (and
+	// any other strict Responses-API client) to drop the function_call
+	// item because it shared its index with the assistant message.
+	var reasoningOutputIdx, messageOutputIdx int
+	var nextOutputIdx int
+	toolCallAcc := make(map[int]*r2oStreamToolCall)
+	toolCallOutputIdx := make(map[int]int)
 
 	parseOpenAISSE(body, func(data []byte) bool {
 		if string(bytes.TrimSpace(data)) == "[DONE]" {
@@ -453,9 +464,11 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 
 				if !reasoningItemSent {
 					reasoningItemSent = true
+					reasoningOutputIdx = nextOutputIdx
+					nextOutputIdx++
 					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 						"type":         "response.output_item.added",
-						"output_index": 0,
+						"output_index": reasoningOutputIdx,
 						"item": map[string]any{
 							"id":      reasoningID,
 							"type":    "reasoning",
@@ -467,7 +480,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 					summaryPartSent = true
 					writeResponsesSSE(&out, "response.reasoning_summary_part.added", map[string]any{
 						"type":          "response.reasoning_summary_part.added",
-						"output_index":  0,
+						"output_index":  reasoningOutputIdx,
 						"summary_index": 0,
 						"item_id":       reasoningID,
 						"part": map[string]any{
@@ -479,7 +492,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 
 				writeResponsesSSE(&out, "response.reasoning_summary_text.delta", map[string]any{
 					"type":          "response.reasoning_summary_text.delta",
-					"output_index":  0,
+					"output_index":  reasoningOutputIdx,
 					"summary_index": 0,
 					"item_id":       reasoningID,
 					"delta":         choice.Delta.ReasoningContent,
@@ -491,10 +504,12 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 
 				if !msgItemSent {
 					msgItemSent = true
+					messageOutputIdx = nextOutputIdx
+					nextOutputIdx++
 					msgID := id + "_msg_0"
 					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 						"type":         "response.output_item.added",
-						"output_index": 0,
+						"output_index": messageOutputIdx,
 						"item": map[string]any{
 							"id":      msgID,
 							"type":    "message",
@@ -508,7 +523,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 					contentPartSent = true
 					writeResponsesSSE(&out, "response.content_part.added", map[string]any{
 						"type":          "response.content_part.added",
-						"output_index":  0,
+						"output_index":  messageOutputIdx,
 						"content_index": 0,
 						"item_id":       id + "_msg_0",
 						"part": map[string]any{
@@ -523,19 +538,36 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 					"type":          "response.output_text.delta",
 					"delta":         choice.Delta.Content,
 					"item_id":       id + "_msg_0",
-					"output_index":  0,
+					"output_index":  messageOutputIdx,
 					"content_index": 0,
 				})
 			}
 
 			for _, tc := range choice.Delta.ToolCalls {
-				if tc.ID != "" {
+				acc, exists := toolCallAcc[tc.Index]
+				if !exists {
+					acc = &r2oStreamToolCall{
+						ID:   tc.ID,
+						Name: tc.Function.Name,
+					}
+					toolCallAcc[tc.Index] = acc
+				}
+				if tc.ID != "" && !acc.ItemSent {
+					acc.ItemSent = true
+					acc.Name = tc.Function.Name
+					// Synthesize an empty assistant message if the
+					// upstream emitted a tool_call without any text delta.
+					// The Responses API expects every function_call to
+					// come from a message item, matching first-party
+					// OpenAI behavior.
 					if !msgItemSent {
 						msgItemSent = true
+						messageOutputIdx = nextOutputIdx
+						nextOutputIdx++
 						msgID := id + "_msg_0"
 						writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 							"type":         "response.output_item.added",
-							"output_index": 0,
+							"output_index": messageOutputIdx,
 							"item": map[string]any{
 								"id":      msgID,
 								"type":    "message",
@@ -545,9 +577,13 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 							},
 						})
 					}
+					if _, seen := toolCallOutputIdx[tc.Index]; !seen {
+						toolCallOutputIdx[tc.Index] = nextOutputIdx
+						nextOutputIdx++
+					}
 					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 						"type":         "response.output_item.added",
-						"output_index": tc.Index + 1,
+						"output_index": toolCallOutputIdx[tc.Index],
 						"item": map[string]any{
 							"type":    "function_call",
 							"id":      tc.ID,
@@ -561,7 +597,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 						"type":         "response.function_call_arguments.delta",
 						"delta":        tc.Function.Arguments,
 						"call_id":      tc.ID,
-						"output_index": tc.Index + 1,
+						"output_index": toolCallOutputIdx[tc.Index],
 					})
 				}
 			}
@@ -571,14 +607,14 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 				if reasoningItemSent && summaryPartSent {
 					writeResponsesSSE(&out, "response.reasoning_summary_text.done", map[string]any{
 						"type":          "response.reasoning_summary_text.done",
-						"output_index":  0,
+						"output_index":  reasoningOutputIdx,
 						"summary_index": 0,
 						"item_id":       reasoningID,
 						"text":          reasoningContent,
 					})
 					writeResponsesSSE(&out, "response.reasoning_summary_part.done", map[string]any{
 						"type":          "response.reasoning_summary_part.done",
-						"output_index":  0,
+						"output_index":  reasoningOutputIdx,
 						"summary_index": 0,
 						"item_id":       reasoningID,
 						"part": map[string]any{
@@ -603,7 +639,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 					}
 					writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 						"type":         "response.output_item.done",
-						"output_index": 0,
+						"output_index": reasoningOutputIdx,
 						"item":         reasoningItem,
 					})
 				}
@@ -611,7 +647,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 					if contentPartSent {
 						writeResponsesSSE(&out, "response.content_part.done", map[string]any{
 							"type":          "response.content_part.done",
-							"output_index":  0,
+							"output_index":  messageOutputIdx,
 							"content_index": 0,
 							"item_id":       id + "_msg_0",
 							"part": map[string]any{
@@ -625,8 +661,34 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 						"type":          "response.output_text.done",
 						"text":          textContent,
 						"item_id":       id + "_msg_0",
-						"output_index":  0,
+						"output_index":  messageOutputIdx,
 						"content_index": 0,
+					})
+				}
+				// Close tool call items in their original index order so
+				// the .done events match the order of the .added events.
+				toolIndices := make([]int, 0, len(toolCallAcc))
+				for idx := range toolCallAcc {
+					toolIndices = append(toolIndices, idx)
+				}
+				sort.Ints(toolIndices)
+				for _, idx := range toolIndices {
+					acc := toolCallAcc[idx]
+					writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
+						"type":      "response.function_call_arguments.done",
+						"call_id":   acc.ID,
+						"name":      acc.Name,
+						"arguments": acc.Arguments,
+					})
+					writeResponsesSSE(&out, "response.output_item.done", map[string]any{
+						"type":         "response.output_item.done",
+						"output_index": toolCallOutputIdx[idx],
+						"item": map[string]any{
+							"type":    "function_call",
+							"id":      acc.ID,
+							"call_id": acc.ID,
+							"status":  "completed",
+						},
 					})
 				}
 				if msgItemSent {
@@ -640,7 +702,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 					}
 					writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 						"type":         "response.output_item.done",
-						"output_index": 0,
+						"output_index": messageOutputIdx,
 						"item": map[string]any{
 							"type":    "message",
 							"id":      id + "_msg_0",
@@ -684,11 +746,20 @@ type r2oStreamState struct {
 	Terminated        bool // set when finish-reason events have been emitted
 	TextContent       string
 	MessageItemSent   bool
+	MessageOutputIdx  int // output_index used when the message item was added
 	ContentPartSent   bool
 	ToolCallAcc       map[int]*r2oStreamToolCall
+	ToolCallOutputIdx map[int]int // tool_call index → output_index used when added
 	ReasoningContent  string
 	ReasoningItemSent bool
+	ReasoningOutputIdx int // output_index used when the reasoning item was added
 	SummaryPartSent   bool
+	// nextOutputIdx is the next free index in the output[] array. We
+	// allocate it lazily when a new item is first emitted so the
+	// streaming case (where we don't know in advance which items the
+	// model will produce) still produces monotonically-increasing
+	// output_index values that match between `added` and `done` events.
+	nextOutputIdx int
 }
 
 func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.PipelineContext) (engine.SSEChunk, error) {
@@ -710,14 +781,14 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				if state.SummaryPartSent {
 					writeResponsesSSE(&out, "response.reasoning_summary_text.done", map[string]any{
 						"type":          "response.reasoning_summary_text.done",
-						"output_index":  0,
+						"output_index":  state.ReasoningOutputIdx,
 						"summary_index": 0,
 						"item_id":       reasoningID,
 						"text":          state.ReasoningContent,
 					})
 					writeResponsesSSE(&out, "response.reasoning_summary_part.done", map[string]any{
 						"type":          "response.reasoning_summary_part.done",
-						"output_index":  0,
+						"output_index":  state.ReasoningOutputIdx,
 						"summary_index": 0,
 						"item_id":       reasoningID,
 						"part": map[string]any{
@@ -741,7 +812,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				}
 				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type":         "response.output_item.done",
-					"output_index": 0,
+					"output_index": state.ReasoningOutputIdx,
 					"item":         reasoningItem,
 				})
 			}
@@ -749,7 +820,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				if state.ContentPartSent {
 					writeResponsesSSE(&out, "response.content_part.done", map[string]any{
 						"type":          "response.content_part.done",
-						"output_index":  0,
+						"output_index":  state.MessageOutputIdx,
 						"content_index": 0,
 						"item_id":       state.ResponseID + "_msg_0",
 						"part": map[string]any{
@@ -763,7 +834,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					"type":          "response.output_text.done",
 					"text":          state.TextContent,
 					"item_id":       state.ResponseID + "_msg_0",
-					"output_index":  0,
+					"output_index":  state.MessageOutputIdx,
 					"content_index": 0,
 				})
 			}
@@ -778,7 +849,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				}
 				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type":         "response.output_item.done",
-					"output_index": 0,
+					"output_index": state.MessageOutputIdx,
 					"item": map[string]any{
 						"type":    "message",
 						"id":      state.ResponseID + "_msg_0",
@@ -817,6 +888,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		state.Model = oaiChunk.Model
 		state.Created = true
 		state.ToolCallAcc = make(map[int]*r2oStreamToolCall)
+		state.ToolCallOutputIdx = make(map[int]int)
 
 		writeResponsesSSE(&out, "response.created", map[string]any{
 			"type": "response.created",
@@ -846,9 +918,17 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 			if !state.ReasoningItemSent {
 				state.ReasoningItemSent = true
+				// Reasoning is always the first output item if present, per
+				// the first-party Responses API ordering (reasoning →
+				// message → tool_calls). Use the next available index
+				// (which is 0 unless something else has already claimed it,
+				// e.g. when the downstream emits reasoning after a prior
+				// message in the same chunk).
+				state.ReasoningOutputIdx = state.nextOutputIdx
+				state.nextOutputIdx++
 				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 					"type":         "response.output_item.added",
-					"output_index": 0,
+					"output_index": state.ReasoningOutputIdx,
 					"item": map[string]any{
 						"id":      reasoningID,
 						"type":    "reasoning",
@@ -860,7 +940,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				state.SummaryPartSent = true
 				writeResponsesSSE(&out, "response.reasoning_summary_part.added", map[string]any{
 					"type":          "response.reasoning_summary_part.added",
-					"output_index":  0,
+					"output_index":  state.ReasoningOutputIdx,
 					"summary_index": 0,
 					"item_id":       reasoningID,
 					"part": map[string]any{
@@ -872,7 +952,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 			writeResponsesSSE(&out, "response.reasoning_summary_text.delta", map[string]any{
 				"type":          "response.reasoning_summary_text.delta",
-				"output_index":  0,
+				"output_index":  state.ReasoningOutputIdx,
 				"summary_index": 0,
 				"item_id":       reasoningID,
 				"delta":         choice.Delta.ReasoningContent,
@@ -886,9 +966,15 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			if !state.MessageItemSent {
 				state.MessageItemSent = true
 				msgID := state.ResponseID + "_msg_0"
+				// Message goes after reasoning (if any). The previous
+				// implementation always used output_index 0, which
+				// collided with reasoning and broke Codex's stream
+				// reconstruction.
+				state.MessageOutputIdx = state.nextOutputIdx
+				state.nextOutputIdx++
 				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 					"type":         "response.output_item.added",
-					"output_index": 0,
+					"output_index": state.MessageOutputIdx,
 					"item": map[string]any{
 						"id":      msgID,
 						"type":    "message",
@@ -902,7 +988,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				state.ContentPartSent = true
 				writeResponsesSSE(&out, "response.content_part.added", map[string]any{
 					"type":          "response.content_part.added",
-					"output_index":  0,
+					"output_index":  state.MessageOutputIdx,
 					"content_index": 0,
 					"item_id":       state.ResponseID + "_msg_0",
 					"part": map[string]any{
@@ -917,7 +1003,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				"type":          "response.output_text.delta",
 				"delta":         choice.Delta.Content,
 				"item_id":       state.ResponseID + "_msg_0",
-				"output_index":  0,
+				"output_index":  state.MessageOutputIdx,
 				"content_index": 0,
 			})
 		}
@@ -935,12 +1021,21 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			if tc.ID != "" && !acc.ItemSent {
 				acc.ItemSent = true
 				acc.Name = tc.Function.Name
+				// Some Chat Completions upstreams (e.g. older llama.cpp
+				// builds) emit a tool_call without any preceding message
+				// delta. The Responses API expects every function_call to
+				// be accompanied by a message item, so we synthesize an
+				// empty message at the right output_index first. This also
+				// matches the first-party OpenAI behavior, where tool
+				// calls always come from an assistant message.
 				if !state.MessageItemSent {
 					state.MessageItemSent = true
+					state.MessageOutputIdx = state.nextOutputIdx
+					state.nextOutputIdx++
 					msgID := state.ResponseID + "_msg_0"
 					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 						"type":         "response.output_item.added",
-						"output_index": 0,
+						"output_index": state.MessageOutputIdx,
 						"item": map[string]any{
 							"id":      msgID,
 							"type":    "message",
@@ -950,9 +1045,18 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 						},
 					})
 				}
+				// Each tool call gets its own output_index, allocated
+				// lazily from the next free slot. We can't use tc.Index
+				// because tool calls may not arrive in dense 0..N order
+				// and the Responses API requires monotonically
+				// increasing indices.
+				if _, seen := state.ToolCallOutputIdx[tc.Index]; !seen {
+					state.ToolCallOutputIdx[tc.Index] = state.nextOutputIdx
+					state.nextOutputIdx++
+				}
 				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
 					"type":         "response.output_item.added",
-					"output_index": tc.Index + 1,
+					"output_index": state.ToolCallOutputIdx[tc.Index],
 					"item": map[string]any{
 						"type":    "function_call",
 						"id":      tc.ID,
@@ -967,7 +1071,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					"type":         "response.function_call_arguments.delta",
 					"delta":        tc.Function.Arguments,
 					"call_id":      acc.ID,
-					"output_index": tc.Index + 1,
+					"output_index": state.ToolCallOutputIdx[tc.Index],
 				})
 			}
 		}
@@ -980,14 +1084,14 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				if state.SummaryPartSent {
 					writeResponsesSSE(&out, "response.reasoning_summary_text.done", map[string]any{
 						"type":          "response.reasoning_summary_text.done",
-						"output_index":  0,
+						"output_index":  state.ReasoningOutputIdx,
 						"summary_index": 0,
 						"item_id":       reasoningID,
 						"text":          state.ReasoningContent,
 					})
 					writeResponsesSSE(&out, "response.reasoning_summary_part.done", map[string]any{
 						"type":          "response.reasoning_summary_part.done",
-						"output_index":  0,
+						"output_index":  state.ReasoningOutputIdx,
 						"summary_index": 0,
 						"item_id":       reasoningID,
 						"part": map[string]any{
@@ -1011,7 +1115,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				}
 				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type":         "response.output_item.done",
-					"output_index": 0,
+					"output_index": state.ReasoningOutputIdx,
 					"item":         reasoningItem,
 				})
 			}
@@ -1019,7 +1123,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				if state.ContentPartSent {
 					writeResponsesSSE(&out, "response.content_part.done", map[string]any{
 						"type":          "response.content_part.done",
-						"output_index":  0,
+						"output_index":  state.MessageOutputIdx,
 						"content_index": 0,
 						"item_id":       state.ResponseID + "_msg_0",
 						"part": map[string]any{
@@ -1033,12 +1137,21 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					"type":          "response.output_text.done",
 					"text":          state.TextContent,
 					"item_id":       state.ResponseID + "_msg_0",
-					"output_index":  0,
+					"output_index":  state.MessageOutputIdx,
 					"content_index": 0,
 				})
 			}
-			// Close tool call items
-			for _, acc := range state.ToolCallAcc {
+			// Close tool call items in their original output_index order
+			// so the .done events are emitted in the same order as the
+			// .added events. Using a slice of indices keeps the order
+			// deterministic regardless of Go's map iteration order.
+			toolIndices := make([]int, 0, len(state.ToolCallAcc))
+			for idx := range state.ToolCallAcc {
+				toolIndices = append(toolIndices, idx)
+			}
+			sort.Ints(toolIndices)
+			for _, idx := range toolIndices {
+				acc := state.ToolCallAcc[idx]
 				writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
 					"type":      "response.function_call_arguments.done",
 					"call_id":   acc.ID,
@@ -1047,7 +1160,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				})
 				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type":         "response.output_item.done",
-					"output_index": 0,
+					"output_index": state.ToolCallOutputIdx[idx],
 					"item": map[string]any{
 						"type":    "function_call",
 						"id":      acc.ID,
@@ -1067,7 +1180,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				}
 				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type":         "response.output_item.done",
-					"output_index": 0,
+					"output_index": state.MessageOutputIdx,
 					"item": map[string]any{
 						"type":    "message",
 						"id":      state.ResponseID + "_msg_0",
