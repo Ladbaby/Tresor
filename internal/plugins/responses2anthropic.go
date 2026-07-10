@@ -363,19 +363,40 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 	}
 	anthropicBody["messages"] = anthroMessages
 
-	// Convert tools: OpenAI → Anthropic format
+	// Convert tools: Responses-API flat format or Chat Completions envelope
+	// → Anthropic {name, description, input_schema}.
+	//
+	// Codex (and the Responses API generally) emits tools as
+	//   {type:"function", name:"...", description:"...", parameters:{...}, strict:false}
+	// while Chat Completions emits them as
+	//   {type:"function", function:{name:"...", description:"...", parameters:{...}}}
+	// The previous implementation only handled the Chat Completions shape
+	// and silently dropped every Responses-API tool — which meant any Codex
+	// client routed to an Anthropic downstream received zero tools and
+	// could not actually call any function.
 	if len(respReq.Tools) > 0 {
 		var openaiTools []map[string]interface{}
 		if err := json.Unmarshal(respReq.Tools, &openaiTools); err == nil {
 			anthroTools := make([]map[string]interface{}, 0, len(openaiTools))
 			for _, ot := range openaiTools {
+				// Prefer the Chat Completions envelope when present.
 				fn, _ := ot["function"].(map[string]interface{})
-				if fn == nil {
+				var name, desc string
+				var params interface{}
+				if fn != nil {
+					name, _ = fn["name"].(string)
+					desc, _ = fn["description"].(string)
+					params = fn["parameters"]
+				} else {
+					// Fall back to the Responses-API flat shape.
+					name, _ = ot["name"].(string)
+					desc, _ = ot["description"].(string)
+					params = ot["parameters"]
+				}
+				if name == "" {
+					// Without a name the tool is unusable — drop it.
 					continue
 				}
-				name, _ := fn["name"].(string)
-				desc, _ := fn["description"].(string)
-				params := fn["parameters"]
 				anthroTools = append(anthroTools, map[string]interface{}{
 					"name":         name,
 					"description":  desc,
