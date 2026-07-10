@@ -46,12 +46,23 @@ type responsesInputItemRaw struct {
 	Name    string          `json:"name,omitempty"`
 	Args    string          `json:"arguments,omitempty"`
 	Output  string          `json:"output,omitempty"`
+	// EncryptedContent holds the opaque reasoning payload for
+	// {type:"reasoning"} items. Codex re-sends prior turns' reasoning
+	// back as encrypted blobs — only OpenAI can decode them. We forward
+	// the bytes verbatim to backends that accept them, or drop them
+	// silently for providers that don't.
+	EncryptedContent string `json:"encrypted_content,omitempty"`
 }
 
 type responsesContentPart struct {
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
+	// Refusal holds the refusal text for {type:"refusal"} parts. The
+	// Responses API uses a separate `refusal` field on refusal parts (vs
+	// `text` on output_text parts), and Anthropic's refusal blocks use the
+	// same split, so we need both fields wired through.
+	Refusal string `json:"refusal,omitempty"`
 }
 
 // --- Responses API Response Types ---
