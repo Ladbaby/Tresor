@@ -437,6 +437,14 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 	var seq int
 	toolCallAcc := make(map[int]*r2oStreamToolCall)
 	toolCallOutputIdx := make(map[int]int)
+	// finalItems is keyed by output_index. Populated when each
+	// output_item.done event is written, then replayed into the
+	// `response.output` array of the response.completed payload so the
+	// OpenAI Responses SDK can construct a non-empty ParsedResponse.
+	// Without this, the SDK returns an empty response to the client —
+	// Codex drops the assistant turn, fails to reconstruct conversation
+	// history on the next turn, and silently hangs after the first reply.
+	finalItems := make(map[int]map[string]any)
 
 	parseOpenAISSE(body, func(data []byte) bool {
 		if string(bytes.TrimSpace(data)) == "[DONE]" {
@@ -677,6 +685,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 						"output_index": reasoningOutputIdx,
 						"item":         reasoningItem,
 					})
+					finalItems[reasoningOutputIdx] = reasoningItem
 				}
 				if textContent != "" {
 					if contentPartSent {
@@ -732,6 +741,14 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 							"status":    "completed",
 						},
 					})
+					finalItems[toolCallOutputIdx[idx]] = map[string]any{
+						"type":      "function_call",
+						"id":        acc.ID,
+						"call_id":   acc.ID,
+						"name":      acc.Name,
+						"arguments": acc.Arguments,
+						"status":    "completed",
+					}
 				}
 				if msgItemSent {
 					msgContent := []map[string]any{}
@@ -742,17 +759,32 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 							"annotations": []any{},
 						})
 					}
+					msgItem := map[string]any{
+						"type":    "message",
+						"id":      id + "_msg_0",
+						"status":  "completed",
+						"role":    "assistant",
+						"content": msgContent,
+					}
 					writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 						"type":         "response.output_item.done",
 						"output_index": messageOutputIdx,
-						"item": map[string]any{
-							"type":    "message",
-							"id":      id + "_msg_0",
-							"status":  "completed",
-							"role":    "assistant",
-							"content": msgContent,
-						},
+						"item":         msgItem,
 					})
+					finalItems[messageOutputIdx] = msgItem
+				}
+
+				// Replay the final `output` array (in output_index order) into
+				// response.completed so the OpenAI Responses SDK can build a
+				// non-empty ParsedResponse. Without this, the SDK returns
+				// an empty response — Codex drops the assistant turn, fails
+				// to reconstruct conversation history on the next turn, and
+				// silently hangs after the first reply.
+				output := make([]map[string]any, 0, len(finalItems))
+				for i := 0; i < nextOutputIdx; i++ {
+					if item, ok := finalItems[i]; ok {
+						output = append(output, item)
+					}
 				}
 
 				writeResponsesSSE(&out, "response.completed", map[string]any{
@@ -760,6 +792,7 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 					"response": map[string]any{
 						"id":     id,
 						"status": "completed",
+						"output": output,
 						"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
 					},
 				})
@@ -802,6 +835,15 @@ type r2oStreamState struct {
 	// model will produce) still produces monotonically-increasing
 	// output_index values that match between `added` and `done` events.
 	nextOutputIdx int
+	// FinalItems stores the completed output items (one per output_index)
+	// emitted via response.output_item.done events. It is replayed into
+	// the response.completed payload as `response.output` so the OpenAI
+	// Responses SDK can build a non-empty ParsedResponse from the
+	// authoritative `response` field. Without this, the SDK returns an
+	// empty response to the client — Codex drops the assistant turn,
+	// fails to reconstruct conversation history on the next turn, and
+	// silently hangs after the first reply.
+	FinalItems map[int]map[string]any
 	// sequence_number is a monotonically increasing integer that
 	// accompanies every Responses-API SSE event. The official OpenAI
 	// SDKs (openai-node, openai-python) mark it as a required field on
@@ -864,6 +906,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					"output_index": state.ReasoningOutputIdx,
 					"item":         reasoningItem,
 				})
+				state.FinalItems[state.ReasoningOutputIdx] = reasoningItem
 			}
 			if state.TextContent != "" {
 				if state.ContentPartSent {
@@ -896,23 +939,39 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 						"annotations": []any{},
 					})
 				}
+				msgItem := map[string]any{
+					"type":    "message",
+					"id":      state.ResponseID + "_msg_0",
+					"status":  "completed",
+					"role":    "assistant",
+					"content": msgContent,
+				}
 				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type":         "response.output_item.done",
 					"output_index": state.MessageOutputIdx,
-					"item": map[string]any{
-						"type":    "message",
-						"id":      state.ResponseID + "_msg_0",
-						"status":  "completed",
-						"role":    "assistant",
-						"content": msgContent,
-					},
+					"item":         msgItem,
 				})
+				state.FinalItems[state.MessageOutputIdx] = msgItem
+			}
+			// Replay the final `output` array (in output_index order) into
+			// response.completed so the OpenAI Responses SDK can build a
+			// non-empty ParsedResponse from the authoritative `response`
+			// payload. Without this, the SDK returns an empty response —
+			// Codex drops the assistant turn, fails to reconstruct
+			// conversation history on the next turn, and silently hangs
+			// after the first reply.
+			output := make([]map[string]any, 0, len(state.FinalItems))
+			for i := 0; i < state.nextOutputIdx; i++ {
+				if item, ok := state.FinalItems[i]; ok {
+					output = append(output, item)
+				}
 			}
 			writeResponsesSSE(&out, "response.completed", map[string]any{
 				"type": "response.completed",
 				"response": map[string]any{
 					"id":     state.ResponseID,
 					"status": "completed",
+					"output": output,
 					"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
 				},
 			})
@@ -938,6 +997,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		state.Created = true
 		state.ToolCallAcc = make(map[int]*r2oStreamToolCall)
 		state.ToolCallOutputIdx = make(map[int]int)
+		state.FinalItems = make(map[int]map[string]any)
 
 		writeResponsesSSE(&out, "response.created", map[string]any{
 			"type": "response.created",
@@ -1173,6 +1233,7 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					"output_index": state.ReasoningOutputIdx,
 					"item":         reasoningItem,
 				})
+				state.FinalItems[state.ReasoningOutputIdx] = reasoningItem
 			}
 			if state.TextContent != "" {
 				if state.ContentPartSent {
@@ -1230,6 +1291,14 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 						"status":    "completed",
 					},
 				})
+				state.FinalItems[state.ToolCallOutputIdx[idx]] = map[string]any{
+					"type":      "function_call",
+					"id":        acc.ID,
+					"call_id":   acc.ID,
+					"name":      acc.Name,
+					"arguments": acc.Arguments,
+					"status":    "completed",
+				}
 			}
 			if state.MessageItemSent {
 				msgContent := []map[string]any{}
@@ -1240,23 +1309,38 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 						"annotations": []any{},
 					})
 				}
+				msgItem := map[string]any{
+					"type":    "message",
+					"id":      state.ResponseID + "_msg_0",
+					"status":  "completed",
+					"role":    "assistant",
+					"content": msgContent,
+				}
 				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
 					"type":         "response.output_item.done",
 					"output_index": state.MessageOutputIdx,
-					"item": map[string]any{
-						"type":    "message",
-						"id":      state.ResponseID + "_msg_0",
-						"status":  "completed",
-						"role":    "assistant",
-						"content": msgContent,
-					},
+					"item":         msgItem,
 				})
+				state.FinalItems[state.MessageOutputIdx] = msgItem
+			}
+			// Replay the final `output` array (in output_index order) into
+			// response.completed so the OpenAI Responses SDK can build a
+			// non-empty ParsedResponse. Without this, the SDK returns an
+			// empty response — Codex drops the assistant turn, fails to
+			// reconstruct conversation history on the next turn, and
+			// silently hangs after the first reply.
+			output := make([]map[string]any, 0, len(state.FinalItems))
+			for i := 0; i < state.nextOutputIdx; i++ {
+				if item, ok := state.FinalItems[i]; ok {
+					output = append(output, item)
+				}
 			}
 			writeResponsesSSE(&out, "response.completed", map[string]any{
 				"type": "response.completed",
 				"response": map[string]any{
 					"id":     state.ResponseID,
 					"status": "completed",
+					"output": output,
 					"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
 				},
 			})
