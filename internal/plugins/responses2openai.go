@@ -45,14 +45,19 @@ type responsesInputItemRaw struct {
 	Content json.RawMessage `json:"content,omitempty"`
 	CallID  string          `json:"call_id,omitempty"`
 	Name    string          `json:"name,omitempty"`
-	Args    string          `json:"arguments,omitempty"`
-	Output  string          `json:"output,omitempty"`
-	// EncryptedContent holds the opaque reasoning payload for
-	// {type:"reasoning"} items. Codex re-sends prior turns' reasoning
-	// back as encrypted blobs — only OpenAI can decode them. We forward
-	// the bytes verbatim to backends that accept them, or drop them
-	// silently for providers that don't.
-	EncryptedContent string `json:"encrypted_content,omitempty"`
+	// Args holds the raw JSON bytes of function_call `arguments`. Per
+	// the OpenAI Responses API spec the value is a JSON-encoded string,
+	// but a permissive decoder is required because (a) Codex's replay
+	// path has been seen sending a malformed concatenation of two
+	// objects, and (b) we don't want a non-string `arguments` value to
+	// poison the outer json.Unmarshal of the input array and silently
+	// drop every other item in the request. Plugins that need to
+	// forward the bytes as a JSON string (Chat Completions) call
+	// string(Args); plugins that need to inspect or replace the inner
+	// value (Anthropic Messages) parse the bytes themselves.
+	Args             json.RawMessage `json:"arguments,omitempty"`
+	Output           string          `json:"output,omitempty"`
+	EncryptedContent string          `json:"encrypted_content,omitempty"`
 }
 
 type responsesContentPart struct {
@@ -217,7 +222,13 @@ func (t *Responses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 						Type: "function",
 					}
 					tc.Function.Name = item.Name
-					tc.Function.Arguments = item.Args
+					// Chat Completions `function.arguments` is a JSON
+					// string. Cast the RawMessage verbatim — for a string
+					// value this yields the original JSON text; for a
+					// non-object JSON value (e.g. [1,2,3]) it yields the
+					// bracketed form, which Chat Completions will pass
+					// through to the model as-is.
+					tc.Function.Arguments = string(item.Args)
 					pendingToolCalls = append(pendingToolCalls, tc)
 				} else if item.Type == "function_call_output" {
 					flushToolCalls()

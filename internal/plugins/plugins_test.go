@@ -2738,6 +2738,66 @@ func TestResponses2Anthropic_TransformRequest_Tools(t *testing.T) {
 	}
 }
 
+// TestResponses2Anthropic_TransformRequest_ToolsWithoutSchema verifies
+// that Responses-API tools which carry no `parameters` field at all
+// (Codex's `apply_patch` `custom` tool and the `image_gen` /
+// `codex_app` `namespace` tools) are still forwarded with a valid
+// input_schema. Anthropic rejects `input_schema: null` with HTTP 400
+// ("tools.N.input_schema: Input tag does not exist"), so the
+// transformer substitutes a permissive empty-object schema when the
+// client omitted one. Without this fallback the entire request is
+// rejected with `invalid params, 400 (2013)` regardless of the rest
+// of the body being well-formed.
+func TestResponses2Anthropic_TransformRequest_ToolsWithoutSchema(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [{"role": "user", "content": "Hi"}],
+		"tools": [
+			{"type": "custom", "name": "apply_patch", "description": "freeform"},
+			{"type": "namespace", "name": "image_gen", "description": "ns"},
+			{"type": "namespace", "name": "codex_app", "description": "ns"},
+			{"type": "tool_search"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("TransformRequest: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	tools, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatalf("expected tools array, got %T", result["tools"])
+	}
+	// The unnamed tool_search is dropped by the name=="" filter; the
+	// three remaining tools must all carry a valid (non-null)
+	// input_schema.
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools (tool_search dropped), got %d", len(tools))
+	}
+	want := map[string]bool{"apply_patch": true, "image_gen": true, "codex_app": true}
+	for _, raw := range tools {
+		tool := raw.(map[string]interface{})
+		name, _ := tool["name"].(string)
+		if !want[name] {
+			t.Errorf("unexpected tool name in output: %q", name)
+		}
+		schema, ok := tool["input_schema"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("tool %q: expected input_schema to be a JSON object, got %T (%v)", name, tool["input_schema"], tool["input_schema"])
+		}
+		if schema["type"] != "object" {
+			t.Errorf("tool %q: expected input_schema.type='object', got %v", name, schema["type"])
+		}
+	}
+}
+
 func TestResponses2Anthropic_TransformRequest_Reasoning(t *testing.T) {
 	p := &Responses2Anthropic{}
 	body := []byte(`{
@@ -2973,6 +3033,319 @@ func TestResponses2Anthropic_TransformRequest_ReasoningItemDangling(t *testing.T
 	}
 	if block["data"] != "trailing" {
 		t.Fatalf("expected encrypted content 'trailing', got %v", block["data"])
+	}
+}
+
+// TestResponses2Anthropic_TransformRequest_MalformedFunctionCallArguments
+// verifies that a Responses-API function_call whose `arguments` field
+// contains invalid JSON is dropped entirely instead of being forwarded
+// to Anthropic as a `tool_use` block with an empty `input`. Forwarding
+// the broken call caused Anthropic to reject the request with HTTP 400
+// ("invalid params, 400 (2013)") the moment the downstream tool's
+// input_schema declared any required field — for example
+// `shell_command` requires a `command` property. The matching
+// `function_call_output` must also be dropped, otherwise Anthropic
+// returns 400 ("unexpected tool_use_id") for the result that
+// references a tool_use we didn't emit.
+func TestResponses2Anthropic_TransformRequest_MalformedFunctionCallArguments(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "play songs"},
+			{"role": "assistant", "content": [{"type": "output_text", "text": "I will use the shell."}]},
+			{"type": "function_call", "call_id": "broken-call", "name": "shell_command", "arguments": "{\"command\": \"a\"}{\"command\": \"b\"}"},
+			{"type": "function_call_output", "call_id": "broken-call", "output": "some result"},
+			{"role": "user", "content": "thanks"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("TransformRequest: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("decode body: %v\n%s", err, string(newBody))
+	}
+	messages, _ := result["messages"].([]interface{})
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages (user, assistant, user) — the broken tool_use/tool_result pair must be dropped, got %d", len(messages))
+	}
+	for _, raw := range messages {
+		m := raw.(map[string]interface{})
+		switch c := m["content"].(type) {
+		case []interface{}:
+			for _, b := range c {
+				blk := b.(map[string]interface{})
+				if blk["type"] == "tool_use" || blk["type"] == "tool_result" {
+					t.Errorf("unexpected %s block in converted body: %#v", blk["type"], blk)
+				}
+			}
+		}
+	}
+	// Sanity: the path flips to Anthropic's messages endpoint.
+	if newReq.URL.Path != "/v1/messages" {
+		t.Errorf("expected path /v1/messages, got %s", newReq.URL.Path)
+	}
+}
+
+// TestResponses2Anthropic_TransformRequest_EmptyFunctionCallArguments
+// verifies that a Responses-API function_call with an empty `arguments`
+// field is dropped (Anthropic would reject a tool_use whose `input`
+// is empty against any tool that declares required schema fields).
+func TestResponses2Anthropic_TransformRequest_EmptyFunctionCallArguments(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "play songs"},
+			{"type": "function_call", "call_id": "empty-call", "name": "shell_command", "arguments": ""},
+			{"type": "function_call_output", "call_id": "empty-call", "output": "ignored"},
+			{"role": "user", "content": "thanks"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("TransformRequest: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages, _ := result["messages"].([]interface{})
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages (the empty-args pair must be dropped), got %d", len(messages))
+	}
+	for _, raw := range messages {
+		m := raw.(map[string]interface{})
+		if cs, ok := m["content"].([]interface{}); ok {
+			for _, b := range cs {
+				blk := b.(map[string]interface{})
+				if blk["type"] == "tool_use" || blk["type"] == "tool_result" {
+					t.Errorf("unexpected %s block in converted body: %#v", blk["type"], blk)
+				}
+			}
+		}
+	}
+}
+
+// TestResponses2Anthropic_TransformRequest_NonObjectFunctionCallArguments
+// verifies that a Responses-API function_call whose `arguments` is valid
+// JSON but not an object (e.g., a bare string, number, or array) is
+// dropped. Anthropic's `tool_use.input` must be a JSON object —
+// forwarding a non-object value would be rejected.
+func TestResponses2Anthropic_TransformRequest_NonObjectFunctionCallArguments(t *testing.T) {
+	p := &Responses2Anthropic{}
+	cases := []struct {
+		name      string
+		arguments string
+	}{
+		{"string", `"just a string"`},
+		{"array", `[1, 2, 3]`},
+		{"number", `42`},
+		{"bool", `true`},
+		{"null", `null`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{
+				"model": "claude-sonnet-4-20250514",
+				"input": [
+					{"role": "user", "content": "do it"},
+					{"type": "function_call", "call_id": "x", "name": "shell_command", "arguments": ` + tc.arguments + `},
+					{"type": "function_call_output", "call_id": "x", "output": "ignored"},
+					{"role": "user", "content": "next"}
+				],
+				"stream": false
+			}`)
+			req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+			ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+			_, newBody, err := p.TransformRequest(req, body, ctx)
+			if err != nil {
+				t.Fatalf("TransformRequest: %v", err)
+			}
+			var result map[string]interface{}
+			if err := json.Unmarshal(newBody, &result); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			messages, _ := result["messages"].([]interface{})
+			if len(messages) != 2 {
+				t.Fatalf("expected 2 messages (the non-object pair must be dropped), got %d", len(messages))
+			}
+			for _, raw := range messages {
+				m := raw.(map[string]interface{})
+				if cs, ok := m["content"].([]interface{}); ok {
+					for _, b := range cs {
+						blk := b.(map[string]interface{})
+						if blk["type"] == "tool_use" || blk["type"] == "tool_result" {
+							t.Errorf("unexpected %s block in converted body for non-object arguments %q: %#v", blk["type"], tc.arguments, blk)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestResponses2Anthropic_TransformRequest_ValidToolCallPreserved is the
+// happy-path companion to the malformed-arguments tests: a function_call
+// whose `arguments` is a valid JSON object must still be forwarded as a
+// proper tool_use block, and the matching function_call_output must still
+// arrive as a tool_result — i.e. the dropping logic in the fix must
+// not over-trigger on healthy payloads.
+func TestResponses2Anthropic_TransformRequest_ValidToolCallPreserved(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "play songs"},
+			{"type": "function_call", "call_id": "ok-call", "name": "shell_command", "arguments": "{\"command\": \"ls\"}"},
+			{"type": "function_call_output", "call_id": "ok-call", "output": "file1\nfile2"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("TransformRequest: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages, _ := result["messages"].([]interface{})
+	// Three messages are produced because the Responses-API request
+	// didn't carry a prior assistant message: the user message is
+	// appended verbatim, the standalone function_call is flushed as a
+	// freshly-created assistant message containing one tool_use block,
+	// and the function_call_output is flushed as a user message with a
+	// matching tool_result.
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages (user, assistant tool_use, user tool_result), got %d", len(messages))
+	}
+	user0 := messages[0].(map[string]interface{})
+	if user0["role"] != "user" || user0["content"] != "play songs" {
+		t.Fatalf("expected first message to be user 'play songs', got %#v", user0)
+	}
+	asst := messages[1].(map[string]interface{})
+	if asst["role"] != "assistant" {
+		t.Fatalf("expected assistant role, got %v", asst["role"])
+	}
+	asstBlocks := asst["content"].([]interface{})
+	if len(asstBlocks) != 1 || asstBlocks[0].(map[string]interface{})["type"] != "tool_use" {
+		t.Fatalf("expected 1 tool_use block in assistant message, got %#v", asstBlocks)
+	}
+	toolUse := asstBlocks[0].(map[string]interface{})
+	if toolUse["name"] != "shell_command" {
+		t.Errorf("expected tool_use name 'shell_command', got %v", toolUse["name"])
+	}
+	if toolUse["id"] != "ok-call" {
+		t.Errorf("expected tool_use id 'ok-call', got %v", toolUse["id"])
+	}
+	input, ok := toolUse["input"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected tool_use input to be a JSON object, got %T (%v)", toolUse["input"], toolUse["input"])
+	}
+	if input["command"] != "ls" {
+		t.Errorf("expected input.command='ls', got %v", input["command"])
+	}
+	user := messages[2].(map[string]interface{})
+	if user["role"] != "user" {
+		t.Fatalf("expected user role for tool_result, got %v", user["role"])
+	}
+	userBlocks := user["content"].([]interface{})
+	if len(userBlocks) != 1 || userBlocks[0].(map[string]interface{})["type"] != "tool_result" {
+		t.Fatalf("expected 1 tool_result block in user message, got %#v", userBlocks)
+	}
+	tr := userBlocks[0].(map[string]interface{})
+	if tr["tool_use_id"] != "ok-call" {
+		t.Errorf("expected tool_result tool_use_id 'ok-call', got %v", tr["tool_use_id"])
+	}
+	if tr["content"] != "file1\nfile2" {
+		t.Errorf("expected tool_result content 'file1\\nfile2', got %v", tr["content"])
+	}
+}
+
+// TestResponses2Anthropic_TransformRequest_AbsorbInterimAssistantText
+// verifies that when Codex emits interim assistant text between a
+// function_call and its matching function_call_output, the converter
+// merges that text back into the tool_use-bearing assistant message
+// (placed BEFORE the tool_use, so the assistant block order is
+// `thinking → text → tool_use` — Anthropic's required ordering) and
+// emits the tool_result in a user message that immediately follows.
+//
+// Without this merge, Anthropic rejects the request with HTTP 400
+// ("tool call result does not follow tool call (2013)") because the
+// interim text message sits between the tool_use and the tool_result,
+// breaking the immediate-following rule.
+func TestResponses2Anthropic_TransformRequest_AbsorbInterimAssistantText(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "play songs"},
+			{"type": "function_call", "call_id": "call_x", "name": "list_mcp_resources", "arguments": "{}"},
+			{"role": "assistant", "content": [{"type": "output_text", "text": "I'll help you use Nora music player."}]},
+			{"type": "function_call_output", "call_id": "call_x", "output": "{\"resources\":[]}"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("TransformRequest: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(newBody, &result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages, _ := result["messages"].([]interface{})
+	// Expect exactly: user, assistant [text + tool_use], user [tool_result].
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages (user, assistant(text+tool_use), user(tool_result)), got %d: %#v", len(messages), messages)
+	}
+	user0 := messages[0].(map[string]interface{})
+	if user0["role"] != "user" || user0["content"] != "play songs" {
+		t.Fatalf("expected first message to be user 'play songs', got %#v", user0)
+	}
+	asst := messages[1].(map[string]interface{})
+	if asst["role"] != "assistant" {
+		t.Fatalf("expected assistant at position 1, got %v", asst["role"])
+	}
+	blocks := asst["content"].([]interface{})
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks (text + tool_use) in merged assistant message, got %d: %#v", len(blocks), blocks)
+	}
+	if blocks[0].(map[string]interface{})["type"] != "text" {
+		t.Errorf("expected block[0] to be text (before tool_use), got %v", blocks[0].(map[string]interface{})["type"])
+	}
+	if blocks[0].(map[string]interface{})["text"] != "I'll help you use Nora music player." {
+		t.Errorf("unexpected text block: %v", blocks[0].(map[string]interface{})["text"])
+	}
+	if blocks[1].(map[string]interface{})["type"] != "tool_use" {
+		t.Errorf("expected block[1] to be tool_use, got %v", blocks[1].(map[string]interface{})["type"])
+	}
+	if blocks[1].(map[string]interface{})["id"] != "call_x" {
+		t.Errorf("expected tool_use id 'call_x', got %v", blocks[1].(map[string]interface{})["id"])
+	}
+	user := messages[2].(map[string]interface{})
+	if user["role"] != "user" {
+		t.Fatalf("expected user at position 2, got %v", user["role"])
+	}
+	userBlocks := user["content"].([]interface{})
+	if len(userBlocks) != 1 || userBlocks[0].(map[string]interface{})["type"] != "tool_result" {
+		t.Fatalf("expected 1 tool_result block in user message, got %#v", userBlocks)
+	}
+	if userBlocks[0].(map[string]interface{})["tool_use_id"] != "call_x" {
+		t.Errorf("expected tool_result tool_use_id 'call_x', got %v", userBlocks[0].(map[string]interface{})["tool_use_id"])
 	}
 }
 

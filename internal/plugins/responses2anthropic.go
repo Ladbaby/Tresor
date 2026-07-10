@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"tresor/internal/engine"
@@ -53,6 +54,17 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 		if err := json.Unmarshal(respReq.Input, &items); err == nil {
 			// Collect tool_use blocks to merge into preceding assistant message
 			var pendingToolUses []map[string]interface{}
+
+			// droppedToolUseIDs records call_ids whose corresponding
+			// tool_use was suppressed because the Responses-API client
+			// sent arguments that couldn't be forwarded safely to
+			// Anthropic (malformed JSON, empty string, or a non-object
+			// value). When the matching function_call_output comes in,
+			// it must also be dropped — otherwise Anthropic sees a
+			// tool_result whose tool_use_id has no preceding tool_use
+			// and rejects the request with 400 ("unexpected
+			// tool_use_id").
+			droppedToolUseIDs := make(map[string]struct{})
 
 			// Collect redacted_thinking blocks (from Responses API
 			// reasoning items) to merge into the assistant message they
@@ -123,20 +135,123 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 
 			// Collect tool_result blocks to merge into preceding user message
 			flushToolResults := func(toolResults []map[string]interface{}) {
-				if len(toolResults) > 0 {
-					if len(anthroMessages) > 0 {
-						last := anthroMessages[len(anthroMessages)-1]
-						if last["role"] == "user" {
-							if content, ok := last["content"].([]map[string]interface{}); ok {
-								last["content"] = append(content, toolResults...)
-							} else {
-								last["content"] = toolResults
+				if len(toolResults) == 0 {
+					return
+				}
+
+				// Anthropic requires every tool_result to appear in a
+				// user message that IMMEDIATELY follows the assistant
+				// message containing the matching tool_use — a
+				// "tool call result does not follow tool call" 400
+				// otherwise. Codex's Responses-API stream can interleave
+				// interim assistant text between a function_call and its
+				// function_call_output (the "I'll help you use Nora..."
+				// text in input items [6] of codex_request.txt, which
+				// sits between the function_call [5] and its tool result
+				// [7]). Our first-pass conversion would emit that text as
+				// a standalone assistant message and leave the tool_result
+				// stranded two messages later, which Anthropic rejects.
+				//
+				// Before emitting the tool_result-bearing user message,
+				// scan backwards over `anthroMessages` and absorb any
+				// text-only assistant messages that were emitted between
+				// the tool_use-bearing assistant message and the current
+				// tail. Those text blocks are inserted at the end of the
+				// tool_use-bearing assistant message but BEFORE the
+				// tool_use, so the resulting block order is
+				// `thinking → text → tool_use` — Anthropic's required
+				// ordering for an assistant message that calls tools.
+				toolUseMsgIdx := -1
+				for idx := len(anthroMessages) - 1; idx >= 0; idx-- {
+					m := anthroMessages[idx]
+					if m["role"] != "assistant" {
+						break
+					}
+					blocks, ok := m["content"].([]map[string]interface{})
+					if !ok {
+						break
+					}
+					match := false
+					for _, b := range blocks {
+						if b["type"] == "tool_use" {
+							id, _ := b["id"].(string)
+							for _, tr := range toolResults {
+								tuid, _ := tr["tool_use_id"].(string)
+								if id == tuid {
+									match = true
+									break
+								}
 							}
+							if match {
+								break
+							}
+						}
+					}
+					if match {
+						toolUseMsgIdx = idx
+						break
+					}
+				}
+
+				if toolUseMsgIdx >= 0 {
+					// Pull every assistant message after the tool_use
+					// one (up to the current tail) into a single
+					// intermediate-slice to absorb.
+					toAbsorb := anthroMessages[toolUseMsgIdx+1:]
+					anthroMessages = anthroMessages[:toolUseMsgIdx+1]
+
+					// Extract text blocks from each absorbed assistant
+					// message and insert them into the tool_use-bearing
+					// assistant message right before the first tool_use
+					// block, preserving Anthropic's required
+					// `thinking → text → tool_use` ordering.
+					var textBlocks []map[string]interface{}
+					for _, m := range toAbsorb {
+						if m["role"] != "assistant" {
+							continue
+						}
+						switch c := m["content"].(type) {
+						case []map[string]interface{}:
+							for _, b := range c {
+								if b["type"] == "text" {
+									textBlocks = append(textBlocks, b)
+								}
+							}
+						case string:
+							if c != "" {
+								textBlocks = append(textBlocks, map[string]interface{}{
+									"type": "text",
+									"text": c,
+								})
+							}
+						}
+					}
+					if len(textBlocks) > 0 {
+						toolUseMsg := anthroMessages[toolUseMsgIdx]
+						blocks, _ := toolUseMsg["content"].([]map[string]interface{})
+						// Find the index of the first tool_use block.
+						insertAt := len(blocks)
+						for i, b := range blocks {
+							if b["type"] == "tool_use" {
+								insertAt = i
+								break
+							}
+						}
+						newBlocks := make([]map[string]interface{}, 0, len(blocks)+len(textBlocks))
+						newBlocks = append(newBlocks, blocks[:insertAt]...)
+						newBlocks = append(newBlocks, textBlocks...)
+						newBlocks = append(newBlocks, blocks[insertAt:]...)
+						toolUseMsg["content"] = newBlocks
+					}
+				}
+
+				if len(anthroMessages) > 0 {
+					last := anthroMessages[len(anthroMessages)-1]
+					if last["role"] == "user" {
+						if content, ok := last["content"].([]map[string]interface{}); ok {
+							last["content"] = append(content, toolResults...)
 						} else {
-							anthroMessages = append(anthroMessages, map[string]interface{}{
-								"role":    "user",
-								"content": toolResults,
-							})
+							last["content"] = toolResults
 						}
 					} else {
 						anthroMessages = append(anthroMessages, map[string]interface{}{
@@ -144,6 +259,11 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 							"content": toolResults,
 						})
 					}
+				} else {
+					anthroMessages = append(anthroMessages, map[string]interface{}{
+						"role":    "user",
+						"content": toolResults,
+					})
 				}
 			}
 
@@ -292,18 +412,81 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 						anthroMessages = append(anthroMessages, msg)
 					}
 				} else if item.Type == "function_call" {
-					var input interface{} = map[string]interface{}{}
-					if item.Args != "" {
-						json.Unmarshal([]byte(item.Args), &input)
+					// Parse arguments strictly. The Responses-API
+					// function_call `arguments` field is a JSON-encoded
+					// STRING per OpenAI's spec — its decoded value is the
+					// tool's input JSON. Codex (and other Responses-API
+					// clients) sometimes send malformed values here — e.g.
+					// two concatenated JSON objects from a stale
+					// tool_use_id replay like
+					// `{"command": "..."}{"command": "..."}`, or a bare
+					// value that's not a JSON object. The previous
+					// implementation silently swallowed the parse error
+					// and forwarded `input: {}` to Anthropic, which then
+					// rejected the request with HTTP 400 "invalid params,
+					// 400 (2013)" the moment any downstream tool's
+					// input_schema declared required fields (e.g.
+					// shell_command requires a "command" property).
+					//
+					// On any failure path (empty arguments, inner JSON
+					// doesn't parse, or inner JSON isn't an object), drop
+					// the tool_use entirely and remember its call_id so
+					// the matching function_call_output is also skipped —
+					// that avoids Anthropic's 400 "unexpected tool_use_id"
+					// when the result block references a tool_use we
+					// didn't emit.
+					//
+					// item.Args is json.RawMessage. Two shapes are valid
+					// in the wild:
+					//
+					//   - OpenAI Responses-API spec: a JSON-encoded string,
+					//     e.g. `"arguments": "{\"command\":\"ls\"}"`.
+					//     json.Unmarshal yields a Go string holding the
+					//     inner JSON, which must be parsed again.
+					//   - Non-conforming clients: a JSON object directly,
+					//     e.g. `"arguments": {"command":"ls"}`.
+					//     json.Unmarshal yields a map already.
+					//
+					// We accept both and normalise to the map form.
+					argsStr := strings.TrimSpace(string(item.Args))
+					if argsStr == "" || argsStr == "null" {
+						droppedToolUseIDs[item.CallID] = struct{}{}
+					} else {
+						var input interface{}
+						if err := json.Unmarshal([]byte(argsStr), &input); err != nil {
+							droppedToolUseIDs[item.CallID] = struct{}{}
+						} else if s, ok := input.(string); ok {
+							// Case A: the value was a JSON-encoded
+							// string. Parse the inner JSON.
+							inner := strings.TrimSpace(s)
+							if err := json.Unmarshal([]byte(inner), &input); err != nil {
+								droppedToolUseIDs[item.CallID] = struct{}{}
+							}
+						}
+						if _, ok := input.(map[string]interface{}); !ok {
+							// Anthropic's tool_use.input must be a JSON
+							// object. A bare string/number/array/bool/null
+							// from a non-conforming client would be
+							// rejected, so drop those cases too.
+							droppedToolUseIDs[item.CallID] = struct{}{}
+						} else {
+							toolUse := map[string]interface{}{
+								"type":  "tool_use",
+								"id":    item.CallID,
+								"name":  item.Name,
+								"input": input,
+							}
+							pendingToolUses = append(pendingToolUses, toolUse)
+						}
 					}
-					toolUse := map[string]interface{}{
-						"type":  "tool_use",
-						"id":    item.CallID,
-						"name":  item.Name,
-						"input": input,
-					}
-					pendingToolUses = append(pendingToolUses, toolUse)
 				} else if item.Type == "function_call_output" {
+					if _, dropped := droppedToolUseIDs[item.CallID]; dropped {
+						// Companion of a dropped tool_use above. Skip so
+						// we don't emit a tool_result pointing at a
+						// tool_use_id that doesn't exist in this turn's
+						// messages.
+						continue
+					}
 					flushToolUses()
 					toolResults := []map[string]interface{}{
 						{
@@ -396,6 +579,22 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 				if name == "" {
 					// Without a name the tool is unusable — drop it.
 					continue
+				}
+				// Codex emits non-standard tool shapes that have no
+				// `parameters` field at all — for example
+				// `apply_patch` (type:"custom", carries a freeform
+				// `format` description) and the namespace tools
+				// `image_gen` / `codex_app` (type:"namespace",
+				// contains a sub-list of inner tools). Anthropic
+				// rejects `input_schema: null` with HTTP 400 ("tools.
+				// 0.input_schema: Input tag does not exist"), so
+				// substitute a permissive empty-object schema when
+				// params is missing. The Codex client never actually
+				// invokes these tools through the proxy for Anthropic
+				// backends in practice, so an unrestricted schema is
+				// safe.
+				if params == nil {
+					params = map[string]interface{}{"type": "object"}
 				}
 				anthroTools = append(anthroTools, map[string]interface{}{
 					"name":         name,
