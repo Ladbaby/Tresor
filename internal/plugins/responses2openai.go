@@ -244,12 +244,22 @@ func (t *Responses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 		oaiBody["messages"] = messages
 	}
 
-	// Passthrough tools and tool_choice
+	// Convert tools: Responses-API flat format → Chat Completions envelope.
+	// Codex (and the Responses API generally) emit tools as
+	//   {type:"function", name:"...", description:"...", parameters:{...}, strict:false}
+	// while Chat Completions expects
+	//   {type:"function", function:{name:"...", description:"...", parameters:{...}, strict?}}
+	// `strict: false` is Responses-API-specific — many OpenAI-compat servers
+	// (Cherry Studio, llama.cpp, etc.) reject it. Drop it to keep the
+	// request acceptable to the broadest set of Chat Completions endpoints.
 	if len(respReq.Tools) > 0 {
-		oaiBody["tools"] = respReq.Tools
+		oaiBody["tools"] = convertResponsesToolsToChatCompletions(respReq.Tools)
 	}
+	// tool_choice: Responses API uses {type:"function", name:"..."} while
+	// Chat Completions uses {type:"function", function:{name:"..."}}.
+	// String forms ("auto", "required", "none") are identical.
 	if len(respReq.ToolChoice) > 0 {
-		oaiBody["tool_choice"] = respReq.ToolChoice
+		oaiBody["tool_choice"] = convertResponsesToolChoiceToChatCompletions(respReq.ToolChoice)
 	}
 
 	// Reasoning effort
@@ -1091,6 +1101,121 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 // Anthropic SSE (event: / data: / blank line), so it delegates.
 func writeResponsesSSE(buf *bytes.Buffer, eventType string, data interface{}) {
 	writeAnthropicSSE(buf, eventType, data)
+}
+
+// convertResponsesToolsToChatCompletions turns the Responses-API flat tool
+// shape into the Chat Completions envelope shape.
+//
+// Responses API (Codex, OpenAI Responses, etc.):
+//
+//	{ "type": "function", "name": "...", "description": "...",
+//	  "parameters": {...}, "strict": false }
+//
+// Chat Completions API:
+//
+//	{ "type": "function", "function": { "name": "...", "description": "...",
+//	  "parameters": {...}, "strict": true|false } }
+//
+// If the input is already in Chat Completions envelope form (i.e. has a
+// `function` key) it is preserved as-is. Tools that are neither the flat
+// Responses shape nor a recognized function envelope — e.g. Codex-internal
+// `type: "custom"`, `type: "namespace"`, `type: "tool_search"` — are
+// dropped: Chat Completions has no equivalent concept and most servers
+// reject unknown tool types with a 400.
+func convertResponsesToolsToChatCompletions(raw json.RawMessage) []map[string]interface{} {
+	var tools []map[string]interface{}
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		// Could not parse as an array — return nil so the caller omits tools
+		// entirely (preserves prior behavior on garbage input).
+		return nil
+	}
+	out := make([]map[string]interface{}, 0, len(tools))
+	for _, tool := range tools {
+		converted, keep := convertResponsesToolToChatCompletions(tool)
+		if keep {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+func convertResponsesToolToChatCompletions(tool map[string]interface{}) (map[string]interface{}, bool) {
+	toolType, _ := tool["type"].(string)
+	// Already in Chat Completions envelope form — preserve as long as it's a function.
+	if _, hasFn := tool["function"]; hasFn {
+		if toolType == "" || toolType == "function" {
+			return tool, true
+		}
+		return nil, false
+	}
+	// Only the flat Responses shape with type:"function" can be converted;
+	// any other type (custom, namespace, tool_search, ...) has no
+	// Chat Completions equivalent and would be rejected by the downstream.
+	if toolType != "function" {
+		return nil, false
+	}
+
+	fn := map[string]interface{}{}
+	if name, ok := tool["name"]; ok {
+		fn["name"] = name
+	}
+	if desc, ok := tool["description"]; ok {
+		fn["description"] = desc
+	}
+	if params, ok := tool["parameters"]; ok {
+		fn["parameters"] = params
+	}
+	// Only forward `strict` when it is explicitly true. `strict: false` is
+	// the Responses-API default and many OpenAI-compatible Chat Completions
+	// servers (Cherry Studio, llama.cpp, etc.) reject it as an unknown
+	// field. Omitting it matches the behavior of those servers and is
+	// semantically equivalent to false.
+	if strict, ok := tool["strict"]; ok {
+		if b, isBool := strict.(bool); isBool && b {
+			fn["strict"] = true
+		}
+	}
+
+	return map[string]interface{}{
+		"type":     "function",
+		"function": fn,
+	}, true
+}
+
+// convertResponsesToolChoiceToChatCompletions converts a Responses-API
+// tool_choice value into the Chat Completions equivalent.
+//
+// String forms ("auto", "required", "none") are identical in both APIs and
+// pass through unchanged. The object form differs:
+//
+//	Responses:   { "type": "function", "name": "shell_command" }
+//	Chat Comp:   { "type": "function", "function": { "name": "shell_command" } }
+//
+// If the input cannot be parsed or doesn't match either known shape, it
+// is returned verbatim so providers with custom tool_choice semantics
+// (e.g. hosted classifiers) keep working.
+func convertResponsesToolChoiceToChatCompletions(raw json.RawMessage) interface{} {
+	// String form — both APIs share the same vocabulary.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	// Object form — Responses uses `name`, Chat Completions uses `function.name`.
+	var obj map[string]interface{}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return json.RawMessage(raw) // pass through unchanged
+	}
+	if _, hasFn := obj["function"]; hasFn {
+		// Already Chat Completions-shaped.
+		return obj
+	}
+	if name, ok := obj["name"]; ok {
+		return map[string]interface{}{
+			"type":     "function",
+			"function": map[string]interface{}{"name": name},
+		}
+	}
+	return obj
 }
 
 // Ensure interface compliance.
