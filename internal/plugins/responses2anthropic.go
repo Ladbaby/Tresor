@@ -54,8 +54,49 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 			// Collect tool_use blocks to merge into preceding assistant message
 			var pendingToolUses []map[string]interface{}
 
+			// Collect redacted_thinking blocks (from Responses API
+			// reasoning items) to merge into the assistant message they
+			// logically precede. Codex re-sends prior turns' reasoning
+			// back as encrypted blobs; Anthropic accepts them as
+			// redacted_thinking content blocks carrying an opaque `data`
+			// field, so the bytes round-trip safely even though neither
+			// Tresor nor Anthropic can decrypt them.
+			var pendingReasoning []map[string]interface{}
+
+			flushReasoning := func() {
+				if len(pendingReasoning) == 0 {
+					return
+				}
+				if len(anthroMessages) > 0 {
+					last := anthroMessages[len(anthroMessages)-1]
+					if last["role"] == "assistant" {
+						if content, ok := last["content"].([]map[string]interface{}); ok {
+							last["content"] = append(content, pendingReasoning...)
+						} else {
+							last["content"] = pendingReasoning
+						}
+					} else {
+						anthroMessages = append(anthroMessages, map[string]interface{}{
+							"role":    "assistant",
+							"content": pendingReasoning,
+						})
+					}
+				} else {
+					anthroMessages = append(anthroMessages, map[string]interface{}{
+						"role":    "assistant",
+						"content": pendingReasoning,
+					})
+				}
+				pendingReasoning = nil
+			}
+
 			flushToolUses := func() {
 				if len(pendingToolUses) > 0 {
+					// Tool calls must come after any pending reasoning
+					// in the same assistant message: flush reasoning
+					// first so the assistant content block order is
+					// [redacted_thinking..., tool_use...].
+					flushReasoning()
 					if len(anthroMessages) > 0 {
 						last := anthroMessages[len(anthroMessages)-1]
 						if last["role"] == "assistant" {
@@ -108,6 +149,24 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 
 			for _, item := range items {
 				if item.Role != "" {
+					// Pending reasoning blocks (Responses API encrypted
+					// reasoning blobs) belong with the assistant message
+					// they logically precede:
+					//   - if the next role-bearing item is "assistant",
+					//     prepend them to the new assistant message's
+					//     content so redacted_thinking blocks come before
+					//     text/refusal/tool_use in Anthropic's required
+					//     block order;
+					//   - otherwise materialize them as a standalone
+					//     assistant message now, since dangling reasoning
+					//     with no anchor would be lost.
+					if item.Role == "assistant" && len(pendingReasoning) > 0 {
+						// Merge happens inline in the assistant case below
+						// by prepending pendingReasoning to the new msg's
+						// content. pendingReasoning is consumed there.
+					} else {
+						flushReasoning()
+					}
 					flushToolUses()
 
 					switch item.Role {
@@ -164,7 +223,71 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 							var s string
 							if json.Unmarshal(item.Content, &s) == nil {
 								msg["content"] = s
+							} else {
+								// Array-of-parts: Responses API represents prior
+								// assistant turns as [{type:"output_text",
+								// text:"..."}] (and occasionally
+								// [{type:"refusal", refusal:"..."}]). Without
+								// this fallback the conversion silently emits
+								// an assistant message with no content field,
+								// which Anthropic rejects with HTTP 400
+								// ("input json is empty").
+								var parts []responsesContentPart
+								if err := json.Unmarshal(item.Content, &parts); err == nil {
+									blocks := make([]map[string]interface{}, 0, len(parts))
+									for _, p := range parts {
+										switch p.Type {
+										case "output_text":
+											if p.Text != "" {
+												blocks = append(blocks, map[string]interface{}{
+													"type": "text",
+													"text": p.Text,
+												})
+											}
+										case "refusal":
+											if p.Refusal != "" {
+												blocks = append(blocks, map[string]interface{}{
+													"type":    "refusal",
+													"refusal": p.Refusal,
+												})
+											}
+										}
+									}
+									if len(blocks) > 0 {
+										msg["content"] = blocks
+									}
+								}
 							}
+						}
+						// If reasoning blocks were buffered for this assistant
+						// message (typically from a prior turn's
+						// {type:"reasoning", encrypted_content:"..."} item),
+						// prepend them. Anthropic requires the block order
+						// redacted_thinking → text → tool_use inside an
+						// assistant message, so reasoning must come first.
+						if len(pendingReasoning) > 0 {
+							switch existing := msg["content"].(type) {
+							case string:
+								// Plain-string content + pending reasoning
+								// becomes a block array. Wrap the string in
+								// a text block alongside the redacted_thinking.
+								wrapped := []map[string]interface{}{pendingReasoning[0]}
+								if existing != "" {
+									wrapped = append(wrapped, map[string]interface{}{
+										"type": "text",
+										"text": existing,
+									})
+								}
+								if len(pendingReasoning) > 1 {
+									wrapped = append(wrapped, pendingReasoning[1:]...)
+								}
+								msg["content"] = wrapped
+							case []map[string]interface{}:
+								msg["content"] = append(pendingReasoning, existing...)
+							case nil:
+								msg["content"] = pendingReasoning
+							}
+							pendingReasoning = nil
 						}
 						anthroMessages = append(anthroMessages, msg)
 					}
@@ -190,9 +313,23 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 						},
 					}
 					flushToolResults(toolResults)
+				} else if item.Type == "reasoning" && item.EncryptedContent != "" {
+					// Codex-style encrypted reasoning. Buffer the bytes
+					// as an Anthropic redacted_thinking block; the block
+					// will be merged into the next assistant message's
+					// content (or flushed as a standalone assistant
+					// message if no assistant message follows).
+					pendingReasoning = append(pendingReasoning, map[string]interface{}{
+						"type": "redacted_thinking",
+						"data": item.EncryptedContent,
+					})
 				}
 			}
 			flushToolUses()
+			// Any reasoning left dangling after the loop has no assistant
+			// message to attach to — flush it as a standalone assistant
+			// message so the bytes aren't silently lost.
+			flushReasoning()
 		} else {
 			// Handle string input: the Responses API allows input to be a plain string
 			var inputStr string

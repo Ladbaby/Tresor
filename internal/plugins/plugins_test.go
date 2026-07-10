@@ -2766,6 +2766,216 @@ func TestResponses2Anthropic_TransformRequest_Reasoning(t *testing.T) {
 	}
 }
 
+// TestResponses2Anthropic_TransformRequest_AssistantOutputParts verifies the
+// second-turn Codex request path: a prior assistant message is replayed with
+// `content` as an array of Responses-API output parts (type:"output_text").
+// The conversion must emit a valid Anthropic assistant message whose content
+// field is a non-empty text block. Otherwise Anthropic rejects the request
+// with HTTP 400 ("input json is empty").
+func TestResponses2Anthropic_TransformRequest_AssistantOutputParts(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "hi"},
+			{"role": "assistant", "content": [{"type": "output_text", "text": "Hey! What can I help you with today?"}]},
+			{"role": "user", "content": "what's in setup.sh?"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages, ok := result["messages"].([]interface{})
+	if !ok {
+		t.Fatalf("expected messages array, got %T", result["messages"])
+	}
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(messages))
+	}
+	// Verify the prior assistant message carries its text content.
+	asst, ok := messages[1].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected assistant message to be a map, got %T", messages[1])
+	}
+	if asst["role"] != "assistant" {
+		t.Fatalf("expected role 'assistant', got %v", asst["role"])
+	}
+	blocks, ok := asst["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected assistant content to be a block array (not nil/missing), got %T (value=%v) — this would produce a 400 from Anthropic", asst["content"], asst["content"])
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 content block, got %d", len(blocks))
+	}
+	block, ok := blocks[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected block to be a map, got %T", blocks[0])
+	}
+	if block["type"] != "text" {
+		t.Fatalf("expected block type 'text', got %v", block["type"])
+	}
+	if block["text"] != "Hey! What can I help you with today?" {
+		t.Fatalf("expected assistant text, got %v", block["text"])
+	}
+}
+
+// TestResponses2Anthropic_TransformRequest_AssistantRefusal verifies that a
+// prior assistant turn containing a refusal part is mapped to Anthropic's
+// `refusal` content block.
+func TestResponses2Anthropic_TransformRequest_AssistantRefusal(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "do bad thing"},
+			{"role": "assistant", "content": [{"type": "refusal", "refusal": "I cannot help with that."}]},
+			{"role": "user", "content": "ok"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages, _ := result["messages"].([]interface{})
+	asst := messages[1].(map[string]interface{})
+	blocks, _ := asst["content"].([]interface{})
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blocks))
+	}
+	block := blocks[0].(map[string]interface{})
+	if block["type"] != "refusal" {
+		t.Fatalf("expected refusal block, got %v", block["type"])
+	}
+	if block["refusal"] != "I cannot help with that." {
+		t.Fatalf("unexpected refusal text: %v", block["refusal"])
+	}
+}
+
+// TestResponses2Anthropic_TransformRequest_ReasoningItem verifies that a
+// Responses-API reasoning item (type:"reasoning", encrypted_content:"...")
+// from a prior turn is mapped to an Anthropic redacted_thinking content
+// block. This is the Codex second-turn scenario where the encrypted
+// reasoning blob must round-trip through the proxy.
+func TestResponses2Anthropic_TransformRequest_ReasoningItem(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "hi"},
+			{"type": "reasoning", "encrypted_content": "abc123encryptedblob"},
+			{"role": "assistant", "content": [{"type": "output_text", "text": "Hey!"}]},
+			{"role": "user", "content": "what's next?"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages, ok := result["messages"].([]interface{})
+	if !ok {
+		t.Fatalf("expected messages array, got %T", result["messages"])
+	}
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages (user, assistant, user), got %d", len(messages))
+	}
+	// The reasoning block must have been merged into the assistant message
+	// (item [6]) that immediately follows it, producing redacted_thinking +
+	// text content blocks.
+	asst, ok := messages[1].(map[string]interface{})
+	if !ok || asst["role"] != "assistant" {
+		t.Fatalf("expected assistant at index 1, got %v", messages[1])
+	}
+	blocks, ok := asst["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected assistant content to be a block array, got %T (value=%v)", asst["content"], asst["content"])
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks [redacted_thinking, text] in assistant, got %d (%v)", len(blocks), blocks)
+	}
+	first := blocks[0].(map[string]interface{})
+	if first["type"] != "redacted_thinking" {
+		t.Fatalf("expected first block to be redacted_thinking, got %v", first["type"])
+	}
+	if first["data"] != "abc123encryptedblob" {
+		t.Fatalf("expected encrypted content to round-trip verbatim, got %v", first["data"])
+	}
+	second := blocks[1].(map[string]interface{})
+	if second["type"] != "text" {
+		t.Fatalf("expected second block to be text, got %v", second["type"])
+	}
+	if second["text"] != "Hey!" {
+		t.Fatalf("expected text 'Hey!', got %v", second["text"])
+	}
+}
+
+// TestResponses2Anthropic_TransformRequest_ReasoningItemDangling verifies
+// that a trailing reasoning item with no following assistant message is
+// flushed as a standalone assistant message containing only the
+// redacted_thinking block. Without this, the bytes would be silently
+// dropped.
+func TestResponses2Anthropic_TransformRequest_ReasoningItemDangling(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "hi"},
+			{"type": "reasoning", "encrypted_content": "trailing"}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages, _ := result["messages"].([]interface{})
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages (user + assistant with redacted_thinking), got %d", len(messages))
+	}
+	asst := messages[1].(map[string]interface{})
+	if asst["role"] != "assistant" {
+		t.Fatalf("expected trailing assistant, got %v", asst["role"])
+	}
+	blocks, _ := asst["content"].([]interface{})
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blocks))
+	}
+	block := blocks[0].(map[string]interface{})
+	if block["type"] != "redacted_thinking" {
+		t.Fatalf("expected redacted_thinking block, got %v", block["type"])
+	}
+	if block["data"] != "trailing" {
+		t.Fatalf("expected encrypted content 'trailing', got %v", block["data"])
+	}
+}
+
 func TestResponses2Anthropic_TransformResponse_NonStreaming(t *testing.T) {
 	p := &Responses2Anthropic{}
 	respBody := []byte(`{
