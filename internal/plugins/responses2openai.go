@@ -417,6 +417,13 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 	// item because it shared its index with the assistant message.
 	var reasoningOutputIdx, messageOutputIdx int
 	var nextOutputIdx int
+	// sequence_number is a monotonically increasing integer that the
+	// OpenAI Responses API assigns to every SSE event. The official
+	// OpenAI SDKs (openai-node, openai-python) require it on every event
+	// type. We track it locally here for the buffered path; the
+	// per-chunk path (TransformStreamChunk) tracks the same counter in
+	// its state struct.
+	var seq int
 	toolCallAcc := make(map[int]*r2oStreamToolCall)
 	toolCallOutputIdx := make(map[int]int)
 
@@ -581,23 +588,40 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 						toolCallOutputIdx[tc.Index] = nextOutputIdx
 						nextOutputIdx++
 					}
+					// The function_call item MUST include an `arguments`
+					// field even on the `added` event (the value is "").
+					// Codex's ResponseItem::FunctionCall deserializer marks
+					// `arguments` as a non-optional String; if it is
+					// missing, serde returns Err, Codex logs a debug
+					// message, and the entire tool call is silently
+					// dropped. See codex-rs/protocol/src/models.rs:988.
+					// We also include `status: "in_progress"` and the
+					// `item.id` (== `item.call_id`) so subsequent
+					// `function_call_arguments.delta` and `.done` events
+					// can be correlated by `item_id`.
+					seq++
 					writeResponsesSSE(&out, "response.output_item.added", map[string]any{
-						"type":         "response.output_item.added",
-						"output_index": toolCallOutputIdx[tc.Index],
+						"type":            "response.output_item.added",
+						"output_index":    toolCallOutputIdx[tc.Index],
+						"sequence_number": seq,
 						"item": map[string]any{
-							"type":    "function_call",
-							"id":      tc.ID,
-							"call_id": tc.ID,
-							"name":    tc.Function.Name,
+							"type":      "function_call",
+							"id":        tc.ID,
+							"call_id":   tc.ID,
+							"name":      tc.Function.Name,
+							"arguments": "",
+							"status":    "in_progress",
 						},
 					})
 				}
 				if tc.Function.Arguments != "" {
+					seq++
 					writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]any{
-						"type":         "response.function_call_arguments.delta",
-						"delta":        tc.Function.Arguments,
-						"call_id":      tc.ID,
-						"output_index": toolCallOutputIdx[tc.Index],
+						"type":            "response.function_call_arguments.delta",
+						"delta":           tc.Function.Arguments,
+						"item_id":         tc.ID,
+						"output_index":    toolCallOutputIdx[tc.Index],
+						"sequence_number": seq,
 					})
 				}
 			}
@@ -674,20 +698,27 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 				sort.Ints(toolIndices)
 				for _, idx := range toolIndices {
 					acc := toolCallAcc[idx]
+					seq++
 					writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
-						"type":      "response.function_call_arguments.done",
-						"call_id":   acc.ID,
-						"name":      acc.Name,
-						"arguments": acc.Arguments,
+						"type":            "response.function_call_arguments.done",
+						"item_id":         acc.ID,
+						"output_index":    toolCallOutputIdx[idx],
+						"name":            acc.Name,
+						"arguments":       acc.Arguments,
+						"sequence_number": seq,
 					})
+					seq++
 					writeResponsesSSE(&out, "response.output_item.done", map[string]any{
-						"type":         "response.output_item.done",
-						"output_index": toolCallOutputIdx[idx],
+						"type":            "response.output_item.done",
+						"output_index":    toolCallOutputIdx[idx],
+						"sequence_number": seq,
 						"item": map[string]any{
-							"type":    "function_call",
-							"id":      acc.ID,
-							"call_id": acc.ID,
-							"status":  "completed",
+							"type":      "function_call",
+							"id":        acc.ID,
+							"call_id":   acc.ID,
+							"name":      acc.Name,
+							"arguments": acc.Arguments,
+							"status":    "completed",
 						},
 					})
 				}
@@ -760,6 +791,13 @@ type r2oStreamState struct {
 	// model will produce) still produces monotonically-increasing
 	// output_index values that match between `added` and `done` events.
 	nextOutputIdx int
+	// sequence_number is a monotonically increasing integer that
+	// accompanies every Responses-API SSE event. The official OpenAI
+	// SDKs (openai-node, openai-python) mark it as a required field on
+	// every event type. Codex's deserializer does not require it, but
+	// other Responses-API clients do, and including it costs nothing.
+	// It starts at 0 and increments by 1 per emitted event.
+	sequenceNumber int
 }
 
 func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.PipelineContext) (engine.SSEChunk, error) {
@@ -1054,24 +1092,30 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 					state.ToolCallOutputIdx[tc.Index] = state.nextOutputIdx
 					state.nextOutputIdx++
 				}
+				state.sequenceNumber++
 				writeResponsesSSE(&out, "response.output_item.added", map[string]any{
-					"type":         "response.output_item.added",
-					"output_index": state.ToolCallOutputIdx[tc.Index],
+					"type":            "response.output_item.added",
+					"output_index":    state.ToolCallOutputIdx[tc.Index],
+					"sequence_number": state.sequenceNumber,
 					"item": map[string]any{
-						"type":    "function_call",
-						"id":      tc.ID,
-						"call_id": tc.ID,
-						"name":    tc.Function.Name,
+						"type":      "function_call",
+						"id":        tc.ID,
+						"call_id":   tc.ID,
+						"name":      tc.Function.Name,
+						"arguments": "",
+						"status":    "in_progress",
 					},
 				})
 			}
 			if tc.Function.Arguments != "" {
 				acc.Arguments += tc.Function.Arguments
+				state.sequenceNumber++
 				writeResponsesSSE(&out, "response.function_call_arguments.delta", map[string]any{
-					"type":         "response.function_call_arguments.delta",
-					"delta":        tc.Function.Arguments,
-					"call_id":      acc.ID,
-					"output_index": state.ToolCallOutputIdx[tc.Index],
+					"type":            "response.function_call_arguments.delta",
+					"delta":           tc.Function.Arguments,
+					"item_id":         acc.ID,
+					"output_index":    state.ToolCallOutputIdx[tc.Index],
+					"sequence_number": state.sequenceNumber,
 				})
 			}
 		}
@@ -1152,20 +1196,27 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			sort.Ints(toolIndices)
 			for _, idx := range toolIndices {
 				acc := state.ToolCallAcc[idx]
+				state.sequenceNumber++
 				writeResponsesSSE(&out, "response.function_call_arguments.done", map[string]any{
-					"type":      "response.function_call_arguments.done",
-					"call_id":   acc.ID,
-					"name":      acc.Name,
-					"arguments": acc.Arguments,
+					"type":            "response.function_call_arguments.done",
+					"item_id":         acc.ID,
+					"output_index":    state.ToolCallOutputIdx[idx],
+					"name":            acc.Name,
+					"arguments":       acc.Arguments,
+					"sequence_number": state.sequenceNumber,
 				})
+				state.sequenceNumber++
 				writeResponsesSSE(&out, "response.output_item.done", map[string]any{
-					"type":         "response.output_item.done",
-					"output_index": state.ToolCallOutputIdx[idx],
+					"type":            "response.output_item.done",
+					"output_index":    state.ToolCallOutputIdx[idx],
+					"sequence_number": state.sequenceNumber,
 					"item": map[string]any{
-						"type":    "function_call",
-						"id":      acc.ID,
-						"call_id": acc.ID,
-						"status":  "completed",
+						"type":      "function_call",
+						"id":        acc.ID,
+						"call_id":   acc.ID,
+						"name":      acc.Name,
+						"arguments": acc.Arguments,
+						"status":    "completed",
 					},
 				})
 			}
@@ -1212,6 +1263,13 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 // writeResponsesSSE writes a Responses-API SSE event. Framing is identical to
 // Anthropic SSE (event: / data: / blank line), so it delegates.
+//
+// Callers are responsible for including a `sequence_number` field on the
+// payload (the official OpenAI SDKs mark this required on every
+// Responses-API event). The per-chunk streaming transformer tracks a
+// monotonic counter in its state; the buffered transformer has its own
+// local counter. This helper is intentionally stateless so it can be
+// shared between the two paths.
 func writeResponsesSSE(buf *bytes.Buffer, eventType string, data interface{}) {
 	writeAnthropicSSE(buf, eventType, data)
 }
