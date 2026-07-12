@@ -114,7 +114,7 @@ The codebase follows a clean layered structure with three core concerns:
 | `internal/config/` | YAML configuration loader with auto-detect path resolution |
 | `internal/store/` | SQLite data layer: `store.go` (schema/migrations/upsert), `rule.go` (CRUD + matching), `downstream.go` (CRUD + model IDs), `alias.go` (alias CRUD + grouping) |
 | `internal/engine/` | Core gateway handler: `engine.go` (proxy, model resolution, auto-translation, model listing), `pipeline.go` (transformer orchestration), `types.go` (interfaces), `logger.go` (request logging + SSE) |
-| `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go`, `fix_anthropic_images.go`, `openai2responses.go`, `responses2openai.go`, `responses2anthropic.go`, `anthropic2responses.go` |
+| `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go`, `fix_anthropic_images.go`, `anthropic_usage_fix.go`, `openai2responses.go`, `responses2openai.go`, `responses2anthropic.go`, `anthropic2responses.go` |
 | `internal/api/` | Admin REST API: `router.go` (routing + auth), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list + model fetch), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE + log level), `config.go` (runtime config), `icons.go` (model icon serving), `icons_admin.go` (icon refresh), `embed.go` (embedded web UI) |
 | `internal/middleware/` | Cookie-based session auth middleware for admin API (with rate limiting and multi-session support) |
 | `internal/icons/` | Model icon fetching, pattern matching, and CDN caching via `@lobehub/icons-static-svg` |
@@ -145,12 +145,13 @@ The codebase follows a clean layered structure with three core concerns:
 
 ### Plugin System
 
-Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing requests), `ResponseTransformer` (modifies incoming responses), and `StreamResponseTransformer` (transforms SSE events). Thirteen built-in plugins exist:
+Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing requests), `ResponseTransformer` (modifies incoming responses), and `StreamResponseTransformer` (transforms SSE events). Fourteen built-in plugins exist:
 
 - **custom_header**: Injects arbitrary HTTP headers into forwarded requests
 - **openai2anthropic**: Converts OpenAI Chat Completion format to Anthropic Messages format (and vice versa for responses)
 - **fix_anthropic_images**: Extracts image parts from tool_result.content[] and promotes them to top-level message content for Anthropic-compatible backends
 - **anthropic2openai**: Converts Anthropic Messages format to OpenAI Chat Completion format (and vice versa for responses)
+- **fix_anthropic_usage**: Normalizes the Anthropic Messages `usage` block — adds missing `cache_creation_input_tokens` / `cache_read_input_tokens` fields in `message_start` and synthesizes a `usage` block in `message_delta` when the upstream omits it (for providers such as MiniMax-M3 with incomplete usage reporting)
 - **responses2openai**: Converts OpenAI Responses API format to Chat Completions format (and vice versa)
 - **responses2anthropic**: Converts OpenAI Responses API format to Anthropic Messages format (and vice versa)
 - **openai2responses**: Converts OpenAI Chat Completion format to Responses API format
