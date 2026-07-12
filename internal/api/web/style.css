@@ -885,6 +885,22 @@ tr:hover {
     font-size: 0.85rem;
 }
 
+/* Banner shown above parsed sections for Anthropic and OpenAI Responses
+   APIs, explaining that the section order is the LLM's prompt-cache
+   processing order rather than the raw JSON key order. */
+.inspect-order-note {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 0.75rem;
+    margin: 0 0 0.75rem 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+}
+
 .inspect-usage {
     display: flex;
     gap: 1rem;

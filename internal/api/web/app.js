@@ -1351,6 +1351,8 @@ function esc(s) {
 // ---- Help Tooltip Texts ----
 const tooltipTexts = {
     'alias.regex_badge': "This group uses a regex pattern — matches any incoming model name the regex accepts. (e.g., claude-opus.* matches both claude-opus-4-7 and claude-opus-4-8)",
+    'inspect.llm_order_anthropic': "Display order follows the Anthropic cache prefix hierarchy (tools → system → messages), which is the order the model actually consumes the prompt. The raw JSON key order may differ. See https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching",
+    'inspect.llm_order_responses': "Display order follows the OpenAI Responses server-injected prefix (tools → instructions → input[]), which is the order the model actually consumes the prompt. The raw JSON key order may differ. See https://openai.com/index/unrolling-the-codex-agent-loop/",
 };
 
 function makeHelpIcon(tooltip) {
@@ -2526,7 +2528,11 @@ function renderInspectSectionParsed(title, body, path, kind) {
         // lands at the same index it occupies in the raw body. The
         // section walker handles system/tools/messages/unknown-key
         // dispatch.
-        wrap.appendChild(renderParsedSections(parsedView.sections));
+        // Pass the detected format through so the renderer can attach
+        // a tooltip explaining that, for Anthropic and OpenAI Responses
+        // APIs, the section order is the LLM's prompt-cache processing
+        // order — not the raw JSON key order.
+        wrap.appendChild(renderParsedSections(parsedView.sections, parsedView.format));
         return wrap;
     }
     if (parsedView && parsedView.messages && parsedView.messages.length) {
@@ -3270,9 +3276,26 @@ function shortDescription(desc) {
 //   { type: 'usage',       usage: {...} }              // token-usage footer (messages carries its own)
 //   { type: 'json',        value: <unknown object> }   // pretty-printed JSON for unhandled top-level keys
 //   { type: 'skip' }                                    // placeholder, no output (e.g. model)
-function renderParsedSections(sections) {
+function renderParsedSections(sections, format) {
     const out = document.createElement('div');
     out.className = 'inspect-parsed';
+    // For Anthropic and OpenAI Responses APIs, the canonical sections
+    // (tools / system / instructions / messages / input) are emitted in
+    // the LLM's prompt-cache processing order, NOT the raw JSON key
+    // order. Surface a small banner with a tooltip so operators
+    // understand why the parsed view may not mirror the raw bytes.
+    const orderTooltipKey = (format === 'anthropic') ? 'inspect.llm_order_anthropic'
+        : (format === 'responses') ? 'inspect.llm_order_responses'
+        : null;
+    if (orderTooltipKey) {
+        const note = document.createElement('div');
+        note.className = 'inspect-order-note';
+        const label = document.createElement('span');
+        label.textContent = 'Display order: LLM processing order';
+        note.appendChild(label);
+        note.appendChild(makeHelpIcon(tooltipTexts[orderTooltipKey]));
+        out.appendChild(note);
+    }
     for (const sec of sections) {
         if (!sec || sec.type === 'skip') continue;
         if (sec.type === 'system') {
