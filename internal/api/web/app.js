@@ -2639,14 +2639,15 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
     return { messages: [resp], usage: resp.usage || null, complete: true, format: format };
 }
 
-// Walk the top-level keys of a parsed request body in their original
-// document order, emitting a flat list of sections the inspector can
-// render in place. The order preservation matters: an Anthropic
-// request has `system` then `tools` then `messages` (in the wild it
-// can also be `messages` first, then `system` after — see
-// claude-tap's prompt_snapshot for the full enumeration), and the
-// operator reading the inspector expects the tools[] array to sit
-// exactly where it does in the raw bytes.
+// Walk the top-level keys of a parsed request body, emitting a flat
+// list of sections the inspector can render in place.
+//
+// For Anthropic-format requests the sections are fixed in the LLM's
+// processing order: tools → system → messages (matching the cache
+// prefix hierarchy documented at
+// https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching).
+// For all other formats the sections follow the raw JSON key order so
+// the operator can see the document as it was actually sent.
 //
 // Keys we know how to render:
 //   - system / system_instruction: becomes a 'system' section
@@ -2697,9 +2698,33 @@ function buildRequestSections(parsed, format, path) {
         anthropic_version: 1, metadata_user_id: 1, safety_identifier: 1,
     };
 
+    // Track which canonical keys we've already emitted (only used in
+    // the Anthropic path, but declared here so the skip-set works for
+    // the generic key walk below).
+    const emitted = {};
+
+    if (format === 'anthropic') {
+        // Anthropic cache prefix hierarchy: tools → system → messages.
+        // Emit them in this LLM-processing order regardless of raw JSON
+        // key order.
+        if (tools.length) {
+            sections.push({ type: 'tools', tools: tools });
+            emitted['tools'] = true;
+        }
+        if (sysBlocks && sysBlocks.length) {
+            sections.push({ type: 'system', content: sysBlocks });
+            emitted[systemKey] = true;
+        }
+        if (messages && messages.length) {
+            sections.push({ type: 'messages', messages: messages });
+            emitted[messageKey] = true;
+        }
+    }
+
     const keys = Object.keys(parsed);
     for (const k of keys) {
         if (Object.prototype.hasOwnProperty.call(HIDDEN, k)) continue;
+        if (emitted[k]) continue;
         if (k === systemKey && sysBlocks && sysBlocks.length) {
             sections.push({ type: 'system', content: sysBlocks });
         } else if (k === 'tools' && tools.length) {
