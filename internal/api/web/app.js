@@ -1353,6 +1353,7 @@ const tooltipTexts = {
     'alias.regex_badge': "This group uses a regex pattern — matches any incoming model name the regex accepts. (e.g., claude-opus.* matches both claude-opus-4-7 and claude-opus-4-8)",
     'inspect.llm_order_anthropic': "Display order follows the Anthropic cache prefix hierarchy (tools → system → messages), which is the order the model actually consumes the prompt. The raw JSON key order may differ. See https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching",
     'inspect.llm_order_chat_completions': "Display order follows the LLM's prompt-processing order (tools → system → messages). Chat Completions itself doesn't document an order — we follow the convention used by major chat templates (e.g. Llama 3, Qwen): the system-role message is hoisted out of `messages[]` into a system block, tools are injected at the top of that block, and the remaining messages render in array order. The raw JSON key order may differ.",
+    'inspect.llm_order_gemini': "Display order follows Google's request-example convention (systemInstruction → tools → contents). Gemini itself does not document an explicit cache hierarchy, but the official request examples (e.g. the function_calling.sh shell snippet on https://ai.google.dev/api/generate-content) consistently use this top-level key order. The raw JSON key order may differ.",
     'inspect.llm_order_responses': "Display order follows the OpenAI Responses server-injected prefix (tools → instructions → input[]), which is the order the model actually consumes the prompt. The raw JSON key order may differ. See https://openai.com/index/unrolling-the-codex-agent-loop/",
 };
 
@@ -2649,9 +2650,9 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
 // Walk the top-level keys of a parsed request body, emitting a flat
 // list of sections the inspector can render in place.
 //
-// For Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
-// requests, the sections are emitted in the LLM's processing order
-// rather than raw JSON key order:
+// For every format Tresor recognises, the canonical sections are
+// emitted in the LLM's processing order rather than raw JSON key
+// order:
 //
 //   - Anthropic Messages:    tools → system → messages
 //     (cache prefix hierarchy, per the Anthropic docs:
@@ -2677,8 +2678,22 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
 //     prompt-caching cookbook §4.3 also confirms "Tools ... get
 //     injected before developer instructions".)
 //
-// For all other formats the sections follow the raw JSON key order so
-// the operator can see the document as it was actually sent.
+//   - Gemini:                systemInstruction → tools → contents
+//     (Google does not publish an explicit cache hierarchy, but the
+//     request examples in the official docs (notably the
+//     `function_calling.sh` shell snippet on
+//     https://ai.google.dev/api/generate-content) consistently order
+//     the top-level keys as system_instruction → tools → contents,
+//     and the caching guide
+//     https://ai.google.dev/gemini-api/docs/caching recommends
+//     "putting large and common contents at the beginning of your
+//     prompt" for implicit cache hits.)
+//
+// After the canonical sections are emitted, any remaining top-level
+// keys (operational controls like generationConfig, safetySettings,
+// temperature, top_p, etc.) are rendered as JSON below the canonical
+// blocks so the operator still sees them, just not in the way of the
+// LLM-relevant content.
 //
 // Keys we know how to render:
 //   - system / system_instruction: becomes a 'system' section
@@ -2729,9 +2744,8 @@ function buildRequestSections(parsed, format, path) {
         anthropic_version: 1, metadata_user_id: 1, safety_identifier: 1,
     };
 
-    // Track which canonical keys we've already emitted (only used in
-    // the canonical-order path below, but declared here so the
-    // skip-set works for the generic key walk).
+    // Track which canonical keys we've already emitted so the
+    // generic fall-through walker below doesn't double-print them.
     const emitted = {};
 
     if (format === 'anthropic' || format === 'chat_completions') {
@@ -2740,15 +2754,17 @@ function buildRequestSections(parsed, format, path) {
         // Chat Completions, normalizeRequest has already lifted the
         // system-role message out of `messages[]` into req.system, so
         // we treat it the same as Anthropic's top-level `system`
-        // field. Tools come first because the major chat templates
-        // inject them at the top of the rendered system block.
+        // field. Tools come first because the Anthropic cache prefix
+        // hierarchy is `tools → system → messages` and the major chat
+        // templates (Llama 3, Qwen) also inject tools at the top of
+        // the rendered system block.
         if (tools.length) {
             sections.push({ type: 'tools', tools: tools });
             emitted['tools'] = true;
         }
         if (sysBlocks && sysBlocks.length) {
             sections.push({ type: 'system', content: sysBlocks });
-            emitted[systemKey] = true;
+            if (systemKey) emitted[systemKey] = true;
         }
         if (messages && messages.length) {
             sections.push({ type: 'messages', messages: messages });
@@ -2777,37 +2793,59 @@ function buildRequestSections(parsed, format, path) {
             sections.push({ type: 'messages', messages: messages });
             emitted[messageKey] = true;
         }
+    } else if (format === 'gemini') {
+        // Google does not document an explicit prompt-cache hierarchy
+        // for the Gemini API, but the official docs use systemInstruction
+        // → tools → contents in their request examples (see e.g. the
+        // `function_calling.sh` shell snippet on
+        // https://ai.google.dev/api/generate-content#function_calling),
+        // and the caching guide at
+        // https://ai.google.dev/gemini-api/docs/caching recommends
+        // "putting large and common contents at the beginning of your
+        // prompt" for implicit cache hits, so we honour that convention
+        // by placing systemInstruction first. systemKey may be either
+        // `system_instruction` (snake_case) or `systemInstruction`
+        // (camelCase) depending on the client SDK; null means there
+        // was no systemInstruction in the body.
+        //
+        // NB: A snake_case `system_instruction` body will not surface
+        // a system section here because normalizeGeminiRequest only
+        // reads `body.systemInstruction` (camelCase). Fixing that
+        // belongs in sse-reassembler.js, not here.
+        if (sysBlocks && sysBlocks.length && systemKey) {
+            sections.push({ type: 'system', content: sysBlocks });
+            emitted[systemKey] = true;
+        }
+        if (tools.length) {
+            sections.push({ type: 'tools', tools: tools });
+            emitted['tools'] = true;
+        }
+        if (messages && messages.length) {
+            sections.push({ type: 'messages', messages: messages });
+            emitted[messageKey] = true;
+        }
     }
 
+    // After the canonical sections are emitted, render any remaining
+    // top-level keys (operational controls like generationConfig,
+    // safetySettings, temperature, etc.) as JSON so they're still
+    // visible — just not in front of the LLM-relevant content. We also
+    // fall back to this path entirely if the format wasn't recognised
+    // above, so an unknown body still renders sensibly.
     const keys = Object.keys(parsed);
     for (const k of keys) {
         if (Object.prototype.hasOwnProperty.call(HIDDEN, k)) continue;
         if (emitted[k]) continue;
-        if (k === systemKey && sysBlocks && sysBlocks.length) {
-            sections.push({ type: 'system', content: sysBlocks });
-        } else if (k === 'tools' && tools.length) {
-            sections.push({ type: 'tools', tools: tools });
-        } else if (k === messageKey && messages && messages.length) {
-            sections.push({ type: 'messages', messages: messages });
-        } else if (k === systemKey || k === messageKey || k === 'tools') {
-            // The key is one of the recognised ones but has no
-            // content. Skip rather than printing an empty placeholder
-            // — operators can see absence in the raw view.
-            continue;
+        const v = parsed[k];
+        if (v == null) continue;
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+            sections.push({ type: 'json', label: k, value: v });
+        } else if (Array.isArray(v) && v.every(x => x == null || typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean')) {
+            // Trivial array of scalars — render compactly without
+            // wrapping in JSON braces.
+            sections.push({ type: 'json', label: k, value: v });
         } else {
-            // Unrecognised top-level key. Show it as pretty JSON so
-            // nothing in the body is hidden from the operator.
-            const v = parsed[k];
-            if (v == null) continue;
-            if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-                sections.push({ type: 'json', label: k, value: v });
-            } else if (Array.isArray(v) && v.every(x => x == null || typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean')) {
-                // Trivial array of scalars — render compactly without
-                // wrapping in JSON braces.
-                sections.push({ type: 'json', label: k, value: v });
-            } else {
-                sections.push({ type: 'json', label: k, value: v });
-            }
+            sections.push({ type: 'json', label: k, value: v });
         }
     }
 
@@ -3305,6 +3343,7 @@ function renderParsedSections(sections, format) {
     // understand why the parsed view may not mirror the raw bytes.
     const orderTooltipKey = (format === 'anthropic') ? 'inspect.llm_order_anthropic'
         : (format === 'chat_completions') ? 'inspect.llm_order_chat_completions'
+        : (format === 'gemini') ? 'inspect.llm_order_gemini'
         : (format === 'responses') ? 'inspect.llm_order_responses'
         : null;
     if (orderTooltipKey) {
