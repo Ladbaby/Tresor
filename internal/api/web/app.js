@@ -2646,6 +2646,16 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
 // processing order: tools → system → messages (matching the cache
 // prefix hierarchy documented at
 // https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching).
+//
+// For OpenAI Responses-format requests the order is tools →
+// instructions → input[] (matching the server-controlled prefix
+// described at
+// https://openai.com/index/unrolling-the-codex-agent-loop/ — the
+// server-injected system message, then tools, then instructions, then
+// the user-controlled input array). Prompt-caching cookbook §4.3 also
+// confirms: "Tools, schemas, and their ordering ... get injected
+// before developer instructions."
+//
 // For all other formats the sections follow the raw JSON key order so
 // the operator can see the document as it was actually sent.
 //
@@ -2699,8 +2709,8 @@ function buildRequestSections(parsed, format, path) {
     };
 
     // Track which canonical keys we've already emitted (only used in
-    // the Anthropic path, but declared here so the skip-set works for
-    // the generic key walk below).
+    // the Anthropic / Responses path, but declared here so the
+    // skip-set works for the generic key walk below).
     const emitted = {};
 
     if (format === 'anthropic') {
@@ -2714,6 +2724,29 @@ function buildRequestSections(parsed, format, path) {
         if (sysBlocks && sysBlocks.length) {
             sections.push({ type: 'system', content: sysBlocks });
             emitted[systemKey] = true;
+        }
+        if (messages && messages.length) {
+            sections.push({ type: 'messages', messages: messages });
+            emitted[messageKey] = true;
+        }
+    } else if (format === 'responses') {
+        // OpenAI Responses cache prefix hierarchy: tools → instructions
+        // → input[]. The server-controlled prefix (system message,
+        // tools, instructions) comes before the user-controlled input
+        // array; tools in particular are injected before developer
+        // instructions so any change to them busts the cache.
+        if (tools.length) {
+            sections.push({ type: 'tools', tools: tools });
+            emitted['tools'] = true;
+        }
+        if (sysBlocks && sysBlocks.length) {
+            // sysBlocks is populated from body.instructions by
+            // normalizeResponsesRequest — we surface it under the
+            // `system` section type the renderer already understands,
+            // but mark the *original* JSON key as covered so the
+            // generic walk below doesn't double-print it.
+            sections.push({ type: 'system', content: sysBlocks });
+            emitted['instructions'] = true;
         }
         if (messages && messages.length) {
             sections.push({ type: 'messages', messages: messages });
