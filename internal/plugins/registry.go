@@ -61,6 +61,17 @@ func NewRegistry() engine.PluginRegistry {
 		return &FixAnthropicImages{}, nil
 	})
 
+	r.register("fix_anthropic_usage", engine.PluginInfo{
+		ID:          "fix_anthropic_usage",
+		Description: "Normalize the Anthropic Messages `usage` block: add missing cache_creation_input_tokens / cache_read_input_tokens fields in message_start, and synthesize a usage block in message_delta when the upstream omits it. Use with providers such as MiniMax-M3 whose usage reporting is incomplete.",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &FixAnthropicUsage{}, nil
+	})
+
 	r.register("anthropic2openai", engine.PluginInfo{
 		ID:          "anthropic2openai",
 		Description: "Converts Anthropic Messages requests to OpenAI Chat Completion format",

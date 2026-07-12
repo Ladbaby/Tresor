@@ -2040,8 +2040,8 @@ func TestOpenAI2Anthropic_TransformStreamChunk_ContentBlockStop(t *testing.T) {
 func TestRegistry_ListPlugins(t *testing.T) {
 	r := NewRegistry()
 	plugins := r.ListPlugins()
-	if len(plugins) != 13 {
-		t.Fatalf("expected 13 plugins, got %d", len(plugins))
+	if len(plugins) != 14 {
+		t.Fatalf("expected 14 plugins, got %d", len(plugins))
 	}
 
 	ids := make(map[string]bool)
@@ -2071,6 +2071,9 @@ func TestRegistry_ListPlugins(t *testing.T) {
 	}
 	if !ids["responses2anthropic"] {
 		t.Fatal("expected responses2anthropic plugin")
+	}
+	if !ids["fix_anthropic_usage"] {
+		t.Fatal("expected fix_anthropic_usage plugin")
 	}
 }
 
