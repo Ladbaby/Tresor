@@ -65,13 +65,12 @@ Tresor is a single binary with two modes:
 
 - ⚡ **Hot-Switch Models** — Map one model name to any backend model and switch on the fly. Your app requests `gpt-4o`; Tresor can route it to Claude Sonnet, Opus, or keep it on GPT-4o — all without restarting.
 - 🔄 **Auto-Translation** — Automatically convert between OpenAI, Anthropic, OpenAI Responses, and Google Gemini formats. Your app sends an OpenAI request; Tresor forwards it to an Anthropic, Gemini, or any other downstream and converts the response back — no rule configuration needed.
-- 🔌 **Plugin Pipeline** — Chain transformation plugins per rule (header injection, image fix, format conversion, and more). Twelve built-in plugins cover all common format combinations.
-- 🛤️ **Per-Path Routing** — Route different API paths (and models) to different providers based on configurable rules.
+- 🔍 **Traffic Inspection** (off by default) — Inspect raw incoming requests and downstream LLM responses, by clicking the log entries. Curious about what your LLM Apps are actually sending to LLMs? Then this is for you! Works similar to [claude-tap](https://github.com/liaohch3/claude-tap).
 - 🌐 **Embedded Web UI** — Manage everything from a browser dashboard. No separate frontend deployment.
-- 🖼️ **Model & Provider Icons** — Visual icons for models and providers in the web UI, auto-matched based on provider patterns.
-- 📝 **Single Config File** — All settings in one portable YAML file. Changes via the web UI write back automatically.
+- 🔌 **Plugin Pipeline** — Chain transformation plugins per rule (header injection, image fix, format conversion, and more). Thirteen built-in plugins cover all common format combinations.
 - 🔑 **Proxy Authentication** — Require clients to authenticate via `Authorization: Bearer` or `x-api-key` headers (supports Anthropic-format clients like Claude Office plugin).
-- 📋 **Aggregated Model Listing** — Gateway exposes `/v1/models` listing all known models from every downstream and alias, formatted as an OpenAI-compatible response.
+- 📝 **Single Config File** — All settings in one portable YAML file. Changes via the web UI write back automatically.
+- 🪶 **Zero External Dependencies** — Pure Go SQLite (no CGO), no external web framework, single compiled binary.
 
 
 ## 🚀 Getting Started
@@ -199,6 +198,7 @@ Full documentation is available at **[ladbaby.github.io/Tresor-docs/](https://la
 - [codex-proxy](https://github.com/icebear0828/codex-proxy): API translation reference.
 - [Cherry Studio](https://github.com/CherryHQ/cherry-studio): API endpoint testing utility and UI design reference.
 - [LobeHub](https://github.com/lobehub/lobehub): Icons for models and providers.
+- [claude-tap](https://github.com/liaohch3/claude-tap): Traffic inspection reference.
 - [llama.cpp](https://github.com/ggml-org/llama.cpp): Memory saving LLM inference.
 - [Qwen & Unsloth](https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF): High quality local LLM.
 - [Google Gemini](https://gemini.google.com/): Icon creation.

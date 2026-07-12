@@ -33,6 +33,8 @@ proxy_mode: "auto"              # Outbound proxy: auto, env, windows, none
 default_tab: "downstreams"      # Dashboard tab on load (values: downstreams, aliases, rules, settings, about)
 log_level: "info"               # Request logging verbosity: debug, info, warn, error
 capture_payloads: false         # Capture raw request/response bodies for the Logs inspector (claude-tap-style)
+icon_cache_dir: "~/.config/tresor/tresor-icons/"  # Cache directory for model icon SVGs (~ expands to home dir)
+capture_payloads: false         # Capture raw request/response bodies for the Logs inspector (claude-tap-style)
 
 downstreams:                    # LLM provider endpoints
   - id: my-provider
@@ -113,8 +115,10 @@ The codebase follows a clean layered structure with three core concerns:
 | `internal/store/` | SQLite data layer: `store.go` (schema/migrations/upsert), `rule.go` (CRUD + matching), `downstream.go` (CRUD + model IDs), `alias.go` (alias CRUD + grouping) |
 | `internal/engine/` | Core gateway handler: `engine.go` (proxy, model resolution, auto-translation, model listing), `pipeline.go` (transformer orchestration), `types.go` (interfaces), `logger.go` (request logging + SSE) |
 | `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go`, `fix_anthropic_images.go`, `openai2responses.go`, `responses2openai.go`, `responses2anthropic.go`, `anthropic2responses.go` |
-| `internal/api/` | Admin REST API: `router.go` (routing + auth), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list + model fetch), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE + log level), `config.go` (runtime config), `embed.go` (embedded web UI) |
+| `internal/api/` | Admin REST API: `router.go` (routing + auth), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list + model fetch), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE + log level), `config.go` (runtime config), `icons.go` (model icon serving), `icons_admin.go` (icon refresh), `embed.go` (embedded web UI) |
 | `internal/middleware/` | Cookie-based session auth middleware for admin API (with rate limiting and multi-session support) |
+| `internal/icons/` | Model icon fetching, pattern matching, and CDN caching via `@lobehub/icons-static-svg` |
+| `internal/inspect/` | Bounded in-memory store of raw gateway request/response bodies for the Logs inspector |
 | `internal/proxy/` | Outbound proxy mode configuration (auto, env, windows, none) + URL validation |
 | `internal/api/web/` | Embedded SPA: `index.html`, `style.css`, `app.js` |
 
@@ -141,7 +145,7 @@ The codebase follows a clean layered structure with three core concerns:
 
 ### Plugin System
 
-Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing requests), `ResponseTransformer` (modifies incoming responses), and `StreamResponseTransformer` (transforms SSE events). Eight built-in plugins exist:
+Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing requests), `ResponseTransformer` (modifies incoming responses), and `StreamResponseTransformer` (transforms SSE events). Thirteen built-in plugins exist:
 
 - **custom_header**: Injects arbitrary HTTP headers into forwarded requests
 - **openai2anthropic**: Converts OpenAI Chat Completion format to Anthropic Messages format (and vice versa for responses)
@@ -151,6 +155,11 @@ Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing request
 - **responses2anthropic**: Converts OpenAI Responses API format to Anthropic Messages format (and vice versa)
 - **openai2responses**: Converts OpenAI Chat Completion format to Responses API format
 - **anthropic2responses**: Converts Anthropic Messages format to Responses API format
+- **openai2gemini**: Converts OpenAI Chat Completion format to Google Gemini generateContent format
+- **anthropic2gemini**: Converts Anthropic Messages format to Google Gemini generateContent format
+- **gemini2openai**: Converts Google Gemini generateContent format to OpenAI Chat Completion format (and vice versa)
+- **gemini2anthropic**: Converts Google Gemini generateContent format to Anthropic Messages format (and vice versa)
+- **gemini2responses**: Converts Google Gemini generateContent format to OpenAI Responses API format (and vice versa)
 
 Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plugin_id": "...", "config": {...}}]`
 
@@ -193,6 +202,8 @@ Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plu
 | GET | `/api/logs` | Get recent log entries (newest first) |
 | GET | `/api/logs/stream` | SSE stream of log entries |
 | GET | `/api/logs/{id}/inspect` | Get captured raw request and response bodies for a log entry (only when `capture_payloads: true`; 404 if evicted or capture was off) |
+| GET | `/api/icons/{modelID}` | Serve a cached model icon SVG (public; falls back to generic icon if not found) |
+| POST | `/api/icons/refresh` | Force an out-of-band refresh of the local CDN icon index (admin auth required) |
 | GET | `/v1/models` | Aggregated model listing (OpenAI format, gateway path) |
 
 
