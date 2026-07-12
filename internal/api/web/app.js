@@ -1352,6 +1352,7 @@ function esc(s) {
 const tooltipTexts = {
     'alias.regex_badge': "This group uses a regex pattern — matches any incoming model name the regex accepts. (e.g., claude-opus.* matches both claude-opus-4-7 and claude-opus-4-8)",
     'inspect.llm_order_anthropic': "Display order follows the Anthropic cache prefix hierarchy (tools → system → messages), which is the order the model actually consumes the prompt. The raw JSON key order may differ. See https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching",
+    'inspect.llm_order_chat_completions': "Display order follows the LLM's prompt-processing order (tools → system → messages). Chat Completions itself doesn't document an order — we follow the convention used by major chat templates (e.g. Llama 3, Qwen): the system-role message is hoisted out of `messages[]` into a system block, tools are injected at the top of that block, and the remaining messages render in array order. The raw JSON key order may differ.",
     'inspect.llm_order_responses': "Display order follows the OpenAI Responses server-injected prefix (tools → instructions → input[]), which is the order the model actually consumes the prompt. The raw JSON key order may differ. See https://openai.com/index/unrolling-the-codex-agent-loop/",
 };
 
@@ -2648,19 +2649,33 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
 // Walk the top-level keys of a parsed request body, emitting a flat
 // list of sections the inspector can render in place.
 //
-// For Anthropic-format requests the sections are fixed in the LLM's
-// processing order: tools → system → messages (matching the cache
-// prefix hierarchy documented at
-// https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching).
+// For Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses
+// requests, the sections are emitted in the LLM's processing order
+// rather than raw JSON key order:
 //
-// For OpenAI Responses-format requests the order is tools →
-// instructions → input[] (matching the server-controlled prefix
-// described at
-// https://openai.com/index/unrolling-the-codex-agent-loop/ — the
-// server-injected system message, then tools, then instructions, then
-// the user-controlled input array). Prompt-caching cookbook §4.3 also
-// confirms: "Tools, schemas, and their ordering ... get injected
-// before developer instructions."
+//   - Anthropic Messages:    tools → system → messages
+//     (cache prefix hierarchy, per the Anthropic docs:
+//     https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching)
+//
+//   - OpenAI Chat Completions: tools → system → messages
+//     (OpenAI itself does not document the order — the Chat
+//     Completions API is older and the spec doesn't pin a cache
+//     hierarchy. We follow the order used by the major chat templates
+//     shipped with llama.cpp: the system-role message (which Chat
+//     Completions carries inside `messages[]`) is hoisted into a
+//     system block, tools are injected at the top of that block (or
+//     into a synthetic first user message), and the remaining
+//     messages render in raw array order. See e.g.
+//     meta-llama-Llama-3.1-8B-Instruct.jinja and Qwen3.5-4B.jinja in
+//     llama.cpp/models/templates/, both of which emit "system..." as
+//     the first prompt block with tools prepended, then iterate the
+//     remaining messages.)
+//
+//   - OpenAI Responses:      tools → instructions → input[]
+//     (server-controlled prefix described at
+//     https://openai.com/index/unrolling-the-codex-agent-loop/. The
+//     prompt-caching cookbook §4.3 also confirms "Tools ... get
+//     injected before developer instructions".)
 //
 // For all other formats the sections follow the raw JSON key order so
 // the operator can see the document as it was actually sent.
@@ -2715,14 +2730,18 @@ function buildRequestSections(parsed, format, path) {
     };
 
     // Track which canonical keys we've already emitted (only used in
-    // the Anthropic / Responses path, but declared here so the
-    // skip-set works for the generic key walk below).
+    // the canonical-order path below, but declared here so the
+    // skip-set works for the generic key walk).
     const emitted = {};
 
-    if (format === 'anthropic') {
-        // Anthropic cache prefix hierarchy: tools → system → messages.
-        // Emit them in this LLM-processing order regardless of raw JSON
-        // key order.
+    if (format === 'anthropic' || format === 'chat_completions') {
+        // For both Anthropic Messages and OpenAI Chat Completions,
+        // the canonical LLM order is tools → system → messages. For
+        // Chat Completions, normalizeRequest has already lifted the
+        // system-role message out of `messages[]` into req.system, so
+        // we treat it the same as Anthropic's top-level `system`
+        // field. Tools come first because the major chat templates
+        // inject them at the top of the rendered system block.
         if (tools.length) {
             sections.push({ type: 'tools', tools: tools });
             emitted['tools'] = true;
@@ -3285,6 +3304,7 @@ function renderParsedSections(sections, format) {
     // order. Surface a small banner with a tooltip so operators
     // understand why the parsed view may not mirror the raw bytes.
     const orderTooltipKey = (format === 'anthropic') ? 'inspect.llm_order_anthropic'
+        : (format === 'chat_completions') ? 'inspect.llm_order_chat_completions'
         : (format === 'responses') ? 'inspect.llm_order_responses'
         : null;
     if (orderTooltipKey) {
