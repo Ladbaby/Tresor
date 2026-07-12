@@ -171,20 +171,14 @@ See the [Installation](https://ladbaby.github.io/Tresor-docs/docs/user/getting-s
 Full documentation is available at **[ladbaby.github.io/Tresor-docs/](https://ladbaby.github.io/Tresor-docs/)**:
 
 ### 👤 For Users
-- [🏠 Introduction](https://ladbaby.github.io/Tresor-docs/docs/user/intro) — overview and architecture
+- [🏠 Introduction](https://ladbaby.github.io/Tresor-docs/docs/user/getting-started/intro) — overview and architecture
 - [📦 Installation & Quick Start](https://ladbaby.github.io/Tresor-docs/docs/user/getting-started/installation) — install from release or source, configure, run
-- [⚙️ Configuration Basics](https://ladbaby.github.io/Tresor-docs/docs/user/configuration/basics) — YAML config file reference
-- [🔗 Downstreams](https://ladbaby.github.io/Tresor-docs/docs/user/configuration/downstreams) — configure LLM provider endpoints
-- [📏 Rules](https://ladbaby.github.io/Tresor-docs/docs/user/configuration/rules) — define routing rules with transform pipelines
-- [🏷️ Model Aliases](https://ladbaby.github.io/Tresor-docs/docs/user/configuration/aliases) — map model names and hot-switch backends
-- [🌐 Proxy Modes](https://ladbaby.github.io/Tresor-docs/docs/user/configuration/proxy-modes) — outbound proxy configuration
+- [⚙️ Configuration Basics](https://ladbaby.github.io/Tresor-docs/docs/user/getting-started/configuration) — YAML config file reference
 - [🖥️ Web UI Guide](https://ladbaby.github.io/Tresor-docs/docs/user/web-ui) — manage everything from the browser
 - [💻 CLI Reference](https://ladbaby.github.io/Tresor-docs/docs/user/cli-reference) — all command-line commands
 
-### 💡 Use Cases
-- [🔄 Transparent Provider Switching](https://ladbaby.github.io/Tresor-docs/docs/user/use-cases/provider-switching) — route OpenAI-format traffic to Anthropic
-- [🎛️ Model Aliasing](https://ladbaby.github.io/Tresor-docs/docs/user/use-cases/model-aliasing) — hot-switch between backends
-- [⚖️ A/B Testing Backends](https://ladbaby.github.io/Tresor-docs/docs/user/use-cases/ab-testing) — compare providers side by side
+### 🤖 LLM Apps
+- [Claude Code](https://ladbaby.github.io/Tresor-docs/docs/user/llm-apps/claude-code) — point Anthropic's CLI agent at Tresor and hot-switch backends
 
 ### 🛠️ For Developers
 - [🏗️ Architecture](https://ladbaby.github.io/Tresor-docs/docs/dev/architecture) — codebase structure, request flow, data layer
