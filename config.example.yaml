@@ -27,7 +27,7 @@ proxy_mode: "auto"
 default_tab: "downstreams"
 
 # Request log verbosity: debug, info, warn, error (default: info)
-# log_level: "info"
+log_level: "info"
 
 # Capture the raw incoming request body and the raw downstream response body
 # for the most recent 100 requests in memory, and expose them via the Web UI
@@ -36,12 +36,12 @@ default_tab: "downstreams"
 # original downstream response, not the post-pipeline output. Disabled by
 # default because it adds a small per-request memory cost (capped at ~1 MiB
 # per direction). Persisted to YAML so the choice survives daemon restarts.
-# capture_payloads: false
+capture_payloads: false
 
 # Directory for cached model icon SVGs (fetched at runtime from a public CDN).
 # If empty/unset, defaults to <db_dir>/tresor-icons (e.g. ~/.config/tresor/tresor-icons/).
 # Tilde (~) is expanded to the user's home directory.
-# icon_cache_dir: "~/.config/tresor/tresor-icons/"
+icon_cache_dir: "~/.config/tresor/tresor-icons/"
 
 # Downstream LLM providers
 downstreams:
@@ -53,7 +53,6 @@ downstreams:
     output_model_ids:                    # Known output models for this provider
       - gpt-4o
       - gpt-4o-mini
-      - gpt-3.5-turbo
 
   - id: openai-responses
     name: OpenAI Responses
@@ -61,7 +60,7 @@ downstreams:
     base_url: https://api.openai.com
     api_key: ""                          # Set your API key here
     output_model_ids:                    # Known output models for this provider
-      - gpt-4o-responses
+      - gpt-5.5
 
   - id: anthropic
     name: Anthropic
@@ -69,19 +68,17 @@ downstreams:
     base_url: https://api.anthropic.com
     api_key: ""                          # Set your API key here
     output_model_ids:                    # Known output models for this provider
-      - claude-sonnet-4-20250514
-      - claude-haiku-4.5
+      - claude-sonnet-5
+      - claude-haiku-4-5
 
-  # - id: gemini
-  #   name: Google Gemini
-  #   api_formats: [gemini]
-  #   base_url: https://generativelanguage.googleapis.com
-  #   api_key: ""                          # Set your API key here
-  #   output_model_ids:                    # Known output models for this provider
-  #     - gemini-2.5-pro
-  #     - gemini-2.5-flash
-  #     - gemini-1.5-pro
-  #
+  - id: gemini
+    name: Google Gemini
+    api_formats: [gemini]
+    base_url: https://generativelanguage.googleapis.com
+    api_key: ""                          # Set your API key here
+    output_model_ids:                    # Known output models for this provider
+      - gemini-3.5-flash
+      - gemini-3.0-pro
 
 # Routing rules (OPTIONAL) — customize forwarding with transform pipelines.
 # Rules are NOT required for normal forwarding: model resolution uses aliases and
@@ -98,11 +95,15 @@ downstreams:
 #
 # Uncomment to enable optional rules:
 # rules:
-#   - id: default
-#     name: Default Route
-#     pattern_path: "*"                    # Catch-all for unmatched paths
-#     pipeline_config: []                  # No transformation
-#     is_enabled: true
+# Example: Fix the image reading problem in Claude Code + llama.cpp. Refer to https://github.com/ggml-org/llama.cpp/pull/22536
+    # - id: anthropic_image_fix
+    #   name: Anthropic Image Fix
+    #   pattern_path: '*'
+    #   match_format:
+    #     - anthropic
+    #   pipeline_config:
+    #     - plugin_id: fix_anthropic_images
+    #   is_enabled: true
 
 # Example: Route OpenAI chat completions through a custom header transformer
 #  - id: chat-custom-header
@@ -118,42 +119,29 @@ downstreams:
 #            X-Custom-Header: my-value
 #    is_enabled: true
 
-# Example: Translate OpenAI format to Anthropic for a specific model
-#  - id: chat-anthropic
-#    name: Chat Completions -> Anthropic
-#    pattern_path: /v1/chat/completions
-#    pattern_model: claude-sonnet        # Only matches this model
-#    match_format: [openai]               # Only on OpenAI-format requests
-#    match_downstream_format: [anthropic] # Only on Anthropic-format downstreams
-#    match_downstreams: [anthropic]       # Only the "anthropic" downstream
-#    pipeline_config:
-#      - plugin_id: openai2anthropic     # Transforms OpenAI -> Anthropic format
-#    is_enabled: true
-
 # Model aliases — group by input model, list output options
-# The FIRST option in each group is the active one (is_active managed by DB only)
 # Groups are ordered by array position; web UI supports drag-and-drop reordering.
 aliases:
-  - input_model_id: gpt-4o
+# Example: regex alias to match all Claude models, and re-route to gpt-5.5
+  - input_model_id: "claude-.*"
+    is_regex: true
+    options:
+      - id: alias-claude-wildcard
+        downstream_id: openai-responses
+        output_model_id: gpt-5.5
+
+  - input_model_id: claude-opus-4-8
     options:
       - id: alias-gpt4o-openai
         downstream_id: openai
-        output_model_id: gpt-4o          # Active (first in list)
+        output_model_id: gpt-4o
 
-      - id: alias-gpt4o-anthropic
+      - id: alias-claude-sonnet-anthropic
         downstream_id: anthropic
-        output_model_id: claude-sonnet-4-20250514
+        output_model_id: claude-sonnet-5
 
-  - input_model_id: claude-sonnet
+  - input_model_id: claude-fable-5
     options:
-      - id: alias-sonnet-anthropic
-        downstream_id: anthropic
-        output_model_id: claude-sonnet-4-20250514
-
-# Example: regex alias to match all Claude models
-#  - input_model_id: "^claude-.*"
-#    is_regex: true
-#    options:
-#      - id: alias-claude-wildcard
-#        downstream_id: anthropic
-#        output_model_id: claude-sonnet-4-20250514
+      - id: alias-gemini-google
+        downstream_id: gemini
+        output_model_id: gemini-3.5-flash
