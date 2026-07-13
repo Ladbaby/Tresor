@@ -368,6 +368,95 @@ func TestFixAnthropicUsage_EndToEndMinimaxTrace(t *testing.T) {
 	}
 }
 
+// TestFixAnthropicUsage_StreamMessageStartPreservesEnvelopeFields asserts
+// that a message_start round-trip preserves every top-level field the
+// upstream sent, not just `message.usage`. A previous implementation
+// decoded into a struct with only a `message` field, which silently
+// dropped the top-level `type` discriminator (and any other top-level
+// fields such as `service_tier`). Closed-source SDKs that read the JSON
+// `type` field to confirm the event kind — including the Claude Code
+// VS Code extension — would then reject the message_start and any
+// following content_block_delta would arrive "without a current
+// message". This is a regression guard for that bug.
+func TestFixAnthropicUsage_StreamMessageStartPreservesEnvelopeFields(t *testing.T) {
+	p := &FixAnthropicUsage{}
+	ctx := &engine.PipelineContext{}
+
+	// Captured minimax stream. The payload has `type` and `service_tier`
+	// at the top level in addition to the `message` envelope — all three
+	// must survive the round-trip.
+	chunk := engine.SSEChunk{
+		EventType: "message_start",
+		Data: []byte(`{"type":"message_start","message":{"id":"06a3db7ce6182830f962908c3f3e7666","type":"message","role":"assistant","content":[],"model":"MiniMax-M3","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0,"service_tier":"standard"},"service_tier":"standard"},"service_tier":"standard"}`),
+	}
+	out, err := p.TransformStreamChunk(chunk, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var got map[string]interface{}
+	if err := json.Unmarshal(out.Data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Top-level type discriminator must be preserved.
+	if got["type"] != "message_start" {
+		t.Errorf("top-level `type` field was dropped: got %v, want \"message_start\"; data=%s", got["type"], string(out.Data))
+	}
+	// Top-level service_tier must be preserved (some providers echo it
+	// at both top level and inside message.usage).
+	if got["service_tier"] != "standard" {
+		t.Errorf("top-level `service_tier` was dropped: got %v, want \"standard\"; data=%s", got["service_tier"], string(out.Data))
+	}
+	// The message envelope itself must still parse.
+	msg, ok := got["message"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("`message` envelope was dropped: %s", string(out.Data))
+	}
+	// Inner usage must carry all four canonical fields.
+	usage, ok := msg["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("`message.usage` was dropped: %s", string(out.Data))
+	}
+	for _, f := range []string{usageFieldInput, usageFieldOutput, usageFieldCacheCre, usageFieldCacheRd} {
+		if _, ok := usage[f]; !ok {
+			t.Errorf("message_start usage missing %s after rewrite: %s", f, string(out.Data))
+		}
+	}
+}
+
+// TestFixAnthropicUsage_StreamMessageStartPreservesArbitraryEnvelope is
+// the broader version of the regression guard: an upstream that injects
+// arbitrary top-level fields (e.g. custom metadata) must not have them
+// silently dropped by the message_start patch.
+func TestFixAnthropicUsage_StreamMessageStartPreservesArbitraryEnvelope(t *testing.T) {
+	p := &FixAnthropicUsage{}
+	ctx := &engine.PipelineContext{}
+
+	chunk := engine.SSEChunk{
+		EventType: "message_start",
+		Data:      []byte(`{"type":"message_start","message":{"id":"m","model":"M","usage":{"input_tokens":1,"output_tokens":2}},"custom_top":"keep_me","another":42}`),
+	}
+	out, err := p.TransformStreamChunk(chunk, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var got map[string]interface{}
+	if err := json.Unmarshal(out.Data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["type"] != "message_start" {
+		t.Errorf("top-level `type` was dropped: got %v", got["type"])
+	}
+	if got["custom_top"] != "keep_me" {
+		t.Errorf("custom top-level field was dropped: got %v", got["custom_top"])
+	}
+	if v, ok := got["another"].(float64); !ok || v != 42 {
+		t.Errorf("custom numeric top-level field was dropped: got %v (ok=%v)", got["another"], ok)
+	}
+}
+
 // TestFixAnthropicUsage_NormalizeUsageMap covers the helper directly so a
 // future refactor that breaks it fails the test before integration tests
 // do.

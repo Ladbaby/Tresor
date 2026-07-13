@@ -96,21 +96,35 @@ func (t *FixAnthropicUsage) TransformStreamChunk(chunk engine.SSEChunk, ctx *eng
 // message.usage contains all four canonical fields. Records the observed
 // counts on the receiver so a later message_delta can synthesize a
 // matching usage block. Returns the original bytes if no rewrite is needed.
+//
+// IMPORTANT: the payload is unmarshalled as a generic map (not into a
+// struct with only a `message` field). The Anthropic SDK — including
+// closed-source consumers such as the Claude Code VS Code extension —
+// reads the top-level `type` field of every event as a sanity check and
+// to dispatch on event kind alongside the SSE `event:` line. A previous
+// implementation that round-tripped the payload through a partial struct
+// silently dropped the `type: "message_start"` discriminator (and any
+// other top-level fields the upstream included, e.g. `service_tier`).
+// With that discriminator missing, the SDK rejects the message_start
+// event and any subsequent `content_block_delta` arrives "without a
+// current message", crashing the stream. Round-tripping through
+// map[string]interface{} preserves the full envelope.
 func (t *FixAnthropicUsage) patchMessageStartUsage(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return data, nil
 	}
-	var payload struct {
-		Message map[string]interface{} `json:"message"`
-	}
+	var payload map[string]interface{}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return data, err
 	}
-	if payload.Message == nil {
+
+	message, ok := payload["message"].(map[string]interface{})
+	if !ok {
+		// message_start without a `message` object — leave the payload alone.
 		return data, nil
 	}
 
-	usageRaw, exists := payload.Message["usage"]
+	usageRaw, exists := message["usage"]
 	usage, ok := usageRaw.(map[string]interface{})
 	if exists && !ok {
 		// usage is present but not an object — don't try to rewrite it.
@@ -118,7 +132,7 @@ func (t *FixAnthropicUsage) patchMessageStartUsage(data []byte) ([]byte, error) 
 	}
 	if !exists {
 		usage = map[string]interface{}{}
-		payload.Message["usage"] = usage
+		message["usage"] = usage
 	}
 
 	// Record the observed counts BEFORE the early-out so message_delta
