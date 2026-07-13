@@ -3142,8 +3142,6 @@ function renderContentBlock(block) {
             body.textContent = '(empty result)';
             body.classList.add('inspect-block-tool-result-empty');
         } else if (typeof block.content === 'string') {
-            const pre = document.createElement('pre');
-            pre.className = 'inspect-block-tool-result-pre';
             body.appendChild(renderInspectText(block.content, 'tool_result'));
         } else if (Array.isArray(block.content)) {
             for (const c of block.content) {
@@ -3409,9 +3407,14 @@ function renderParsedSections(sections, format) {
 // returned element via `.inspect-md` for spacing overrides.
 function renderInspectText(text, kind) {
     const s = text == null ? '' : String(text);
-    if (!currentInspectMarkdown) {
-        const pre = document.createElement('div');
-        pre.className = 'inspect-text-plain';
+    if (!currentInspectMarkdown || kind === 'tool_result') {
+        // Tool result bodies are operational output (file contents, shell
+        // output, JSON dumps). Always render as plain monospace text —
+        // skip the markdown pipeline even when the operator has markdown
+        // rendering enabled, so the block reads the same as the matching
+        // tool_use args block and never mangles literal # / * / _ chars.
+        const pre = document.createElement('pre');
+        pre.className = 'inspect-block-tool-result-pre';
         pre.textContent = s;
         return pre;
     }

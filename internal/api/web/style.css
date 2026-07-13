@@ -807,8 +807,8 @@ tr:hover {
    scan a result next to its call. Error variant uses a red border
    for fast triage. */
 .inspect-block-tool-result {
-    background: rgba(26, 90, 184, 0.06);
-    border-left: 3px solid #1a5ab8;
+    background: rgba(63, 185, 80, 0.06);
+    border-left: 3px solid var(--success-text, #3fb950);
     border-radius: 4px;
     padding: 0.4rem 0.6rem;
     margin-bottom: 0.5rem;
@@ -829,7 +829,7 @@ tr:hover {
     font-size: 0.7rem;
     letter-spacing: 0.04em;
     font-weight: 600;
-    color: #1a5ab8;
+    color: var(--success-text, #3fb950);
 }
 .inspect-block-tool-result-error .inspect-block-tool-result-label {
     color: #dc3545;
