@@ -651,6 +651,20 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	entry.Status = resp.StatusCode
 	entry.Duration = DurationMs(time.Since(start))
 
+	// Only accumulate usage statistics when the inspector is enabled.
+	// The user-visible suffix (cache X% / cache N/A) is gated by
+	// capturePayloadsEnabled in the web UI; by populating Usage only
+	// when payloadStore is attached we avoid paying the JSON-parse
+	// cost on the hot path when no one will see the numbers. The
+	// shape is identical to what the inspector uses internally, so the
+	// Logs tab and the inspect view agree on every cached/fresh token
+	// count and on the cache-hit rate.
+	if e.payloadStore != nil {
+		if usage, ok := UsageFromResponseBody(respBody); ok && usage != nil {
+			entry.Usage = usage
+		}
+	}
+
 	e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc)
 	cw.WriteHeader(resp.StatusCode)
 	cw.Write(transformedBody)
@@ -671,6 +685,26 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	var respBuf bytes.Buffer
 	var truncated bool
 	captureOn := e.payloadStore != nil
+
+	// scrapeUsage inspects one complete SSE event payload and, if it
+	// carries a recognisable usage block, sparsely merges it into the
+	// entry's Usage accumulator. It is a no-op when captureOn is false
+	// — the user-visible suffix the entry drives is itself gated by
+	// the inspector (capturePayloads) feature, so there is no reason
+	// to compute the numbers unless the inspector is on.
+	scrapeUsage := func(data []byte) {
+		if !captureOn {
+			return
+		}
+		usage, ok := UsageFromResponseBody(data)
+		if !ok || usage == nil {
+			return
+		}
+		if entry.Usage == nil {
+			entry.Usage = &UsageBlock{}
+		}
+		entry.Usage.Merge(usage)
+	}
 
 	// teeLine writes the CR-trimmed line + '\n' to the inspector buffer
 	// (subject to inspect.MaxBodyBytes). Runaway streaming downstreams
@@ -761,19 +795,51 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 	// Passthrough mode: no transformers — write each line immediately with flush
 	if !hasTransformers {
+		// SSE state tracker for usage extraction. In passthrough mode
+		// we do not accumulate events ourselves — we let the scanner
+		// stream each line directly to the client — so we maintain a
+		// minimal accumulator here just to feed UsageFromResponseBody on
+		// event boundaries. The accumulator is dropped once the event
+		// is forwarded to the usage tracker.
+		var sseEvent string
+		flushSSEEvent := func() {
+			if sseEvent == "" {
+				return
+			}
+			scrapeUsage([]byte(sseEvent))
+			sseEvent = ""
+		}
 		for scanner.Scan() {
 			select {
 			case <-clientCtx.Done():
+				flushSSEEvent()
 				record()
 				return
 			default:
 			}
 			line := scanner.Text()
-			teeLine(strings.TrimRight(line, "\r"))
+			trimmed := strings.TrimRight(line, "\r")
+			teeLine(trimmed)
+
+			// Track simple event boundaries for the cache scraper. We
+			// only care about data: lines because cache info lives in
+			// the JSON payload. A blank line terminates the current
+			// event.
+			if trimmed == "" {
+				flushSSEEvent()
+			} else if strings.HasPrefix(trimmed, "data: ") {
+				if sseEvent != "" {
+					sseEvent += "\n"
+				}
+				sseEvent += strings.TrimPrefix(trimmed, "data: ")
+			}
+
 			if !writeAndFlush([]byte(line + "\n")) {
+				flushSSEEvent()
 				return
 			}
 		}
+		flushSSEEvent()
 		if err := scanner.Err(); err != nil {
 			log.Printf("Stream ended: %v", err)
 		}
@@ -810,6 +876,13 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		if eventLine == "" && strings.TrimSpace(rawData) == "[DONE]" {
 			doneSent = true
 		}
+
+		// Look for a usage block on the raw upstream event. We scrape
+		// the pre-transformer bytes because that's where every provider
+		// puts its own usage; transformers may strip or rename the
+		// field, but the pre-transformer form is canonical and
+		// guaranteed to be intact.
+		scrapeUsage([]byte(rawData))
 
 		// Run through stream transformers
 		var err error

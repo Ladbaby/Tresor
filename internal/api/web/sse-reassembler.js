@@ -69,6 +69,43 @@
         return out;
     }
 
+    // cacheRateFromUsage computes the cache-hit rate as a fraction in
+    // [0.0, 1.0] from a normalised usage block. The shape mirrors
+    // what the Go engine puts on each RequestLogEntry.usage and what
+    // the inspect view passes to normalizeUsage — so calling this
+    // helper from the Logs tab keeps both surfaces in lockstep with
+    // the same definition.
+    //
+    // Two denominators are possible:
+    //   - OpenAI-style: prompt_tokens already counts cached tokens, so
+    //     the denominator is just input_tokens. Signalled by the
+    //     presence of `cached_tokens` (the OpenAI canonical field name)
+    //     alongside `input_tokens`.
+    //   - Anthropic-style: input_tokens is the *fresh* portion only,
+    //     so the denominator is input_tokens + cache_read_input_tokens
+    //     (+ cache_creation_input_tokens when present).
+    //
+    // Returns null when no cache field is present so the caller can
+    // show "cache N/A" instead of a misleading "cache 0%".
+    function cacheRateFromUsage(u) {
+        if (!isDict(u)) return null;
+        const input = u.input_tokens || 0;
+        const cached = u.cache_read_input_tokens || 0;
+        const openAI = (u.cached_tokens || 0); // presence ⇒ OpenAI shape
+        const creation = u.cache_creation_input_tokens || 0;
+        if (openAI && input > 0) {
+            // OpenAI / Gemini prompt_tokens includes cached tokens.
+            if (openAI <= 0) return null;
+            return openAI / input;
+        }
+        if (cached <= 0 && openAI <= 0) {
+            return null; // no cache information
+        }
+        const denom = input + cached + creation;
+        if (denom <= 0) return null;
+        return cached / denom;
+    }
+
     // ---------- SSE parser ----------
 
     // SSEReassembler: feed it raw bytes; pull out the reconstructed response.
@@ -928,5 +965,7 @@
     global.normalizeRequest = normalizeRequest;
     global.normalizeResponse = normalizeResponse;
     global.detectRequestFormat = detectRequestFormat;
+    global.normalizeUsage = normalizeUsage;
+    global.cacheRateFromUsage = cacheRateFromUsage;
 
 })(typeof window !== 'undefined' ? window : globalThis);

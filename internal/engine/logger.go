@@ -75,6 +75,28 @@ type RequestLogEntry struct {
 	Error          string    `json:"error,omitempty"`
 	Level          string    `json:"level,omitempty"`
 	Message        string    `json:"message,omitempty"`
+
+	// Usage is a sparse accumulation of the request's prompt/output
+	// token counts, intentionally shaped the same way as the inspect
+	// view's `normalizeUsage` output (see internal/api/web/sse-
+	// reassembler.js) — i.e. {input_tokens, output_tokens,
+	// cache_creation_input_tokens, cache_read_input_tokens}. Because
+	// the Logs tab and the inspect view both render the cache-hit
+	// rate from this same shape via a single shared helper
+	// (cacheRateFromUsage), the numbers shown in the Logs tab and the
+	// counts shown in the inspect view footer always agree — the Logs
+	// tab cannot drift from one source of truth to another.
+	//
+	// The field is only populated when the inspector / payload-capture
+	// feature is enabled (`e.payloadStore != nil`). With the inspector
+	// off, the field stays nil and JSON `omitempty` drops it from the
+	// wire, so the web UI hides the cache-rate suffix entirely.
+	//
+	// Sparse accumulation: a streaming response is built up event by
+	// event. message_start reports cache_read + input; message_delta
+	// reports cache_creation + output. The engine stores whichever
+	// fields each event supplied, so the final usage is the union.
+	Usage *UsageBlock `json:"usage,omitempty"`
 }
 
 // logSeverity returns the severity level of a log entry based on status code and type.

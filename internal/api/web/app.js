@@ -3692,6 +3692,27 @@ function buildLogEntry(entry, isNew) {
             parts.push('<span style="color:var(--danger-hover);">ERR: ' + esc(entry.error) + '</span>');
         }
 
+        // Cache hit rate (only when the inspector / capture_payloads is
+        // enabled). The engine emits a sparse `usage` block on the wire
+        // that mirrors the same shape the inspect view passes to
+        // normalizeUsage — so we compute the rate via the shared helper
+        // (window.cacheRateFromUsage) rather than a duplicate formula.
+        // That keeps the Logs tab and the inspect view's footer in
+        // lockstep: changing how cache is computed only requires
+        // changing one helper.
+        //   - inspector off, entry has no usage → hide suffix line.
+        //   - inspector on, no usage block → "cache N/A".
+        //   - inspector on, usage present → "cache X%".
+        if (capturePayloadsEnabled) {
+            const rate = window.cacheRateFromUsage(entry.usage);
+            if (typeof rate === 'number' && !isNaN(rate)) {
+                const pct = Math.round(rate * 100);
+                parts.push('<span class="log-cache">cache ' + pct + '%</span>');
+            } else {
+                parts.push('<span class="log-cache log-cache-na">cache N/A</span>');
+            }
+        }
+
         msgDiv.innerHTML = parts.join(' ');
     }
 
