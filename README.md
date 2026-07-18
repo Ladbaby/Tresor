@@ -38,7 +38,7 @@ Imagine you have agents on three machines, all calling OpenAI. You want to switc
 
 ![](images/comparison.png)
 
-⚠ DISCLAIMER: Tresor is intended for personal use rather than LLM transfer stations, so it only have one administrative account. We are not planning to support commercial-purpose multi-user login.
+⚠ DISCLAIMER: Tresor is intended for personal use rather than LLM transit stations, so it only have one administrative account. We are not planning to support commercial-purpose multi-user login.
 
 ## ⚡ What Tresor Does
 
