@@ -868,7 +868,7 @@ function renderDownstreamDetail(ds) {
             </div>
             ${models.length > 0
                 ? '<ul class="detail-models-list">' + models.map(m =>
-                    '<li data-model-id="' + esc(m) + '">' + modelIconHTML(m) + '<span class="model-name">' + esc(m) + '</span><button type="button" class="model-id-remove" title="Remove model" aria-label="Remove ' + esc(m) + '">×</button></li>'
+                    '<li data-model-id="' + esc(m) + '">' + modelIconHTML(m) + '<span class="model-name">' + esc(m) + '</span><button type="button" class="model-id-remove" data-action="remove-model" title="Remove model" aria-label="Remove ' + esc(m) + '">×</button></li>'
                   ).join('') + '</ul>'
                 : '<div class="detail-empty-models">No models yet. Click ＋ Add Model or ⟳ Fetch Models.</div>'}
             <div class="detail-edit-add-model-row" data-role="add-model-row" style="display:none;">
@@ -1037,7 +1037,7 @@ function refreshDownstreamDetail() {
             _keyRevealed = true;
             return;
         }
-        if (btn.classList.contains('model-id-remove')) {
+        if (action === 'remove-model') {
             const li = btn.closest('li[data-model-id]');
             const modelId = li && li.dataset.modelId;
             if (!modelId) return;
@@ -1051,6 +1051,7 @@ function refreshDownstreamDetail() {
             } catch (err) {
                 showToast('Delete failed: ' + err.message);
             }
+            return;
         }
     });
 })();
