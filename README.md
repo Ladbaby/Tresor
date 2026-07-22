@@ -22,7 +22,7 @@
 
 - **One binary**: No need to install on every PC/server where LLM apps live in.
 - **One click**: LLM provider switch via alias buttons in web UI.
-- **Any Apps**: All LLM apps using OpenAI/Anthropic API do not need to reconfigure their LLM providers.
+- **Any Apps**: All LLM apps using OpenAI Completions/OpenAI Responses/Anthropic/Gemini API do not need to reconfigure their LLM providers.
     > For apps that do not support customizable endpoint, a possible workaround is to modify DNS records and point the IP address to Tresor.
 
 ||Tresor (Ours)|[cc-switch](https://github.com/farion1231/cc-switch)|[LiteLLM](https://github.com/BerriAI/litellm)
