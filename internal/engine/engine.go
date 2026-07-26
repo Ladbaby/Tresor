@@ -679,7 +679,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			isEmpty := e.handleStreamingResponse(targetWriter, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, inputFormat)
 
-			if isEmpty && cw.status == http.StatusOK {
+			if isEmpty && resp.StatusCode == http.StatusOK {
 				// Empty stream with HTTP 200 — retry if attempts remain
 				if attempt >= maxRetries {
 					entry.Status = cw.status
@@ -840,8 +840,28 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		e.recordAndCapture(entry, rawReq, respBody, reqCT, respCT, truncated)
 	}
 
-	// When buffering, delay header/status writes until content is confirmed.
-	if !bufferForRetry {
+	// finish handles the end-of-stream return: if the stream was empty and
+	// the downstream returned a non-200 status, flush the buffered writer
+	// so the error status (and any buffered error content) reaches the client
+	// instead of being silently swallowed by the retry-on-empty logic.
+	finish := func() bool {
+		if bufferForRetry && !contentProduced && resp.StatusCode != http.StatusOK {
+			if bw, ok := w.(*bufferedWriter); ok {
+				bw.Flush()
+			}
+		}
+		return bufferForRetry && !contentProduced
+	}
+
+	// Always capture the downstream's status code.
+	// When buffering, bufferedWriter.WriteHeader stores it without writing
+	// to the underlying writer. When not buffering, it writes directly.
+	w.WriteHeader(resp.StatusCode)
+
+	// When buffering, delay header writes until content is confirmed.
+	if bufferForRetry {
+		// Headers will be set when flushBuffer() is called.
+	} else {
 		// Copy SSE-relevant headers to the client response
 		for _, header := range []string{"Content-Type", "Cache-Control", "Connection"} {
 			if v := resp.Header.Get(header); v != "" {
@@ -850,14 +870,13 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		}
 		// Prevent reverse proxy buffering
 		w.Header().Set("X-Accel-Buffering", "no")
-		w.WriteHeader(resp.StatusCode)
 	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Printf("Streaming failed: ResponseWriter does not support Flusher")
 		record()
-		return bufferForRetry && !contentProduced
+		return finish()
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -927,7 +946,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			case <-clientCtx.Done():
 				flushSSEEvent()
 				record()
-				return bufferForRetry && !contentProduced
+				return finish()
 			default:
 			}
 			line := scanner.Text()
@@ -954,7 +973,8 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 			if !writeAndFlush([]byte(line + "\n")) {
 				flushSSEEvent()
-				return bufferForRetry && !contentProduced
+				record()
+				return finish()
 			}
 		}
 		flushSSEEvent()
@@ -962,7 +982,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			log.Printf("Stream ended: %v", err)
 		}
 		record()
-		return bufferForRetry && !contentProduced
+		return finish()
 	}
 
 	// Transform mode: accumulate SSE events, transform, then write
@@ -1040,7 +1060,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		select {
 		case <-clientCtx.Done():
 			record()
-			return bufferForRetry && !contentProduced
+			return finish()
 		default:
 		}
 
@@ -1051,7 +1071,8 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		if line == "" {
 			// Empty line terminates an SSE event — flush it
 			if !flushEvent() {
-				return bufferForRetry && !contentProduced
+				record()
+				return finish()
 			}
 			eventLine = ""
 			dataLines = nil
@@ -1076,7 +1097,8 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 		// Unknown line type — pass through as-is
 		if !writeAndFlush([]byte(line + "\n")) {
-			return bufferForRetry && !contentProduced
+			record()
+			return finish()
 		}
 	}
 
@@ -1090,7 +1112,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		select {
 		case <-clientCtx.Done():
 			record()
-			return bufferForRetry && !contentProduced
+			return finish()
 		default:
 			syntheticChunk := SSEChunk{Data: []byte("[DONE]")}
 			transformed, err := ExecuteStreamResponsePipeline(syntheticChunk, ctx, pipeline.StreamResponseSteps)
@@ -1104,7 +1126,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		log.Printf("Stream ended: %v", err)
 	}
 	record()
-	return bufferForRetry && !contentProduced
+	return finish()
 }
 
 // forwardRequest sends the (possibly transformed) request to the target downstream.
