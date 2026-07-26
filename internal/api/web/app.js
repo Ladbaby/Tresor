@@ -1919,15 +1919,19 @@ document.getElementById('alias-form').addEventListener('submit', async (e) => {
     }
 
     try {
-        await Promise.all(models.map(m => api('/aliases', {
-            method: 'POST',
-            body: JSON.stringify({
-                input_model_id: inputModelId,
-                downstream_id: downstreamId,
-                output_model_id: m,
-                is_active: false,
-            }),
-        })));
+        // Sequential inserts to avoid SQLite "database is locked" errors
+        // when multiple POSTs race for the DB write lock.
+        for (let i = 0; i < models.length; i++) {
+            await api('/aliases', {
+                method: 'POST',
+                body: JSON.stringify({
+                    input_model_id: inputModelId,
+                    downstream_id: downstreamId,
+                    output_model_id: models[i],
+                    is_active: false,
+                }),
+            });
+        }
         document.getElementById('alias-modal').classList.add('hidden');
         loadAliasGroups();
     } catch (err) {
