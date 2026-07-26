@@ -38,6 +38,9 @@ log_level: "info"
 # per direction). Persisted to YAML so the choice survives daemon restarts.
 capture_payloads: false
 
+# Automatically retry requests when the downstream LLM returns an empty response (http-200 but no content generated). Uses exponential backoff with up to 3 retries.
+retry_on_empty: false
+
 # Directory for cached model icon SVGs (fetched at runtime from a public CDN).
 # If empty/unset, defaults to <db_dir>/tresor-icons (e.g. ~/.config/tresor/tresor-icons/).
 # Tilde (~) is expanded to the user's home directory.
