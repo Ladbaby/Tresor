@@ -77,19 +77,6 @@ func New(s *store.Store) *Engine {
 	}
 }
 
-// peerIPFromRemoteAddr strips the port from RemoteAddr, returning the
-// raw value when it's a bare IPv6 (SplitHostPort fails).
-func peerIPFromRemoteAddr(remoteAddr string) string {
-	if remoteAddr == "" {
-		return ""
-	}
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		return remoteAddr
-	}
-	return host
-}
-
 // SetLogger sets the request logger on the engine.
 func (e *Engine) SetLogger(l *RequestLogger) {
 	e.logger = l
@@ -549,9 +536,8 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	cw := newStatusCaptureWriter(w)
 	entry := RequestLogEntry{Timestamp: start, Method: r.Method, Path: r.URL.Path}
 
-	// ClientIP is the immediate peer's address. No forwarded-header trust —
-	// the inspector is a local admin tool, the same as the proxy auth path.
-	entry.ClientIP = peerIPFromRemoteAddr(r.RemoteAddr)
+	// ClientIP: trust forwarded headers when connected via localhost (reverse proxy).
+	entry.ClientIP = middleware.ExtractClientIP(r)
 
 	if !e.validateProxyAuth(r, cw) {
 		entry.Status = http.StatusUnauthorized
