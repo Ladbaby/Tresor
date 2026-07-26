@@ -302,6 +302,21 @@
                         </div>
 
                         <div class="settings-group">
+                            <h3>Retry</h3>
+                            <p class="settings-description">
+                                When enabled, Tresor automatically re-sends requests in the following senarios.
+                            </p>
+                            <div class="settings-row">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="setting-retry-on-empty"> Retry on empty response
+                                    <span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="When the downstream LLM returns an empty response
+                                    (http-200 but no content generated, even if it has thinking contents). Uses exponential backoff with up to 3 retries.
+                                    Note that it will not retry on non-http-200 responses, since most LLM Apps already have well-designed non-http-200 retry mechanisms.">?</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="settings-group">
                             <h3>Dashboard</h3>
                             <p class="settings-description">
                                 Choose which tab the dashboard opens to on page load or refresh.

@@ -2046,6 +2046,11 @@ async function loadSettings() {
             captureEl.checked = !!cfg.capture_payloads;
             capturePayloadsEnabled = captureEl.checked;
         }
+        // Populate the retry-on-empty checkbox
+        const retryEl = document.getElementById('setting-retry-on-empty');
+        if (retryEl) {
+            retryEl.checked = !!cfg.retry_on_empty;
+        }
     } catch (err) {
         statusEl.textContent = 'Failed to load settings: ' + err.message;
         statusEl.className = 'settings-status error';
@@ -2149,6 +2154,11 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
         const captureEl = document.getElementById('setting-capture-payloads');
         if (captureEl) {
             body.capture_payloads = captureEl.checked;
+        }
+        // Include the retry-on-empty flag if the checkbox exists
+        const retryEl = document.getElementById('setting-retry-on-empty');
+        if (retryEl) {
+            body.retry_on_empty = retryEl.checked;
         }
         // Only send admin_password if the user entered something or wants to clear it
         if (newPassword || clearPassword) {
