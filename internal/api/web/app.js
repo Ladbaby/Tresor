@@ -3825,11 +3825,9 @@ window.toggleLogPause = function () {
  */
 function formatTime(ts) {
     if (!ts) return '—';
-    const d = new Date(typeof ts === 'number' ? ts : String(ts).slice(0, 19) + 'Z');
+    const d = new Date(ts);
     if (isNaN(d.getTime())) return String(ts);
-    return String(d.getHours()).padStart(2, '0') + ':'
-        + String(d.getMinutes()).padStart(2, '0') + ':'
-        + String(d.getSeconds()).padStart(2, '0');
+    return d.toLocaleTimeString();
 }
 
 /**
