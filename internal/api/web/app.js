@@ -3827,7 +3827,7 @@ function formatTime(ts) {
     if (!ts) return '—';
     const d = new Date(ts);
     if (isNaN(d.getTime())) return String(ts);
-    return d.toLocaleTimeString();
+    return d.toLocaleTimeString('en-US', { hour12: false });
 }
 
 /**
