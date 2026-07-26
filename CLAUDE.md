@@ -34,7 +34,7 @@ default_tab: "downstreams"      # Dashboard tab on load (values: downstreams, al
 log_level: "info"               # Request logging verbosity: debug, info, warn, error
 capture_payloads: false         # Capture raw request/response bodies for the Logs inspector (claude-tap-style)
 icon_cache_dir: "~/.config/tresor/tresor-icons/"  # Cache directory for model icon SVGs (~ expands to home dir)
-capture_payloads: false         # Capture raw request/response bodies for the Logs inspector (claude-tap-style)
+retry_on_empty: false           # Automatically retry requests when the downstream returns an empty response (HTTP 200 but no content)
 
 downstreams:                    # LLM provider endpoints
   - id: my-provider
@@ -113,7 +113,7 @@ The codebase follows a clean layered structure with three core concerns:
 | `cmd/` | Cobra CLI commands (`root.go`, `run.go`, `rule.go`, `version.go`) |
 | `internal/config/` | YAML configuration loader with auto-detect path resolution |
 | `internal/store/` | SQLite data layer: `store.go` (schema/migrations/upsert), `rule.go` (CRUD + matching), `downstream.go` (CRUD + model IDs), `alias.go` (alias CRUD + grouping) |
-| `internal/engine/` | Core gateway handler: `engine.go` (proxy, model resolution, auto-translation, model listing), `pipeline.go` (transformer orchestration), `types.go` (interfaces), `logger.go` (request logging + SSE) |
+| `internal/engine/` | Core gateway handler: `engine.go` (proxy, model resolution, auto-translation, model listing, retry on empty response), `pipeline.go` (transformer orchestration), `retry.go` (empty response detection + retry with backoff), `types.go` (interfaces), `logger.go` (request logging + SSE) |
 | `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go`, `fix_anthropic_images.go`, `anthropic_usage_fix.go`, `openai2responses.go`, `responses2openai.go`, `responses2anthropic.go`, `anthropic2responses.go` |
 | `internal/api/` | Admin REST API: `router.go` (routing + auth), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list + model fetch), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE + log level), `config.go` (runtime config), `icons.go` (model icon serving), `icons_admin.go` (icon refresh), `embed.go` (embedded web UI) |
 | `internal/middleware/` | Cookie-based session auth middleware for admin API (with rate limiting and multi-session support) |
@@ -140,8 +140,9 @@ The codebase follows a clean layered structure with three core concerns:
 6. Parse `pipeline_config` JSON → instantiate plugin transformers via registry
 7. Execute request transformers sequentially (body + headers may change)
 8. Forward transformed request to downstream server
-9. Execute response transformers sequentially on the downstream's response
-10. Return final response to client
+9. **Retry on Empty Response** (if `retry_on_empty: true`): If the downstream returns HTTP 200 but produces no content (empty choices, thinking-only output, etc.), retry up to 3 times with exponential backoff. Retries are transparent to the client.
+10. Execute response transformers sequentially on the downstream's response
+11. Return final response to client
 
 ### Plugin System
 
@@ -176,7 +177,7 @@ Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plu
 | GET | `/api/health` | Health check (public) |
 | GET | `/api/version` | Print version and build info (public) |
 | GET/PUT | `/api/log_level` | Get/set request logging verbosity |
-| GET/PUT | `/api/config` | Get/set runtime config (proxy_mode, proxy_api_keys, admin_password, default_tab, log_level, capture_payloads) |
+| GET/PUT | `/api/config` | Get/set runtime config (proxy_mode, proxy_api_keys, admin_password, default_tab, log_level, capture_payloads, retry_on_empty) |
 | POST | `/api/fetch-models` | Fetch available models from a provider (body: base_url + api_key) |
 | GET | `/api/rules` | List all rules |
 | POST | `/api/rules` | Create a new rule |

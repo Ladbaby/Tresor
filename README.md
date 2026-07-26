@@ -64,8 +64,9 @@ Tresor is a single binary with two modes:
 ### Key Capabilities
 
 - ⚡ **Hot-Switch Models** — Map one model name to any backend model and switch on the fly. Your app requests `gpt-4o`; Tresor can route it to Claude Sonnet, Opus, or keep it on GPT-4o — all without restarting.
-- 🔄 **Auto-Translation** — Automatically convert between OpenAI, Anthropic, OpenAI Responses, and Google Gemini formats. Your app sends an OpenAI request; Tresor forwards it to an Anthropic, Gemini, or any other downstream and converts the response back — no rule configuration needed.
+- 🎭 **Auto-Translation** — Automatically convert between OpenAI, Anthropic, OpenAI Responses, and Google Gemini formats. Your app sends an OpenAI request; Tresor forwards it to an Anthropic, Gemini, or any other downstream and converts the response back — no rule configuration needed.
 - 🔍 **Traffic Inspection** (off by default) — Inspect raw incoming requests and downstream LLM responses, by clicking the log entries. Curious about what your LLM Apps are actually sending to LLMs? Then this is for you! Works similar to [claude-tap](https://github.com/liaohch3/claude-tap).
+- 🔄 **Retry** (off by default) — Automatically retry downstream requests that return HTTP 200 but produce no content (e.g., thinking-only responses, empty completions). Up to 3 retries with exponential backoff.
 - 🌐 **Embedded Web UI** — Manage everything from a browser dashboard. No separate frontend deployment.
 - 🔌 **Plugin Pipeline** — Chain transformation plugins per rule (header injection, image fix, format conversion, and more). Fourteen built-in plugins cover all common format combinations.
 - 🔑 **Proxy Authentication** — Require clients to authenticate via `Authorization: Bearer` or `x-api-key` headers (supports Anthropic-format clients like Claude Office plugin).
