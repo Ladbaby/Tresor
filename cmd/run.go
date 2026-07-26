@@ -114,11 +114,14 @@ func runDaemon(cfg *config.AppConfig) error {
 	}
 
 	// Initialize runtime config state in the API layer
-	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel, cfg.CapturePayloads)
+	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel, cfg.CapturePayloads, cfg.RetryOnEmpty)
 
 	// Build admin API router
 	adminRouter := api.NewRouter(s, eng, logger, payloadStore, iconFetcher, cfg, Version, BuildTime)
 	webHandler := api.WebHandler()
+
+	// Configure retry-on-empty setting on the engine
+	eng.SetRetryOnEmpty(cfg.RetryOnEmpty)
 
 	// Start listening
 	errCh := make(chan error, 2)

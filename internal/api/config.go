@@ -22,6 +22,7 @@ type RuntimeConfig struct {
 	DefaultTab      string   `json:"default_tab,omitempty"`
 	LogLevel        string   `json:"log_level,omitempty"`
 	CapturePayloads bool     `json:"capture_payloads,omitempty"`
+	RetryOnEmpty    bool     `json:"retry_on_empty,omitempty"`
 }
 
 // RuntimeConfigResponse is what GET /api/config returns.
@@ -33,6 +34,7 @@ type RuntimeConfigResponse struct {
 	DefaultTab       string   `json:"default_tab,omitempty"`
 	LogLevel         string   `json:"log_level,omitempty"`
 	CapturePayloads  bool     `json:"capture_payloads,omitempty"`
+	RetryOnEmpty     bool     `json:"retry_on_empty,omitempty"`
 }
 
 var (
@@ -42,7 +44,7 @@ var (
 
 // InitRuntimeConfig sets the initial runtime config from the YAML config so the
 // API reflects what the engine was started with.
-func InitRuntimeConfig(mode string, proxyAPIKeys []string, adminPassword string, defaultTab string, logLevel string, capturePayloads bool) {
+func InitRuntimeConfig(mode string, proxyAPIKeys []string, adminPassword string, defaultTab string, logLevel string, capturePayloads bool, retryOnEmpty bool) {
 	runtimeCfgMu.Lock()
 	runtimeCfg.ProxyMode = mode
 	runtimeCfg.ProxyAPIKeys = proxyAPIKeys
@@ -50,6 +52,7 @@ func InitRuntimeConfig(mode string, proxyAPIKeys []string, adminPassword string,
 	runtimeCfg.DefaultTab = defaultTab
 	runtimeCfg.LogLevel = logLevel
 	runtimeCfg.CapturePayloads = capturePayloads
+	runtimeCfg.RetryOnEmpty = retryOnEmpty
 	runtimeCfgMu.Unlock()
 }
 
@@ -66,6 +69,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			DefaultTab:       cfg.DefaultTab,
 			LogLevel:         cfg.LogLevel,
 			CapturePayloads:  cfg.CapturePayloads,
+			RetryOnEmpty:     cfg.RetryOnEmpty,
 		})
 
 	case http.MethodPut:
@@ -136,6 +140,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		runtimeCfg.DefaultTab = incoming.DefaultTab
 		runtimeCfg.LogLevel = incoming.LogLevel
 		runtimeCfg.CapturePayloads = incoming.CapturePayloads
+		runtimeCfg.RetryOnEmpty = incoming.RetryOnEmpty
 		runtimeCfgMu.Unlock()
 
 		// Push the change to the running engine live.
@@ -147,6 +152,8 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		} else {
 			r.engine.SetPayloadStore(nil)
 		}
+		// Push retry-on-empty setting to the engine.
+		r.engine.SetRetryOnEmpty(incoming.RetryOnEmpty)
 		if r.iconFetcher != nil {
 			r.iconFetcher.SetProxyMode(mode)
 		}
@@ -156,8 +163,8 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			r.authMW.SetPassword(incoming.AdminPassword)
 		}
 
-		// Persist admin_password and capture_payloads to YAML config (so they
-		// survive restart). capture_payloads is global system state, unlike
+		// Persist admin_password, capture_payloads, and retry_on_empty to YAML config (so they
+		// survive restart). These are global system state, unlike
 		// proxy_mode/proxy_api_keys/log_level/default_tab which are
 		// environment-specific and not written back.
 		if passwordProvided {
@@ -168,6 +175,10 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			r.cfg.CapturePayloads = incoming.CapturePayloads
 			r.requestConfigWrite()
 		}
+		if r.cfg.RetryOnEmpty != incoming.RetryOnEmpty {
+			r.cfg.RetryOnEmpty = incoming.RetryOnEmpty
+			r.requestConfigWrite()
+		}
 
 		writeJSON(w, http.StatusOK, RuntimeConfigResponse{
 			ProxyMode:        incoming.ProxyMode,
@@ -176,6 +187,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			DefaultTab:       incoming.DefaultTab,
 			LogLevel:         incoming.LogLevel,
 			CapturePayloads:  incoming.CapturePayloads,
+			RetryOnEmpty:     incoming.RetryOnEmpty,
 		})
 
 	default:

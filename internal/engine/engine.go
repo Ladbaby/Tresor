@@ -60,6 +60,12 @@ type Engine struct {
 	// absence implies capture is off (so the engine never allocates a
 	// scratch buffer for the disabled path).
 	payloadStore *inspect.Store
+
+	// retryOnEmpty enables automatic retry when a downstream returns an empty
+	// response. When enabled, the gateway re-sends the request with exponential
+	// backoff (up to retryMaxCount retries) if the downstream LLM produces no
+	// content (e.g., empty choices, no text blocks).
+	retryOnEmpty bool
 }
 
 // New creates a new Engine.
@@ -140,6 +146,47 @@ func (e *Engine) SetProxyAuthKeys(keys []string) {
 // by the log entry id. Pass nil to disable payload capture.
 func (e *Engine) SetPayloadStore(s *inspect.Store) {
 	e.payloadStore = s
+}
+
+// SetRetryOnEmpty enables or disables automatic retry when a downstream
+// returns an empty response.
+func (e *Engine) SetRetryOnEmpty(enabled bool) {
+	e.retryOnEmpty = enabled
+}
+
+// isResponseEmpty checks if a raw upstream response body contains no useful
+// content for the given downstream API format.
+func (e *Engine) isResponseEmpty(body []byte, downstreamFormat string) bool {
+	switch downstreamFormat {
+	case "openai":
+		return IsOpenAIChatEmpty(body)
+	case "anthropic":
+		return IsAnthropicEmpty(body)
+	case "openai_responses":
+		return IsOpenAIResponsesEmpty(body)
+	case "gemini":
+		return IsGeminiEmpty(body)
+	default:
+		return false // unknown format, assume not empty
+	}
+}
+
+// shouldRetry determines whether the gateway should retry a failed request.
+// Returns true only if the response meets ALL retry conditions:
+// - HTTP status is 200 (OK)
+// - The response body is empty (no useful content)
+//
+// Non-200 responses are never retried — LLM client apps handle their own
+// retries for HTTP errors (4xx client errors, 5xx server errors), and
+// retrying those is out of Tresor's scope.
+//
+// This method is designed to be extensible for future retry conditions
+// (e.g., retry on 429 rate limits, retry on specific error messages).
+func (e *Engine) shouldRetry(resp *http.Response, body []byte, downstreamFormat string) bool {
+	if resp.StatusCode != http.StatusOK {
+		return false // non-200 responses are not retried
+	}
+	return e.isResponseEmpty(body, downstreamFormat)
 }
 
 // recordAndCapture is the single funnel for the engine's per-request log
@@ -572,7 +619,6 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// Populate downstream info and build pipeline context
 	entry.DownstreamID = result.ds.ID
 	entry.DownstreamName = result.ds.Name
-	e.logger.Debug("forwarding %s %s → downstream %q (%s) with model %q", r.Method, r.URL.Path, result.ds.ID, result.ds.Name, result.resolvedModel)
 	ctx := &PipelineContext{
 		TargetDownstream: &Downstream{
 			ID:         result.ds.ID,
@@ -584,90 +630,153 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		Variables: make(map[string]interface{}),
 	}
 
-	// Execute request transformers
-	currentReq, currentBody, err := ExecuteRequestPipeline(r, result.body, ctx, pipeline.RequestSteps)
-	if err != nil {
-		e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "request pipeline error", fmt.Sprintf("request pipeline error: %v", err), "request pipeline error", err})
-		return
+	// Determine max retries (3 when retryOnEmpty enabled, 0 otherwise)
+	maxRetries := 0
+	if e.retryOnEmpty {
+		maxRetries = retryMaxCount
+	}
+	// downstreamFormat is used for empty-response detection
+	downstreamFormat := ""
+	if len(result.ds.ApiFormats) > 0 {
+		downstreamFormat = result.ds.ApiFormats[0]
 	}
 
-	// Forward request to downstream
-	resp, cancel, err := e.forwardRequest(currentReq, currentBody, ctx)
-	if err != nil {
+	var cancelFn context.CancelFunc
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Client disconnected — stop retrying
+			select {
+			case <-r.Context().Done():
+				entry.Status = http.StatusBadGateway
+				entry.Error = "client disconnected during retry"
+				entry.Duration = DurationMs(time.Since(start))
+				e.recordAndCapture(&entry, rawReq, nil, r.Header.Get("Content-Type"), "", false)
+				return
+			default:
+			}
+			// Wait with exponential backoff
+			delay := CalculateBackoff(attempt)
+			e.logger.Debug("retry attempt %d/%d: empty response, waiting %v", attempt, maxRetries, delay)
+			time.Sleep(delay)
+			// Reset pipeline context variables (stream transformers maintain state)
+			ctx.Variables = make(map[string]interface{})
+		}
+
+		// Execute request transformers
+		currentReq, currentBody, err := ExecuteRequestPipeline(r, result.body, ctx, pipeline.RequestSteps)
+		if err != nil {
+			if cancelFn != nil {
+				cancelFn()
+			}
+			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "request pipeline error", fmt.Sprintf("request pipeline error: %v", err), "request pipeline error", err})
+			return
+		}
+
+		e.logger.Debug("forwarding %s %s → downstream %q (%s) with model %q (attempt %d)", r.Method, r.URL.Path, result.ds.ID, result.ds.Name, result.resolvedModel, attempt+1)
+
+		// Forward request to downstream
+		resp, cancel, err := e.forwardRequest(currentReq, currentBody, ctx)
+		if err != nil {
+			cancel()
+			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "forward error", fmt.Sprintf("upstream error: %v", err), "upstream error", err})
+			return
+		}
+		cancelFn = cancel
+
+		// Handle streaming response
+		if isEventStream(resp.Header.Get("Content-Type")) {
+			var targetWriter http.ResponseWriter = cw
+			var bw *bufferedWriter
+			if e.retryOnEmpty {
+				bw = newBufferedWriter(cw)
+				targetWriter = bw
+			}
+			isEmpty := e.handleStreamingResponse(targetWriter, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, inputFormat)
+
+			if isEmpty && cw.status == http.StatusOK {
+				// Empty stream with HTTP 200 — retry if attempts remain
+				if attempt >= maxRetries {
+					entry.Status = cw.status
+					entry.Duration = DurationMs(time.Since(start))
+					e.recordAndCapture(&entry, rawReq, nil, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), false)
+					e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "empty response after retries exhausted", "empty response after retries exhausted", "empty response", nil})
+					return
+				}
+				// Close upstream response before retrying
+				resp.Body.Close()
+				continue
+			}
+			// Response had content or non-200 status — done
+			return
+		}
+
+		// Non-streaming response: buffer and transform
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		cancel()
-		e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "forward error", fmt.Sprintf("upstream error: %v", err), "upstream error", err})
-		return
-	}
-
-	// Handle streaming response
-	if isEventStream(resp.Header.Get("Content-Type")) {
-		entry.Status = resp.StatusCode
-		entry.Duration = DurationMs(time.Since(start))
-		e.handleStreamingResponse(cw, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry)
-		return
-	}
-
-	// Non-streaming response: buffer and transform
-	respBody, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	cancel()
-	if err != nil {
-		errMsg := fmt.Sprintf("failed to read upstream response (%d)", resp.StatusCode)
-		if len(respBody) > 0 {
-			errMsg += ": " + truncateString(string(respBody), 500)
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to read upstream response (%d)", resp.StatusCode)
+			if len(respBody) > 0 {
+				errMsg += ": " + truncateString(string(respBody), 500)
+			}
+			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, errMsg, errMsg, "failed to read response", err})
+			return
 		}
-		e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, errMsg, errMsg, "failed to read response", err})
-		return
-	}
 
-	// Pre-transformer response snapshot for the inspector.
-	var rawResp []byte
-	var respTrunc bool
-	if e.payloadStore != nil && len(respBody) > 0 {
-		if len(respBody) > inspect.MaxBodyBytes {
-			rawResp = append(make([]byte, 0, inspect.MaxBodyBytes), respBody[:inspect.MaxBodyBytes]...)
-			respTrunc = true
-		} else {
-			rawResp = append(make([]byte, 0, len(respBody)), respBody...)
+		// Pre-transformer response snapshot for the inspector.
+		var rawResp []byte
+		var respTrunc bool
+		if e.payloadStore != nil && len(respBody) > 0 {
+			if len(respBody) > inspect.MaxBodyBytes {
+				rawResp = append(make([]byte, 0, inspect.MaxBodyBytes), respBody[:inspect.MaxBodyBytes]...)
+				respTrunc = true
+			} else {
+				rawResp = append(make([]byte, 0, len(respBody)), respBody...)
+			}
 		}
-	}
 
-	transformedBody, err := ExecuteResponsePipeline(resp, respBody, ctx, pipeline.ResponseSteps)
-	if err != nil {
-		e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "response pipeline error", fmt.Sprintf("response pipeline error: %v", err), "response pipeline error", err})
-		return
-	}
+		transformedBody, err := ExecuteResponsePipeline(resp, respBody, ctx, pipeline.ResponseSteps)
+		if err != nil {
+			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "response pipeline error", fmt.Sprintf("response pipeline error: %v", err), "response pipeline error", err})
+			return
+		}
 
-	// Copy response headers, stripping stale framing headers and any
-// Content-Encoding marker left from upstream (we ask for identity, but be
-// defensive in case the downstream ignores Accept-Encoding).
-	for k, v := range resp.Header {
-		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") || strings.EqualFold(k, "Content-Encoding") {
+		// Check for empty response (using raw upstream body, not transformed)
+		// Only retry if HTTP status is 200 AND response is empty.
+		if e.retryOnEmpty && e.shouldRetry(resp, respBody, downstreamFormat) {
+			if attempt >= maxRetries {
+				entry.Status = resp.StatusCode
+				entry.Duration = DurationMs(time.Since(start))
+				e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc)
+				e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "empty response after retries exhausted", "empty response after retries exhausted", "empty response", nil})
+				return
+			}
 			continue
 		}
-		cw.Header()[k] = v
-	}
-	cw.Header().Set("Content-Length", strconv.Itoa(len(transformedBody)))
-	entry.Status = resp.StatusCode
-	entry.Duration = DurationMs(time.Since(start))
 
-	// Only accumulate usage statistics when the inspector is enabled.
-	// The user-visible suffix (cache X% / cache N/A) is gated by
-	// capturePayloadsEnabled in the web UI; by populating Usage only
-	// when payloadStore is attached we avoid paying the JSON-parse
-	// cost on the hot path when no one will see the numbers. The
-	// shape is identical to what the inspector uses internally, so the
-	// Logs tab and the inspect view agree on every cached/fresh token
-	// count and on the cache-hit rate.
-	if e.payloadStore != nil {
-		if usage, ok := UsageFromResponseBody(respBody); ok && usage != nil {
-			entry.Usage = usage
+		// Response has content — write to client
+		for k, v := range resp.Header {
+			if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") || strings.EqualFold(k, "Content-Encoding") {
+				continue
+			}
+			cw.Header()[k] = v
 		}
-	}
+		cw.Header().Set("Content-Length", strconv.Itoa(len(transformedBody)))
+		entry.Status = resp.StatusCode
+		entry.Duration = DurationMs(time.Since(start))
 
-	e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc)
-	cw.WriteHeader(resp.StatusCode)
-	cw.Write(transformedBody)
+		// Only accumulate usage statistics when the inspector is enabled.
+		if e.payloadStore != nil {
+			if usage, ok := UsageFromResponseBody(respBody); ok && usage != nil {
+				entry.Usage = usage
+			}
+		}
+
+		e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc)
+		cw.WriteHeader(resp.StatusCode)
+		cw.Write(transformedBody)
+		return
+	}
 }
 
 // handleStreamingResponse pipes an SSE response from the downstream to
@@ -675,12 +784,23 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 // before sending; without them, the response is passed through
 // line-by-line. cancel is called after the stream completes.
 //
+// When bufferForRetry is true, the writer is a bufferedWriter that delays
+// all output until content is confirmed. On first content event, the buffer
+// is flushed and the writer switches to pass-through mode. After scanning,
+// returns true if the stream was empty (no content produced), false otherwise.
+//
 // When the engine's payload store is attached, rawReq/reqCT/respCT and
 // the raw downstream SSE bytes are recorded on completion so the
 // inspector can show the wire bytes — pre-transformer.
-func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context, rawReq []byte, reqCT, respCT string, entry *RequestLogEntry) {
+func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context, rawReq []byte, reqCT, respCT string, entry *RequestLogEntry, bufferForRetry bool, inputFormat string) bool {
 	defer resp.Body.Close()
 	defer cancel()
+
+	var contentProduced bool
+	var buffered bool
+	if bufferForRetry {
+		buffered = true
+	}
 
 	var respBuf bytes.Buffer
 	var truncated bool
@@ -688,10 +808,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 	// scrapeUsage inspects one complete SSE event payload and, if it
 	// carries a recognisable usage block, sparsely merges it into the
-	// entry's Usage accumulator. It is a no-op when captureOn is false
-	// — the user-visible suffix the entry drives is itself gated by
-	// the inspector (capturePayloads) feature, so there is no reason
-	// to compute the numbers unless the inspector is on.
+	// entry's Usage accumulator.
 	scrapeUsage := func(data []byte) {
 		if !captureOn {
 			return
@@ -707,8 +824,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	}
 
 	// teeLine writes the CR-trimmed line + '\n' to the inspector buffer
-	// (subject to inspect.MaxBodyBytes). Runaway streaming downstreams
-	// produce hundreds of MB of SSE; the cap keeps the bound.
+	// (subject to inspect.MaxBodyBytes).
 	teeLine := func(line string) {
 		if !captureOn {
 			return
@@ -733,25 +849,29 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		if captureOn {
 			respBody = respBuf.Bytes()
 		}
+		entry.Status = resp.StatusCode
+		entry.Duration = DurationMs(time.Since(entry.Timestamp))
 		e.recordAndCapture(entry, rawReq, respBody, reqCT, respCT, truncated)
 	}
 
-	// Copy SSE-relevant headers to the client response
-	for _, header := range []string{"Content-Type", "Cache-Control", "Connection"} {
-		if v := resp.Header.Get(header); v != "" {
-			w.Header().Set(header, v)
+	// When buffering, delay header/status writes until content is confirmed.
+	if !bufferForRetry {
+		// Copy SSE-relevant headers to the client response
+		for _, header := range []string{"Content-Type", "Cache-Control", "Connection"} {
+			if v := resp.Header.Get(header); v != "" {
+				w.Header().Set(header, v)
+			}
 		}
+		// Prevent reverse proxy buffering
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(resp.StatusCode)
 	}
-	// Prevent reverse proxy buffering
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	w.WriteHeader(resp.StatusCode)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Printf("Streaming failed: ResponseWriter does not support Flusher")
 		record()
-		return
+		return bufferForRetry && !contentProduced
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -777,15 +897,16 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		if clientGone {
 			return false
 		}
+		if buffered {
+			return true // skip flush while buffering
+		}
 		if !SafeFlush(flusher) {
 			clientGone = true
 			return false
 		}
 		return true
 	}
-	// writeAndFlush is the standard "send some bytes and flush" pair. Used at
-	// every site that writes a complete frame to the client.
-	// ponytail: 4 sites were tryWrite(p); if !ok return; if !tryFlush() return.
+	// writeAndFlush is the standard "send some bytes and flush" pair.
 	writeAndFlush := func(p []byte) bool {
 		if !tryWrite(p) {
 			return false
@@ -793,14 +914,20 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		return tryFlush()
 	}
 
+	// flushBuffer flushes the buffered writer on first content detection,
+	// switching from buffered to pass-through mode.
+	flushBuffer := func() {
+		if buffered {
+			if bw, ok := w.(*bufferedWriter); ok {
+				bw.Flush()
+			}
+			buffered = false
+		}
+	}
+
 	// Passthrough mode: no transformers — write each line immediately with flush
 	if !hasTransformers {
-		// SSE state tracker for usage extraction. In passthrough mode
-		// we do not accumulate events ourselves — we let the scanner
-		// stream each line directly to the client — so we maintain a
-		// minimal accumulator here just to feed UsageFromResponseBody on
-		// event boundaries. The accumulator is dropped once the event
-		// is forwarded to the usage tracker.
+		// SSE state tracker for usage extraction.
 		var sseEvent string
 		flushSSEEvent := func() {
 			if sseEvent == "" {
@@ -814,17 +941,22 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			case <-clientCtx.Done():
 				flushSSEEvent()
 				record()
-				return
+				return bufferForRetry && !contentProduced
 			default:
 			}
 			line := scanner.Text()
 			trimmed := strings.TrimRight(line, "\r")
 			teeLine(trimmed)
 
-			// Track simple event boundaries for the cache scraper. We
-			// only care about data: lines because cache info lives in
-			// the JSON payload. A blank line terminates the current
-			// event.
+			// Content detection for retry: check data: lines
+			if !contentProduced && bufferForRetry && strings.HasPrefix(trimmed, "data: ") {
+				if IsStreamContentLine(trimmed, inputFormat) {
+					contentProduced = true
+					flushBuffer()
+				}
+			}
+
+			// Track simple event boundaries for the cache scraper.
 			if trimmed == "" {
 				flushSSEEvent()
 			} else if strings.HasPrefix(trimmed, "data: ") {
@@ -836,7 +968,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 			if !writeAndFlush([]byte(line + "\n")) {
 				flushSSEEvent()
-				return
+				return bufferForRetry && !contentProduced
 			}
 		}
 		flushSSEEvent()
@@ -844,7 +976,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			log.Printf("Stream ended: %v", err)
 		}
 		record()
-		return
+		return bufferForRetry && !contentProduced
 	}
 
 	// Transform mode: accumulate SSE events, transform, then write
@@ -871,17 +1003,21 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		rawData := strings.Join(dataLines, "\n")
 		chunk := SSEChunk{EventType: eventLine, Data: []byte(rawData)}
 
+		// Content detection for retry: check raw event data for content
+		if !contentProduced && bufferForRetry {
+			if IsStreamContentLine("data: "+rawData, inputFormat) {
+				contentProduced = true
+				flushBuffer()
+			}
+		}
+
 		// Track whether the downstream sent [DONE] so we know if synthetic
 		// termination is needed when the stream ends.
 		if eventLine == "" && strings.TrimSpace(rawData) == "[DONE]" {
 			doneSent = true
 		}
 
-		// Look for a usage block on the raw upstream event. We scrape
-		// the pre-transformer bytes because that's where every provider
-		// puts its own usage; transformers may strip or rename the
-		// field, but the pre-transformer form is canonical and
-		// guaranteed to be intact.
+		// Look for a usage block on the raw upstream event.
 		scrapeUsage([]byte(rawData))
 
 		// Run through stream transformers
@@ -899,8 +1035,6 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 		// If the transformer output contains SSE event boundaries (\n\n), it is
 		// already formatted SSE — write it directly without wrapping in data:.
-		// This handles format transformers (e.g. anthropic2openai) that produce
-		// multiple SSE events from a single upstream data line.
 		if strings.Contains(string(chunk.Data), "\n\n") {
 			return writeAndFlush(chunk.Data)
 		}
@@ -920,21 +1054,18 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		select {
 		case <-clientCtx.Done():
 			record()
-			return
+			return bufferForRetry && !contentProduced
 		default:
 		}
 
 		rawLine := scanner.Text()
-		// The scanner returns lines without the trailing '\n'. We tee the
-		// CR-trimmed line + '\n' to the inspector so the captured raw
-		// stream is byte-identical to what the downstream sent.
 		teeLine(strings.TrimRight(rawLine, "\r"))
 		line := strings.TrimRight(rawLine, "\r")
 
 		if line == "" {
 			// Empty line terminates an SSE event — flush it
 			if !flushEvent() {
-				return
+				return bufferForRetry && !contentProduced
 			}
 			eventLine = ""
 			dataLines = nil
@@ -959,7 +1090,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 		// Unknown line type — pass through as-is
 		if !writeAndFlush([]byte(line + "\n")) {
-			return
+			return bufferForRetry && !contentProduced
 		}
 	}
 
@@ -968,14 +1099,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 	// If the downstream closed the stream without a [DONE] marker and the client
 	// is still connected, send a synthetic one through the pipeline so stream
-	// transformers can emit their termination sequence (e.g. message_stop for
-	// Anthropic format). Without this, the client would hang waiting for the
-	// stream to end, eventually timeout, and retry — producing duplicate requests.
+	// transformers can emit their termination sequence.
 	if !doneSent && !clientGone {
 		select {
 		case <-clientCtx.Done():
 			record()
-			return
+			return bufferForRetry && !contentProduced
 		default:
 			syntheticChunk := SSEChunk{Data: []byte("[DONE]")}
 			transformed, err := ExecuteStreamResponsePipeline(syntheticChunk, ctx, pipeline.StreamResponseSteps)
@@ -989,6 +1118,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		log.Printf("Stream ended: %v", err)
 	}
 	record()
+	return bufferForRetry && !contentProduced
 }
 
 // forwardRequest sends the (possibly transformed) request to the target downstream.

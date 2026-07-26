@@ -47,6 +47,12 @@ type AppConfig struct {
 	// holding the SQLite DB). Tilde (~) is expanded to the user's home dir.
 	IconCacheDir string `yaml:"icon_cache_dir,omitempty"`
 
+	// RetryOnEmpty enables automatic retry when a downstream returns an empty
+	// response (no content generated). When enabled, the gateway will re-send
+	// the request with exponential backoff (up to 3 retries) if the downstream
+	// LLM produces no content (e.g., empty choices, no text blocks).
+	RetryOnEmpty bool `yaml:"retry_on_empty,omitempty"`
+
 	// Routing data (loaded into SQLite at startup via upsert)
 	Downstreams []DownstreamCfg   `yaml:"downstreams"`
 	Rules       []RuleCfg         `yaml:"rules"`
