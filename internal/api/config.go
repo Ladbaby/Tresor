@@ -163,10 +163,8 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			r.authMW.SetPassword(incoming.AdminPassword)
 		}
 
-		// Persist admin_password, capture_payloads, and retry_on_empty to YAML config (so they
-		// survive restart). These are global system state, unlike
-		// proxy_mode/proxy_api_keys/log_level/default_tab which are
-		// environment-specific and not written back.
+		// Persist admin_password, capture_payloads, retry_on_empty, and log_level
+		// to YAML config (so they survive restart).
 		if passwordProvided {
 			r.cfg.AdminPassword = incoming.AdminPassword
 			r.requestConfigWrite()
@@ -177,6 +175,10 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		}
 		if r.cfg.RetryOnEmpty != incoming.RetryOnEmpty {
 			r.cfg.RetryOnEmpty = incoming.RetryOnEmpty
+			r.requestConfigWrite()
+		}
+		if r.cfg.LogLevel != incoming.LogLevel {
+			r.cfg.LogLevel = incoming.LogLevel
 			r.requestConfigWrite()
 		}
 
