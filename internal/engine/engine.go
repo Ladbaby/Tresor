@@ -853,24 +853,30 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		return bufferForRetry && !contentProduced
 	}
 
-	// Always capture the downstream's status code.
-	// When buffering, bufferedWriter.WriteHeader stores it without writing
-	// to the underlying writer. When not buffering, it writes directly.
-	w.WriteHeader(resp.StatusCode)
-
-	// When buffering, delay header writes until content is confirmed.
-	if bufferForRetry {
-		// Headers will be set when flushBuffer() is called.
-	} else {
-		// Copy SSE-relevant headers to the client response
-		for _, header := range []string{"Content-Type", "Cache-Control", "Connection"} {
-			if v := resp.Header.Get(header); v != "" {
-				w.Header().Set(header, v)
-			}
+	// Always copy SSE-relevant headers to the underlying writer BEFORE capturing
+	// the status. Go's net/http commits headers at WriteHeader time and ignores
+	// subsequent Header() mutations, so headers must be set first regardless of
+	// whether the response is buffered for retry or not. bufferedWriter.Header()
+	// is a passthrough to the underlying writer, so these Set calls take effect
+	// immediately on the real response writer.
+	for _, header := range []string{"Content-Type", "Cache-Control", "Connection"} {
+		if v := resp.Header.Get(header); v != "" {
+			w.Header().Set(header, v)
 		}
-		// Prevent reverse proxy buffering
+	}
+	// X-Accel-Buffering: no — only meaningful when streaming straight through.
+	// When buffering for retry, the response is being held in memory anyway, so
+	// preventing reverse-proxy buffering is unnecessary and could mask the
+	// fact that the gateway itself is buffering.
+	if !bufferForRetry {
 		w.Header().Set("X-Accel-Buffering", "no")
 	}
+
+	// Capture the downstream's status code. When buffering, bufferedWriter.WriteHeader
+	// stores it without writing to the underlying writer (the headers committed above
+	// will be flushed together with the buffered body on first content detection).
+	// When not buffering, this writes the status directly to the client.
+	w.WriteHeader(resp.StatusCode)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
