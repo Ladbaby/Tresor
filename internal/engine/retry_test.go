@@ -831,3 +831,69 @@ func TestCalculateBackoff_RespectsCap(t *testing.T) {
 		t.Errorf("attempt 10 = %v, expected in [%v, %v]", d10, minD, maxD)
 	}
 }
+
+// ---- DetectStreamFormat ----
+
+func TestDetectStreamFormat(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk SSEChunk
+		want  string
+	}{
+		{name: "anthropic by event", chunk: SSEChunk{EventType: "message_start"}, want: "anthropic"},
+		{name: "anthropic content_block_delta", chunk: SSEChunk{EventType: "content_block_delta"}, want: "anthropic"},
+		{name: "openai_responses by event", chunk: SSEChunk{EventType: "response.created"}, want: "openai_responses"},
+		{name: "openai by payload", chunk: SSEChunk{Data: []byte(`{"choices":[{"delta":{"content":"x"}}]}`)}, want: "openai"},
+		{name: "gemini by payload", chunk: SSEChunk{Data: []byte(`{"candidates":[{"content":{"parts":[]}}]}`)}, want: "gemini"},
+		{name: "unknown payload", chunk: SSEChunk{Data: []byte(`{"foo":"bar"}`)}, want: ""},
+		{name: "empty chunk", chunk: SSEChunk{}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DetectStreamFormat(tt.chunk); got != tt.want {
+				t.Errorf("DetectStreamFormat(%+v) = %q, want %q", tt.chunk, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsStreamContentLine_AnthropicStreamWithWrongSeed exercises Bug 2:
+// when an OpenAI request is auto-translated to Anthropic, the seed format
+// passed to the streaming handler is "openai", but the actual SSE data
+// is in Anthropic format (content_block_delta with text_delta). With the
+// bug, IsStreamContentLine would check for OpenAI markers in Anthropic
+// data and return false (wrongly classifying the stream as empty).
+//
+// After Bug 2's fix, the handler confirms the format from the first
+// chunk before calling IsStreamContentLine. This test asserts the two
+// pieces work together: given an Anthropic chunk, the detected format
+// is "anthropic", and IsStreamContentLine with "anthropic" correctly
+// identifies text_delta as content (returns true).
+func TestIsStreamContentLine_AnthropicStreamWithWrongSeed(t *testing.T) {
+	// Simulate the chunk the streaming handler would see.
+	chunk := SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hi"}}`),
+	}
+
+	// Step 1: on-the-fly detection (with seed "openai") — handler calls
+	// DetectStreamFormat first; it should detect "anthropic" from the
+	// event type.
+	detected := DetectStreamFormat(chunk)
+	if detected != "anthropic" {
+		t.Fatalf("DetectStreamFormat = %q, want anthropic", detected)
+	}
+
+	// Step 2: with the correct format, IsStreamContentLine returns true
+	// for content-bearing Anthropic events.
+	if !IsStreamContentLine("data: "+string(chunk.Data), detected) {
+		t.Error("Anthropic text_delta should be detected as content with correct format")
+	}
+
+	// Step 3 (regression check): with the wrong seed ("openai"), the
+	// pre-Bug-2 code path would have returned false, misclassifying
+	// the stream as empty. This shows why we need on-the-fly detection.
+	if IsStreamContentLine("data: "+string(chunk.Data), "openai") {
+		t.Error("sanity: Anthropic data with openai format should NOT detect content (proves why detection matters)")
+	}
+}

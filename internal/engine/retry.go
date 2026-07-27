@@ -275,7 +275,6 @@ func IsGeminiEmpty(body []byte) bool {
 // a content-producing event for the specified API format. Thinking/
 // reasoning events are excluded — they do not count as real content.
 func IsStreamContentLine(line string, format string) bool {
-	// Strip "data: " prefix to get the raw JSON payload
 	var data string
 	if strings.HasPrefix(line, "data: ") {
 		data = strings.TrimPrefix(line, "data: ")
@@ -333,4 +332,45 @@ func IsStreamContentLine(line string, format string) bool {
 	default:
 		return false
 	}
+}
+
+// ---- Stream format detection ----
+
+// DetectStreamFormat identifies the API format of an SSE chunk by
+// inspecting its event type (for named-event formats like Anthropic and
+// OpenAI Responses) and its data payload (for unnamed formats like
+// OpenAI Chat Completions and Gemini). Returns "" when the format
+// cannot be determined from this chunk.
+//
+// This is used by the retry-on-empty feature to detect the actual
+// format of the downstream's SSE response on the fly, since the input
+// request format may differ from the downstream's response format when
+// auto-translation is in effect (e.g. client sends OpenAI but downstream
+// speaks Anthropic).
+func DetectStreamFormat(chunk SSEChunk) string {
+	switch chunk.EventType {
+	case "message_start", "content_block_start", "content_block_delta",
+		"content_block_stop", "message_delta", "message_stop", "ping":
+		return "anthropic"
+	case "response.created", "response.in_progress", "response.completed",
+		"response.output_item.added", "response.output_item.done",
+		"response.reasoning", "response.reasoning_summary_part.added",
+		"response.reasoning_summary_part.done",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done":
+		return "openai_responses"
+	}
+
+	if len(chunk.Data) == 0 {
+		return ""
+	}
+	// OpenAI SSE has no named events — payload carries a `choices` array.
+	if strings.Contains(string(chunk.Data), `"choices"`) {
+		return "openai"
+	}
+	// Gemini SSE chunks carry a `candidates` array.
+	if strings.Contains(string(chunk.Data), `"candidates"`) {
+		return "gemini"
+	}
+	return ""
 }
