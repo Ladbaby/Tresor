@@ -72,6 +72,17 @@ func NewRegistry() engine.PluginRegistry {
 		return &FixAnthropicUsage{}, nil
 	})
 
+	r.register("remove_thinking", engine.PluginInfo{
+		ID:          "remove_thinking",
+		Description: "Removes 'thinking' / 'reasoning' content from downstream model responses across all 4 supported API formats (OpenAI Chat Completions, Anthropic Messages, OpenAI Responses API, Google Gemini). Also strips thinking_tokens from usage blocks.",
+		ConfigSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &RemoveThinking{}, nil
+	})
+
 	r.register("anthropic2openai", engine.PluginInfo{
 		ID:          "anthropic2openai",
 		Description: "Converts Anthropic Messages requests to OpenAI Chat Completion format",
