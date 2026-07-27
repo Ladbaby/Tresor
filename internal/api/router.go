@@ -354,16 +354,18 @@ func (r *Router) handleLogInspect(w http.ResponseWriter, req *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, inspectResponse{
-		ID:             entry.ID,
-		Timestamp:      entry.Timestamp.UTC().Format(time.RFC3339Nano),
-		Path:           entry.Path,
-		Method:         entry.Method,
-		Model:          entry.Model,
-		ResolvedModel:  entry.ResolvedModel,
-		DownstreamID:   entry.DownstreamID,
-		DownstreamName: entry.DownstreamName,
-		ClientIP:       entry.ClientIP,
-		Status:         entry.Status,
+		ID:               entry.ID,
+		Timestamp:        entry.Timestamp.UTC().Format(time.RFC3339Nano),
+		Path:             entry.Path,
+		Method:           entry.Method,
+		Model:            entry.Model,
+		ResolvedModel:    entry.ResolvedModel,
+		DownstreamID:     entry.DownstreamID,
+		DownstreamName:   entry.DownstreamName,
+		ClientIP:         entry.ClientIP,
+		Status:           entry.Status,
+		RequestFormat:    entry.RequestFormat,
+		DownstreamFormat: entry.DownstreamFormat,
 		Request: inspectBody{
 			ContentType: entry.RequestContentType,
 			Body:        string(entry.RequestBody),
@@ -393,6 +395,20 @@ type inspectResponse struct {
 	DownstreamName string      `json:"downstream_name,omitempty"`
 	ClientIP       string      `json:"client_ip,omitempty"`
 	Status         int         `json:"status"`
-	Request        inspectBody `json:"request"`
-	Response       inspectBody `json:"response"`
+	// RequestFormat is the API format of the client's incoming request
+	// (one of "openai", "anthropic", "openai_responses", "gemini", or "").
+	// The inspector UI uses it to pick the correct normaliser for the
+	// request body. When empty, the UI falls back to deriving the format
+	// from the request path.
+	RequestFormat string `json:"request_format,omitempty"`
+	// DownstreamFormat is the API format the downstream actually
+	// returned on the wire. It is the format the inspector UI must use
+	// when parsing the response body — important when an
+	// auto-translator rewrote the body between formats and the client's
+	// URL path is no longer a reliable hint for the response shape.
+	// When empty, the UI falls back to deriving the format from the
+	// request path.
+	DownstreamFormat string `json:"downstream_format,omitempty"`
+	Request          inspectBody `json:"request"`
+	Response         inspectBody `json:"response"`
 }

@@ -2558,14 +2558,36 @@ function setActiveInspectView(view) {
     }
 }
 
+// Map the backend's inspect-API format string (as recorded by the
+// engine and returned in /api/logs/{id}/inspect) to the internal
+// format token used by the renderer's normaliser switch.
+//   'openai'           -> 'chat_completions'
+//   'openai_responses' -> 'responses'
+//   'anthropic'        -> 'anthropic'
+//   'gemini'           -> 'gemini'
+// Unknown / empty values return null so the caller falls back to the
+// existing path/body-shape detection.
+function backendFormatToInternal(s) {
+    if (s === 'openai') return 'chat_completions';
+    if (s === 'openai_responses') return 'responses';
+    if (s === 'anthropic' || s === 'gemini') return s;
+    return null;
+}
+
 function renderInspectBody() {
     const bodyEl = document.getElementById('log-inspect-body');
     if (!bodyEl || !currentInspectData) return;
     bodyEl.innerHTML = '';
     if (currentInspectView === 'parsed') {
         bodyEl.appendChild(buildInspectMarkdownToggle());
-        bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request'));
-        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response'));
+        // The backend tells us the request format the client used and
+        // the downstream format the wire bytes are in. Use those for
+        // parsing each side independently — important when an
+        // auto-translator rewrote the body between formats.
+        const reqFmt = backendFormatToInternal(currentInspectData.request_format);
+        const respFmt = backendFormatToInternal(currentInspectData.downstream_format);
+        bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request', reqFmt));
+        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response', respFmt));
     } else {
         bodyEl.appendChild(renderInspectSection('Raw client request (before plugins)', currentInspectData.request));
         bodyEl.appendChild(renderInspectSection('Raw downstream response (before plugins)', currentInspectData.response));
@@ -2595,8 +2617,10 @@ function buildInspectMarkdownToggle() {
         if (!bodyEl) return;
         // Remove everything after the toggle and re-render.
         while (bodyEl.children.length > 1) bodyEl.removeChild(bodyEl.lastChild);
-        bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request'));
-        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response'));
+        const reqFmt = backendFormatToInternal(currentInspectData.request_format);
+        const respFmt = backendFormatToInternal(currentInspectData.downstream_format);
+        bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request', reqFmt));
+        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response', respFmt));
     });
 
     const span = document.createElement('span');
@@ -2738,7 +2762,7 @@ function prettyPrintJSON(s) {
  * (e.g. a non-streaming OpenAI Responses JSON body — still pretty-
  * printed but reported in the parsed tab as a single shape).
  */
-function renderInspectSectionParsed(title, body, path, kind) {
+function renderInspectSectionParsed(title, body, path, kind, formatOverride) {
     const wrap = document.createElement('div');
     wrap.className = 'inspect-section';
 
@@ -2774,7 +2798,7 @@ function renderInspectSectionParsed(title, body, path, kind) {
     let parsedView = null;
     let parseError = null;
     try {
-        parsedView = buildParsedView(body.body, path, kind, isStreaming);
+        parsedView = buildParsedView(body.body, path, kind, isStreaming, formatOverride);
     } catch (e) {
         parseError = e && e.message ? e.message : String(e);
         if (e && e.stack) console.error('[inspect] parser threw: ' + title + ' error=' + parseError);
@@ -2840,8 +2864,15 @@ function renderInspectSectionParsed(title, body, path, kind) {
  * For a streaming body, run it through the SSE reassembler; for a
  * non-streaming JSON body, normalise once via the format-specific helpers.
  * Returns { messages: [...], usage?: {...}, complete: bool, format?: string }
+ *
+ * `formatOverride` (optional) is the format string the backend reported
+ * for this body (one of the internal tokens: 'chat_completions',
+ * 'responses', 'anthropic', 'gemini'). When provided, it bypasses the
+ * path/body-shape detection — essential for the response body when an
+ * auto-translator has rewritten it into a different format than the
+ * client's URL path would suggest.
  */
-function buildParsedView(rawBody, path, kind, isStreaming) {
+function buildParsedView(rawBody, path, kind, isStreaming, formatOverride) {
     // Try to detect the format even before parsing, so the error message
     // can hint "unknown format" rather than "JSON parse error".
     let preview = rawBody;
@@ -2851,9 +2882,9 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
         if (first) preview = first;
     }
 
-    const format = (typeof detectRequestFormat === 'function')
+    const format = formatOverride || ((typeof detectRequestFormat === 'function')
         ? detectRequestFormat(path, (function () { try { return JSON.parse(preview); } catch (e) { return {}; } })())
-        : null;
+        : null);
 
     if (!format) {
         return { messages: [], complete: false, format: null };
@@ -2865,7 +2896,7 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
         const snapshot = r.reconstruct();
         if (!snapshot) return { messages: [], complete: false, format: format };
         const norm = (kind === 'response')
-            ? normalizeResponse(snapshot, path)
+            ? normalizeResponse(snapshot, path, format)
             : null;
         if (norm) return { messages: [norm], usage: norm.usage || null, complete: true, format: format };
         // For requests, snapshots from the reassembler don't apply — fall
@@ -2897,7 +2928,7 @@ function buildParsedView(rawBody, path, kind, isStreaming) {
     }
 
     // response
-    const resp = normalizeResponse(parsed, path);
+    const resp = normalizeResponse(parsed, path, format);
     if (!resp) return { messages: [], complete: true, format: format };
     return { messages: [resp], usage: resp.usage || null, complete: true, format: format };
 }
@@ -2965,8 +2996,10 @@ function buildRequestSections(parsed, format, path) {
     // We still call normalizeRequest because it gives us the
     // format-specific flat shapes (system blocks, normalised message
     // list, etc.) without us duplicating the per-format logic.
+    // Pass `format` through so the inspector can use the
+    // backend-reported request format instead of the path-based guess.
     const req = (typeof normalizeRequest === 'function')
-        ? normalizeRequest(parsed, path)
+        ? normalizeRequest(parsed, path, format)
         : null;
 
     // Pre-extract the bits the renderers need so we don't re-parse

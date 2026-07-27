@@ -33,6 +33,17 @@ type Entry struct {
 	DownstreamName      string    `json:"downstream_name,omitempty"`
 	Status              int       `json:"status,omitempty"`
 	ClientIP            string    `json:"client_ip,omitempty"`
+	// RequestFormat is the API format the client used on the wire for the
+	// incoming request (one of "openai", "anthropic", "openai_responses",
+	// "gemini", or "" when unknown). It is the format the inspector should
+	// use when parsing RequestBody.
+	RequestFormat string `json:"request_format,omitempty"`
+	// DownstreamFormat is the API format the downstream actually returned
+	// on the wire for the response (typically result.ds.ApiFormats[0] at
+	// the time of the request). It is the format the inspector should use
+	// when parsing ResponseBody — which may differ from RequestFormat when
+	// the engine ran an auto-translator.
+	DownstreamFormat string `json:"downstream_format,omitempty"`
 }
 
 type Store struct {

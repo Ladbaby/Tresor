@@ -184,7 +184,14 @@ func (e *Engine) shouldRetry(resp *http.Response, body []byte, downstreamFormat 
 // Pre-transformer capture is the inspector's whole point: what the UI
 // shows is the wire bytes the client sent and the wire bytes the
 // downstream returned, with no plugin transformation visible.
-func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []byte, reqCT, respCT string, truncResp bool) {
+//
+// requestFormat and downstreamFormat are the API formats of the
+// incoming request body and the downstream response body, respectively.
+// The inspector UI uses them to pick the correct normaliser for each
+// side — important when an auto-translator rewrote the body between
+// formats and the client's URL path is no longer a reliable hint for
+// the response shape.
+func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []byte, reqCT, respCT string, truncResp bool, requestFormat, downstreamFormat string) {
 	e.logger.Record(entry)
 	if e.payloadStore == nil {
 		return
@@ -205,6 +212,8 @@ func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []by
 		RequestContentType:  reqCT,
 		ResponseContentType: respCT,
 		TruncatedResponse:   truncResp,
+		RequestFormat:       requestFormat,
+		DownstreamFormat:    downstreamFormat,
 	})
 }
 
@@ -668,7 +677,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				entry.Status = http.StatusBadGateway
 				entry.Error = "client disconnected during retry"
 				entry.Duration = DurationMs(time.Since(start))
-				e.recordAndCapture(&entry, rawReq, nil, r.Header.Get("Content-Type"), "", false)
+				e.recordAndCapture(&entry, rawReq, nil, r.Header.Get("Content-Type"), "", false, inputFormat, downstreamFormat)
 				return
 			default:
 			}
@@ -714,18 +723,14 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			// The handler confirms this from the first SSE chunk — the seed
 			// is only a hint, since auto-translation may have converted to
 			// a different format.
-			streamFormatSeed := downstreamFormat
-			if streamFormatSeed == "" {
-				streamFormatSeed = inputFormat
-			}
-			isEmpty := e.handleStreamingResponse(targetWriter, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, streamFormatSeed)
+			isEmpty := e.handleStreamingResponse(targetWriter, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, inputFormat, downstreamFormat)
 
 			if isEmpty && resp.StatusCode == http.StatusOK {
 				// Empty stream with HTTP 200 — retry if attempts remain
 				if attempt >= maxRetries {
 					entry.Status = cw.status
 					entry.Duration = DurationMs(time.Since(start))
-					e.recordAndCapture(&entry, rawReq, nil, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), false)
+					e.recordAndCapture(&entry, rawReq, nil, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), false, inputFormat, downstreamFormat)
 					e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "empty response after retries exhausted", "empty response after retries exhausted", "empty response", nil})
 					return
 				}
@@ -774,7 +779,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if attempt >= maxRetries {
 				entry.Status = resp.StatusCode
 				entry.Duration = DurationMs(time.Since(start))
-				e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc)
+				e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc, inputFormat, downstreamFormat)
 				e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "empty response after retries exhausted", "empty response after retries exhausted", "empty response", nil})
 				return
 			}
@@ -799,7 +804,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc)
+		e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc, inputFormat, downstreamFormat)
 		cw.WriteHeader(resp.StatusCode)
 		cw.Write(transformedBody)
 		return
@@ -819,7 +824,16 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 // When the engine's payload store is attached, rawReq/reqCT/respCT and
 // the raw downstream SSE bytes are recorded on completion so the
 // inspector can show the wire bytes — pre-transformer.
-func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context, rawReq []byte, reqCT, respCT string, entry *RequestLogEntry, bufferForRetry bool, seedFormat string) bool {
+//
+// requestFormat and downstreamFormat are the API formats of the client's
+// incoming request and the downstream's response, respectively. They
+// are persisted on the inspect entry so the inspector UI can pick the
+// correct normaliser for each side independently. The streaming seed
+// for content detection is derived as downstreamFormat (falling back to
+// requestFormat when the downstream declared no api_formats), and is
+// then confirmed or overridden by on-the-fly detection from the first
+// SSE chunk we actually read.
+func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context, rawReq []byte, reqCT, respCT string, entry *RequestLogEntry, bufferForRetry bool, requestFormat, downstreamFormat string) bool {
 	defer resp.Body.Close()
 	defer cancel()
 
@@ -830,13 +844,17 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	}
 
 	// streamFormat is the format used for IsStreamContentLine. It starts
-	// as seedFormat (downstream's declared format, falling back to
-	// inputFormat) and is then confirmed or overridden by on-the-fly
+	// as the downstream's declared format (falling back to the request
+	// format) and is then confirmed or overridden by on-the-fly
 	// detection from the first SSE chunk we actually read. On-the-fly
 	// detection is required because auto-translation may convert the
-	// request format to the downstream's format, so seedFormat is only
+	// request format to the downstream's format, so the seed is only
 	// a hint — the actual response format is what matters for content
 	// detection (otherwise we'd retry every non-empty response as empty).
+	seedFormat := downstreamFormat
+	if seedFormat == "" {
+		seedFormat = requestFormat
+	}
 	var streamFormat string = seedFormat
 
 	var respBuf bytes.Buffer
@@ -888,7 +906,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		}
 		entry.Status = resp.StatusCode
 		entry.Duration = DurationMs(time.Since(entry.Timestamp))
-		e.recordAndCapture(entry, rawReq, respBody, reqCT, respCT, truncated)
+		e.recordAndCapture(entry, rawReq, respBody, reqCT, respCT, truncated, requestFormat, downstreamFormat)
 	}
 
 	// finish handles the end-of-stream return: if the stream was empty and

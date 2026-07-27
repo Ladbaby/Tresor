@@ -22,9 +22,14 @@
 // react to a single canonical shape. The Go side stays oblivious to
 // vendor formats.
 //
-// The reassembler also exposes normalizeRequest(body, format) which
-// converts any of the four formats' request bodies into a canonical
-// message list: {system?: string, messages: [{role, content, ...}]}.
+// The reassembler also exposes normalizeRequest(body, path, format) and
+// normalizeResponse(body, path, format) which convert any of the four
+// formats' request/response bodies into canonical message shapes:
+//   request  -> {system?: string|block[], messages: [{role, content, ...}]}
+//   response -> {role, content, finish_reason?|stop_reason?, usage?}
+// The optional `format` argument overrides the path/body-shape detector
+// and is used by the inspector when the backend has authoritative
+// knowledge of the format.
 
 (function (global) {
     'use strict';
@@ -618,14 +623,16 @@
     // Convert any of the four request formats into a canonical message
     // list. Returns {system?: string, messages: [{role, content}]}.
     // `path` is the URL path so we can pick the right format detector
-    // without sniffing the body.
-    function normalizeRequest(body, path) {
+    // without sniffing the body. `format` (optional) overrides the
+    // detector and is used by the inspector when the backend has
+    // already authoritative knowledge of the request format.
+    function normalizeRequest(body, path, format) {
         if (typeof body === 'string') {
             try { body = JSON.parse(body); }
             catch (e) { return null; }
         }
         if (!isDict(body)) return null;
-        const format = detectRequestFormat(path, body);
+        if (!format) format = detectRequestFormat(path, body);
         switch (format) {
             case 'chat_completions': return normalizeChatRequest(body);
             case 'responses':        return normalizeResponsesRequest(body);
@@ -846,13 +853,17 @@
     }
 
     // Convert a reconstructed response into a canonical {role, content: [...]}.
-    function normalizeResponse(body, path) {
+    // `format` (optional) overrides the detector and is used by the
+    // inspector when the backend has authoritative knowledge of the
+    // downstream's response format (e.g. when the client and downstream
+    // speak different APIs and the response is a translated body).
+    function normalizeResponse(body, path, format) {
         if (typeof body === 'string') {
             try { body = JSON.parse(body); }
             catch (e) { return null; }
         }
         if (!isDict(body)) return null;
-        const format = detectRequestFormat(path, body);
+        if (!format) format = detectRequestFormat(path, body);
         // Reuse the format detector — it works for both directions because
         // the response shape mirrors the request shape.
         switch (format) {
