@@ -2873,35 +2873,50 @@ function renderInspectSectionParsed(title, body, path, kind, formatOverride) {
  * client's URL path would suggest.
  */
 function buildParsedView(rawBody, path, kind, isStreaming, formatOverride) {
-    // Try to detect the format even before parsing, so the error message
-    // can hint "unknown format" rather than "JSON parse error".
-    let preview = rawBody;
-    // Pull out the first SSE data line for format sniffing if streaming.
-    if (isStreaming) {
-        const first = firstSseDataLine(rawBody);
-        if (first) preview = first;
-    }
-
-    const format = formatOverride || ((typeof detectRequestFormat === 'function')
-        ? detectRequestFormat(path, (function () { try { return JSON.parse(preview); } catch (e) { return {}; } })())
-        : null);
-
-    if (!format) {
-        return { messages: [], complete: false, format: null };
-    }
-
+    // Streaming path: let the SSE reassembler walk the body first. The
+    // reassembler's own per-event format detection (it locks onto
+    // 'anthropic' the moment it sees message_start, etc.) is the most
+    // reliable format source for SSE — strictly better than sniffing the
+    // first data line, which can be a non-prototypical shape (e.g. an
+    // Anthropic message_start event whose `message` block has no
+    // `messages[]`/`system`/`content[]` discriminator). The
+    // path/formatOverride hints only matter when the SSE body has zero
+    // recognisable events (in which case we fall back to them).
     if (isStreaming) {
         const r = new SSEReassembler();
         r.feed(rawBody);
         const snapshot = r.reconstruct();
-        if (!snapshot) return { messages: [], complete: false, format: format };
+        const detectedFormat = r._format || formatOverride
+            || ((typeof detectRequestFormat === 'function')
+                ? detectRequestFormat(path, (function () { try { return JSON.parse(firstSseDataLine(rawBody) || 'null'); } catch (e) { return {}; } })())
+                : null);
+        if (!detectedFormat) {
+            return { messages: [], complete: false, format: null };
+        }
+        // `complete` reflects whether the stream carried a wire-level
+        // terminal marker. A complete-but-empty snapshot is still
+        // complete: the inspector must not flash "Stream incomplete"
+        // for a refusal-only Anthropic response or a Gemini stream that
+        // reported `usageMetadata` but no candidate text.
+        const streamComplete = r.complete === true;
         const norm = (kind === 'response')
-            ? normalizeResponse(snapshot, path, format)
+            ? normalizeResponse(snapshot, path, detectedFormat)
             : null;
-        if (norm) return { messages: [norm], usage: norm.usage || null, complete: true, format: format };
+        if (norm) return { messages: [norm], usage: norm.usage || null, complete: true, format: detectedFormat };
         // For requests, snapshots from the reassembler don't apply — fall
-        // through to the non-streaming parser.
-        return { messages: [], complete: false, format: format };
+        // through to the non-streaming parser. Honour the wire-level
+        // terminal marker so a complete request stream doesn't flash
+        // the incomplete warning either.
+        return { messages: [], complete: streamComplete, format: detectedFormat };
+    }
+
+    // Non-streaming path: use the override or the body/path detector.
+    const format = formatOverride || ((typeof detectRequestFormat === 'function')
+        ? detectRequestFormat(path, (function () { try { return JSON.parse(rawBody); } catch (e) { return {}; } })())
+        : null);
+
+    if (!format) {
+        return { messages: [], complete: false, format: null };
     }
 
     let parsed;

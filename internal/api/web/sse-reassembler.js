@@ -126,7 +126,24 @@
             // lock in the format, because each protocol uses different
             // frame structure.
             this._format = null;
+            // Terminal-event tracker. `complete` flips to true the moment
+            // we see a format-specific terminal marker (Anthropic
+            // `message_stop`, OpenAI Chat `[DONE]`, OpenAI Responses
+            // `response.completed`/etc., Gemini `finishReason` or
+            // `usageMetadata`). It stays false for an in-flight or
+            // truncated stream, so the inspector can tell the difference
+            // between "we're mid-stream" and "we saw the final marker
+            // and the snapshot happens to be empty (a legitimate state
+            // for, e.g., a refusal-only response)".
+            this._complete = false;
         }
+
+        // Read-only terminal-completion flag. Exposed publicly so the
+        // inspector's parsed-view code can render a "stream incomplete"
+        // warning for genuinely truncated streams without conflating
+        // them with a fully-terminated stream whose snapshot content
+        // happens to be empty.
+        get complete() { return this._complete; }
 
         feed(chunk) {
             this._buf += chunk;
@@ -166,8 +183,10 @@
         _emitEvent() {
             const raw = this._currentData.join('\n');
             // OpenAI Chat Completions terminator: "data: [DONE]". Skip
-            // these so they don't pollute the events list.
+            // these so they don't pollute the events list, but flag the
+            // stream as terminal-completed.
             if (raw === '[DONE]' && this._currentEvent === null) {
+                this._complete = true;
                 this._currentEvent = null;
                 this._currentData = [];
                 return;
@@ -357,6 +376,7 @@
             }
             if (eventType === 'response.completed' || eventType === 'response.done' || eventType === 'response.incomplete' || eventType === 'response.failed') {
                 this._mergeResponsesTerminal(data);
+                this._complete = true;
                 return;
             }
             if (eventType === 'response.error') {
@@ -499,7 +519,14 @@
                 }
                 return;
             }
-            // message_stop, ping, etc.: no-op for the snapshot.
+            if (eventType === 'message_stop') {
+                // Anthropic's terminal event. Flag the stream as
+                // terminal-completed so the inspector can distinguish
+                // a clean end-of-stream from a truncated capture.
+                this._complete = true;
+                return;
+            }
+            // ping, etc.: no-op for the snapshot.
         }
 
         // ---- Gemini ----
@@ -522,6 +549,17 @@
             if (isDict(data.usageMetadata)) {
                 this._snapshot.usageMetadata = deepCopy(data.usageMetadata);
                 this._snapshot.usage = normalizeUsage(data.usageMetadata);
+            }
+            // Gemini has no dedicated terminal event. A non-empty
+            // `finishReason` on any candidate, or a top-level
+            // `usageMetadata` block, signals end-of-stream. The
+            // chat_completions path is the only one without a wire-level
+            // terminal — there we rely on `[DONE]` detection in
+            // `_emitEvent`.
+            if (Array.isArray(data.candidates) && data.candidates.some(c => isDict(c) && c.finishReason)) {
+                this._complete = true;
+            } else if (isDict(data.usageMetadata)) {
+                this._complete = true;
             }
             this._snapshot.content = this._geminiContentBlocks();
         }
