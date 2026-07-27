@@ -1602,7 +1602,11 @@ function renderAliasGroup(container, group) {
 
         const chips = document.createElement('div');
         chips.className = 'alias-announced-chips';
-        const names = Array.isArray(group.announced_names) ? group.announced_names : [];
+        // `names` is the local working copy; `originalNames` is the last
+        // server-confirmed value. On save failure we roll `names` back to
+        // `originalNames` so the rejected entry doesn't linger in the UI.
+        const names = Array.isArray(group.announced_names) ? group.announced_names.slice() : [];
+        const originalNames = names.slice();
 
         const renderChips = () => {
             chips.innerHTML = '';
@@ -1621,7 +1625,7 @@ function renderAliasGroup(container, group) {
                     e.stopPropagation();
                     names.splice(idx, 1);
                     renderChips();
-                    saveAnnouncedNames(group, names, errEl);
+                    saveAnnouncedNames(group, names, errEl, originalNames);
                 };
                 chip.appendChild(rm);
                 chips.appendChild(chip);
@@ -1650,7 +1654,7 @@ function renderAliasGroup(container, group) {
             names.push(v);
             input.value = '';
             renderChips();
-            saveAnnouncedNames(group, names, errEl);
+            saveAnnouncedNames(group, names, errEl, originalNames);
         };
         add.onclick = submit;
         input.addEventListener('keydown', (e) => {
@@ -1757,10 +1761,11 @@ async function deleteAliasGroup(inputModelId) {
 /**
  * Save the announced-names list for a regex alias group. Sends a PUT to the
  * group's first option with the new list (the store propagates it to all
- * siblings). On validation failure, the message is shown inline; on success,
- * the local cache is reloaded.
+ * siblings). On validation failure, the local `names` array is reverted to
+ * `originalNames` (the last server-confirmed value) and re-rendered so the
+ * rejected entry doesn't linger in the UI until refresh.
  */
-async function saveAnnouncedNames(group, names, errEl) {
+async function saveAnnouncedNames(group, names, errEl, originalNames) {
     errEl.textContent = '';
     if (!group.options || group.options.length === 0) {
         errEl.textContent = 'Add at least one option before setting announced names.';
@@ -1783,6 +1788,22 @@ async function saveAnnouncedNames(group, names, errEl) {
         });
         loadAliasGroups();
     } catch (err) {
+        // Roll back the local list to the last server-confirmed value.
+        if (Array.isArray(originalNames)) {
+            names.length = 0;
+            for (const n of originalNames) names.push(n);
+            // Re-render in place so the user sees the chip disappear.
+            const chipsContainer = errEl.parentNode.querySelector('.alias-announced-chips');
+            if (chipsContainer) {
+                chipsContainer.innerHTML = '';
+                names.forEach((n) => {
+                    const chip = document.createElement('span');
+                    chip.className = 'alias-announced-chip';
+                    chip.appendChild(document.createElement('span')).textContent = n;
+                    chipsContainer.appendChild(chip);
+                });
+            }
+        }
         errEl.textContent = err.message || String(err);
     }
 }
