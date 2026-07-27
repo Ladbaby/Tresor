@@ -1594,9 +1594,9 @@ function renderAliasGroup(container, group) {
 
         const label = document.createElement('div');
         label.className = 'alias-announced-label';
-        label.textContent = 'Announced names';
+        label.textContent = '(Optional) Announced names';
         label.appendChild(makeHelpIcon(
-            'Concrete model IDs surfaced in /v1/models. Each name must match the regex pattern above. Server rejects collisions with existing downstream models or other aliases.'
+            'The regex pattern will not appear in LLM Apps\' "Fetch Available Models" results (i.e., /v1/models results). Instead, you can specify concrete model IDs here that will appear in available models. (e.g., regex pattern "claude-sonnet.*" is not discoverable, but its announced names "claude-sonnet-4-6" and "claude-sonnet-5" are discoverable.)  Each name must match the regex pattern above, and must not collide with existing downstream model IDs or other aliases.'
         ));
         announced.appendChild(label);
 
