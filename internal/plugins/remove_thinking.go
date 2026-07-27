@@ -285,7 +285,7 @@ func (t *RemoveThinking) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine
 	// (Anthropic, Responses) the event type alone is enough. For OpenAI
 	// and Gemini the data payload carries the discriminator.
 	if t.detectedFormat == "" {
-		t.detectedFormat = detectStreamingFormatFromChunk(chunk)
+		t.detectedFormat = engine.DetectStreamFormat(chunk)
 	}
 
 	// Per-format stream termination → reset state.
@@ -388,12 +388,19 @@ func (t *RemoveThinking) transformAnthropicStreamChunk(chunk engine.SSEChunk) (e
 		return chunk, nil
 
 	case "content_block_delta":
-		// Any delta inside a thinking block is dropped. This covers both
-		// `thinking_delta` and `signature_delta` — the latter MUST be
-		// dropped too, otherwise the SDK sees a signature for a block
-		// that never existed.
+		// Drop ONLY deltas whose index matches the thinking block.
+		// Deltas for sibling blocks (different index) MUST pass through —
+		// otherwise a model that emits thinking first then text (e.g. the
+		// real-world stream in completely_stripped_anthropic_response.txt
+		// where thinking is at index 0 and text is at index 1) will lose
+		// every text_delta and the client sees an empty response.
+		// This also covers signature_delta (which always carries the
+		// thinking block's index) so we don't emit an orphan signature.
 		if t.anthropicInsideThinking {
-			return engine.SSEChunk{EventType: "", Data: []byte{}}, nil
+			deltaIndex := extractBlockIndex(data)
+			if deltaIndex == t.anthropicThinkingIndex {
+				return engine.SSEChunk{EventType: "", Data: []byte{}}, nil
+			}
 		}
 		return chunk, nil
 
@@ -691,38 +698,6 @@ func detectResponseFormat(body []byte) string {
 		return "gemini"
 	}
 
-	return ""
-}
-
-// detectStreamingFormatFromChunk identifies the API format of an SSE
-// chunk. Named-event formats (Anthropic, Responses) are detected from
-// the event type. Unnamed formats (OpenAI, Gemini) are detected from
-// the data payload.
-func detectStreamingFormatFromChunk(chunk engine.SSEChunk) string {
-	switch chunk.EventType {
-	case "message_start", "content_block_start", "content_block_delta",
-		"content_block_stop", "message_delta", "message_stop", "ping":
-		return "anthropic"
-	case "response.created", "response.in_progress", "response.completed",
-		"response.output_item.added", "response.output_item.done",
-		"response.reasoning", "response.reasoning_summary_part.added",
-		"response.reasoning_summary_part.done",
-		"response.reasoning_summary_text.delta",
-		"response.reasoning_summary_text.done":
-		return "openai_responses"
-	}
-
-	if len(chunk.Data) == 0 {
-		return ""
-	}
-	// OpenAI SSE has no named events — payload carries a `choices` array.
-	if strings.Contains(string(chunk.Data), `"choices"`) {
-		return "openai"
-	}
-	// Gemini SSE chunks carry a `candidates` array.
-	if strings.Contains(string(chunk.Data), `"candidates"`) {
-		return "gemini"
-	}
 	return ""
 }
 

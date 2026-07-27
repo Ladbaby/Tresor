@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -405,6 +406,186 @@ func TestRemoveThinking_Anthropic_Stream_PreservesSiblingStopWhileInsideThinking
 	}
 }
 
+// TestRemoveThinking_Anthropic_Stream_PreservesTextDeltaWhileThinkingOpen
+// reproduces the real-world stream captured in
+// completely_stripped_anthropic_response.txt: thinking block at index 0
+// opens first, followed by many thinking_deltas, then a text block at
+// index 1 opens, followed by many text_deltas. The pre-fix code dropped
+// every text_delta because anthropicInsideThinking was still true from
+// the unfinished thinking block. With the fix, only deltas whose index
+// matches the thinking index are dropped, so text_deltas at index 1
+// pass through.
+func TestRemoveThinking_Anthropic_Stream_PreservesTextDeltaWhileThinkingOpen(t *testing.T) {
+	p := &RemoveThinking{}
+	ctx := &engine.PipelineContext{}
+
+	// 1. Open thinking block at index 0
+	out, _ := p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+	}, ctx)
+	if len(out.Data) != 0 {
+		t.Fatalf("thinking content_block_start should be dropped")
+	}
+	if !p.anthropicInsideThinking || p.anthropicThinkingIndex != 0 {
+		t.Fatalf("state not set: inside=%v idx=%d", p.anthropicInsideThinking, p.anthropicThinkingIndex)
+	}
+
+	// 2. thinking_delta at index 0 — must be dropped
+	out, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hi"}}`),
+	}, ctx)
+	if len(out.Data) != 0 {
+		t.Errorf("thinking_delta at thinking index should be dropped, got %q", out.Data)
+	}
+
+	// 3. Open text block at index 1 (must pass through)
+	out, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+	}, ctx)
+	if !bytes.Contains(out.Data, []byte(`"type":"text"`)) {
+		t.Errorf("text content_block_start should pass through, got %q", out.Data)
+	}
+
+	// 4. Many text_delta at index 1 — ALL must pass through (this is the bug)
+	textDeltas := []string{"Hi", "!", " I'm", " here", " and", " ready", " to", " help"}
+	fullText := ""
+	for _, td := range textDeltas {
+		payload := `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"` + td + `"}}`
+		out, _ = p.TransformStreamChunk(engine.SSEChunk{
+			EventType: "content_block_delta",
+			Data:      []byte(payload),
+		}, ctx)
+		if len(out.Data) == 0 {
+			t.Errorf("text_delta at sibling index should pass through, got empty for %q", td)
+			continue
+		}
+		fullText += td
+	}
+	if fullText != "Hi! I'm here and ready to help" {
+		t.Errorf("text content lost: got %q", fullText)
+	}
+
+	// 5. signature_delta at index 0 (thinking index) — must still be dropped
+	out, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-xyz"}}`),
+	}, ctx)
+	if len(out.Data) != 0 {
+		t.Errorf("signature_delta at thinking index should be dropped, got %q", out.Data)
+	}
+
+	// 6. Stop events: thinking at index 0 (drop + reset), text at index 1 (pass through)
+	out, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_stop",
+		Data:      []byte(`{"type":"content_block_stop","index":0}`),
+	}, ctx)
+	if len(out.Data) != 0 {
+		t.Errorf("thinking stop should be dropped, got %q", out.Data)
+	}
+	if p.anthropicInsideThinking {
+		t.Errorf("anthropicInsideThinking should reset after thinking stop")
+	}
+
+	out, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_stop",
+		Data:      []byte(`{"type":"content_block_stop","index":1}`),
+	}, ctx)
+	if !bytes.Contains(out.Data, []byte(`"content_block_stop"`)) {
+		t.Errorf("text stop should pass through, got %q", out.Data)
+	}
+}
+
+// TestRemoveThinking_Anthropic_Stream_DroppedDeltaAfterThinkingBlock_OnlyDropsMatchingIndex
+// covers the interleaved (text-before-thinking) case: a text block opens
+// first at index 0, then a thinking block opens at index 1. text_delta
+// events at index 0 must continue to pass through, even after the
+// thinking block opens.
+func TestRemoveThinking_Anthropic_Stream_DroppedDeltaAfterThinkingBlock_OnlyDropsMatchingIndex(t *testing.T) {
+	p := &RemoveThinking{}
+	ctx := &engine.PipelineContext{}
+
+	// Open text at index 0
+	_, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+	}, ctx)
+	// Open thinking at index 1
+	_, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`),
+	}, ctx)
+	if !p.anthropicInsideThinking || p.anthropicThinkingIndex != 1 {
+		t.Fatalf("state not set: inside=%v idx=%d", p.anthropicInsideThinking, p.anthropicThinkingIndex)
+	}
+
+	// text_delta at index 0 — must pass through (sibling)
+	out, _ := p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`),
+	}, ctx)
+	if len(out.Data) == 0 {
+		t.Errorf("text_delta at sibling index (0) should pass through")
+	}
+
+	// thinking_delta at index 1 — must be dropped
+	out, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"..."}}`),
+	}, ctx)
+	if len(out.Data) != 0 {
+		t.Errorf("thinking_delta at thinking index (1) should be dropped, got %q", out.Data)
+	}
+
+	// Another text_delta at index 0 — must still pass through
+	out, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}`),
+	}, ctx)
+	if len(out.Data) == 0 {
+		t.Errorf("second text_delta at sibling index (0) should pass through")
+	}
+}
+
+// TestRemoveThinking_Anthropic_Stream_DropsSignatureDeltaAtThinkingIndex
+// ensures a signature_delta whose index matches the thinking block index
+// is dropped, even after a sibling text block has opened. Otherwise the
+// Anthropic SDK would see a signature for a block that never existed.
+func TestRemoveThinking_Anthropic_Stream_DropsSignatureDeltaAtThinkingIndex(t *testing.T) {
+	p := &RemoveThinking{}
+	ctx := &engine.PipelineContext{}
+
+	// Open thinking at index 0
+	_, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+	}, ctx)
+	// Open text at index 1 (text arrives while thinking is still open)
+	_, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_start",
+		Data:      []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+	}, ctx)
+	// Some text_delta at index 1 passes through
+	_, _ = p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ok"}}`),
+	}, ctx)
+	// signature_delta at index 0 (thinking index) — must be dropped
+	out, _ := p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "content_block_delta",
+		Data:      []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-abc"}}`),
+	}, ctx)
+	if len(out.Data) != 0 {
+		t.Errorf("signature_delta at thinking index (0) should be dropped, got %q", out.Data)
+	}
+	// State must still indicate we're inside the thinking block
+	if !p.anthropicInsideThinking {
+		t.Errorf("anthropicInsideThinking should still be true after sibling text activity")
+	}
+}
+
 // ===== Streaming - OpenAI Responses =====
 
 func TestRemoveThinking_Responses_Stream_DropsReasoningEvents(t *testing.T) {
@@ -593,33 +774,33 @@ func TestRemoveThinking_DetectFormat_Unknown(t *testing.T) {
 }
 
 func TestRemoveThinking_DetectStreamingFormat_Anthropic(t *testing.T) {
-	if got := detectStreamingFormatFromChunk(engine.SSEChunk{EventType: "message_start"}); got != "anthropic" {
+	if got := engine.DetectStreamFormat(engine.SSEChunk{EventType: "message_start"}); got != "anthropic" {
 		t.Errorf("got %q", got)
 	}
-	if got := detectStreamingFormatFromChunk(engine.SSEChunk{EventType: "content_block_delta"}); got != "anthropic" {
+	if got := engine.DetectStreamFormat(engine.SSEChunk{EventType: "content_block_delta"}); got != "anthropic" {
 		t.Errorf("got %q", got)
 	}
 }
 
 func TestRemoveThinking_DetectStreamingFormat_Responses(t *testing.T) {
-	if got := detectStreamingFormatFromChunk(engine.SSEChunk{EventType: "response.created"}); got != "openai_responses" {
+	if got := engine.DetectStreamFormat(engine.SSEChunk{EventType: "response.created"}); got != "openai_responses" {
 		t.Errorf("got %q", got)
 	}
-	if got := detectStreamingFormatFromChunk(engine.SSEChunk{EventType: "response.reasoning_summary_text.delta"}); got != "openai_responses" {
+	if got := engine.DetectStreamFormat(engine.SSEChunk{EventType: "response.reasoning_summary_text.delta"}); got != "openai_responses" {
 		t.Errorf("got %q", got)
 	}
 }
 
 func TestRemoveThinking_DetectStreamingFormat_OpenAI(t *testing.T) {
 	chunk := engine.SSEChunk{Data: []byte(`{"choices":[{"delta":{"content":"hi"}}]}`)}
-	if got := detectStreamingFormatFromChunk(chunk); got != "openai" {
+	if got := engine.DetectStreamFormat(chunk); got != "openai" {
 		t.Errorf("got %q", got)
 	}
 }
 
 func TestRemoveThinking_DetectStreamingFormat_Gemini(t *testing.T) {
 	chunk := engine.SSEChunk{Data: []byte(`{"candidates":[{"content":{"parts":[]}}]}`)}
-	if got := detectStreamingFormatFromChunk(chunk); got != "gemini" {
+	if got := engine.DetectStreamFormat(chunk); got != "gemini" {
 		t.Errorf("got %q", got)
 	}
 }
