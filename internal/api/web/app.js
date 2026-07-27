@@ -245,6 +245,52 @@ async function fetchDownstreams() {
     }
     return cachedDownstreams;
 }
+
+// populateRuleModelOptions fills the <datalist> used by the Pattern
+// Model input in the rule editor with every string that could be
+// matched: downstream output_model_ids, active alias input_model_ids,
+// regex alias patterns, and announced names. The user can still type
+// any free-form string; this just offers autocomplete suggestions.
+async function populateRuleModelOptions() {
+    const datalist = document.getElementById('rule-model-options');
+    if (!datalist) return;
+
+    const suggestions = new Set();
+
+    try {
+        const downstreams = await fetchDownstreams();
+        for (const ds of (downstreams || [])) {
+            for (const m of (ds.output_model_ids || [])) {
+                if (m) suggestions.add(m);
+            }
+        }
+    } catch { /* ignore — datalist stays empty */ }
+
+    try {
+        const groups = await api('/aliases');
+        for (const g of (groups || [])) {
+            if (g.input_model_id) suggestions.add(g.input_model_id);
+            if (g.is_regex) {
+                for (const n of (g.announced_names || [])) {
+                    if (n) suggestions.add(n);
+                }
+            }
+        }
+    } catch { /* ignore */ }
+
+    // Sort case-insensitively for stable order.
+    const sorted = Array.from(suggestions).sort((a, b) =>
+        a.toLowerCase().localeCompare(b.toLowerCase())
+    );
+
+    // Rebuild <option> children.
+    while (datalist.firstChild) datalist.removeChild(datalist.firstChild);
+    for (const s of sorted) {
+        const opt = document.createElement('option');
+        opt.value = s;
+        datalist.appendChild(opt);
+    }
+}
 // ---- Rules ----
 async function loadRules() {
     const tbody = document.getElementById('rules-body');
@@ -666,6 +712,10 @@ async function openRuleModal(rule) {
 
     // Ensure downstreams cache is loaded for the multi-select
     await fetchDownstreams();
+
+    // Populate the Pattern Model autocomplete datalist. Fire-and-forget
+    // — the user can still type a free-form value while it loads.
+    populateRuleModelOptions();
 
     // Populate match input format checkboxes
     const inputFmtContainer = document.getElementById('rule-match-input-formats');
