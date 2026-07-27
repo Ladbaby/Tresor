@@ -1330,7 +1330,7 @@ async function createNewDownstream() {
 async function loadPlugins() {
     const tbody = document.getElementById('plugins-body');
     try {
-        const plugins = await api('/plugins');
+        const plugins = (await api('/plugins')).slice().sort((a, b) => a.id.localeCompare(b.id));
         cachedPlugins = plugins;
         tbody.innerHTML = plugins.length === 0
             ? '<tr><td colspan="3" class="loading">No plugins registered</td></tr>'
