@@ -712,17 +712,21 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 		// Handle streaming response
 		if isEventStream(resp.Header.Get("Content-Type")) {
+			// For streaming responses, wrap the client writer with a
+			// headerDelayWriter when retry-on-empty is enabled. This
+			// delays the HTTP status header commitment until content
+			// is being streamed, so a 502 error can still be sent if
+			// all retries are exhausted. Content bytes pass through
+			// progressively to preserve streaming behavior.
+			//
+			// Reasoning tokens are preserved (streamed to the client),
+			// but reasoning-only streams are detected as empty and
+			// retried transparently by holding the terminal [DONE]
+			// marker until end-of-stream.
 			var targetWriter http.ResponseWriter = cw
-			var bw *bufferedWriter
 			if e.retryOnEmpty {
-				bw = newBufferedWriter(cw)
-				targetWriter = bw
+				targetWriter = newHeaderDelayWriter(cw)
 			}
-			// Seed the streaming handler with the downstream's format (fall back to
-			// inputFormat when the downstream has no api_formats declared).
-			// The handler confirms this from the first SSE chunk — the seed
-			// is only a hint, since auto-translation may have converted to
-			// a different format.
 			isEmpty := e.handleStreamingResponse(targetWriter, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, inputFormat, downstreamFormat)
 
 			if isEmpty && resp.StatusCode == http.StatusOK {
@@ -838,10 +842,6 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	defer cancel()
 
 	var contentProduced bool
-	var buffered bool
-	if bufferForRetry {
-		buffered = true
-	}
 
 	// streamFormat is the format used for IsStreamContentLine. It starts
 	// as the downstream's declared format (falling back to the request
@@ -909,16 +909,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		e.recordAndCapture(entry, rawReq, respBody, reqCT, respCT, truncated, requestFormat, downstreamFormat)
 	}
 
-	// finish handles the end-of-stream return: if the stream was empty and
-	// the downstream returned a non-200 status, flush the buffered writer
-	// so the error status (and any buffered error content) reaches the client
-	// instead of being silently swallowed by the retry-on-empty logic.
+	// finish handles the end-of-stream return. It returns true when the
+	// stream was empty (no real content produced) and retry-on-empty
+	// is enabled, which signals HandleProxy to retry the upstream.
+	// (The legacy bufferedWriter flush for non-200 status is no longer
+	// needed because we write directly to the underlying writer now.)
 	finish := func() bool {
-		if bufferForRetry && !contentProduced && resp.StatusCode != http.StatusOK {
-			if bw, ok := w.(*bufferedWriter); ok {
-				bw.Flush()
-			}
-		}
 		return bufferForRetry && !contentProduced
 	}
 
@@ -977,9 +973,6 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		if clientGone {
 			return false
 		}
-		if buffered {
-			return true // skip flush while buffering
-		}
 		if !SafeFlush(flusher) {
 			clientGone = true
 			return false
@@ -994,17 +987,6 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		return tryFlush()
 	}
 
-	// flushBuffer flushes the buffered writer on first content detection,
-	// switching from buffered to pass-through mode.
-	flushBuffer := func() {
-		if buffered {
-			if bw, ok := w.(*bufferedWriter); ok {
-				bw.Flush()
-			}
-			buffered = false
-		}
-	}
-
 	// Passthrough mode: no transformers — write each line immediately with flush
 	if !hasTransformers {
 		// SSE state tracker for usage extraction.
@@ -1016,6 +998,33 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			scrapeUsage([]byte(sseEvent))
 			sseEvent = ""
 		}
+		// terminalBuf holds terminal events ([DONE] / message_stop /
+		// response.completed) until end-of-stream, so we can suppress
+		// them when the stream turned out to be empty (case a) or
+		// reasoning-only (case b) and the upstream is being retried.
+		// While held, the rest of the stream (reasoning + content) is
+		// forwarded to the client immediately and progressively.
+		var terminalBuf bytes.Buffer
+		var terminalEventActive bool
+		var terminalDataLines []string
+		flushTerminal := func() {
+			if !terminalEventActive {
+				return
+			}
+			if !clientGone {
+				_, _ = w.Write(terminalBuf.Bytes())
+				SafeFlush(flusher)
+			}
+			terminalBuf.Reset()
+			terminalEventActive = false
+			terminalDataLines = nil
+		}
+		discardTerminal := func() {
+			terminalBuf.Reset()
+			terminalEventActive = false
+			terminalDataLines = nil
+		}
+
 		for scanner.Scan() {
 			select {
 			case <-clientCtx.Done():
@@ -1028,27 +1037,44 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			trimmed := strings.TrimRight(line, "\r")
 			teeLine(trimmed)
 
-			// Content detection for retry: check data: lines.
 			// Confirm streamFormat from the first chunk we see — the
 			// downstream may speak a different format than the input.
-			if !contentProduced && bufferForRetry && strings.HasPrefix(trimmed, "data: ") {
+			if streamFormat == "" && bufferForRetry && strings.HasPrefix(trimmed, "data: ") {
+				streamFormat = DetectStreamFormat(SSEChunk{
+					EventType: sseEvent,
+					Data:      []byte(strings.TrimPrefix(trimmed, "data: ")),
+				})
 				if streamFormat == "" {
-					streamFormat = DetectStreamFormat(SSEChunk{
-						EventType: sseEvent,
-						Data:      []byte(strings.TrimPrefix(trimmed, "data: ")),
-					})
-					if streamFormat == "" {
-						streamFormat = seedFormat
-					}
-				}
-				if IsStreamContentLine(trimmed, streamFormat) {
-					contentProduced = true
-					flushBuffer()
+					streamFormat = seedFormat
 				}
 			}
 
 			// Track simple event boundaries for the cache scraper.
 			if trimmed == "" {
+				// End of an SSE event. If buffering for retry is on,
+				// check whether this event carries real content (excludes
+				// reasoning/thinking). Reasoning events are still streamed
+				// to the client (preserved) but do not flip contentProduced.
+				if bufferForRetry {
+					if sseEvent != "" && IsStreamContentLine("data: "+sseEvent, streamFormat) {
+						contentProduced = true
+						// Real content detected — if we were holding a
+						// terminal event, flush it now (it was held because
+						// the prior reasoning-only events didn't count).
+						flushTerminal()
+					} else if isTerminalEvent(sseEvent, streamFormat) {
+						// Terminal event ([DONE] / message_stop / etc.):
+						// hold it until end-of-stream, so we can suppress
+						// it when the upstream needs to be retried.
+						// Reasoning tokens remain visible to the client;
+						// only the terminal marker is held.
+						terminalEventActive = true
+						terminalBuf.WriteString("data: ")
+						terminalBuf.WriteString(sseEvent)
+						terminalBuf.WriteString("\n\n")
+						terminalDataLines = []string{sseEvent}
+					}
+				}
 				flushSSEEvent()
 			} else if strings.HasPrefix(trimmed, "data: ") {
 				if sseEvent != "" {
@@ -1057,12 +1083,34 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 				sseEvent += strings.TrimPrefix(trimmed, "data: ")
 			}
 
+			// Write the line. While we're holding a terminal event,
+			// suppress the terminal's bytes (they're already in
+			// terminalBuf). Everything else flows through to the
+			// client immediately and progressively.
+			if terminalEventActive && bufferForRetry && isDataLineInTerminal(terminalDataLines, line) {
+				continue
+			}
 			if !writeAndFlush([]byte(line + "\n")) {
 				flushSSEEvent()
 				record()
 				return finish()
 			}
 		}
+		// End of stream. If a terminal event is still held and no
+		// real content was produced, discard it and let the engine
+		// retry the upstream. Otherwise flush it to the client.
+		if bufferForRetry && terminalEventActive && !contentProduced {
+			discardTerminal()
+			flushSSEEvent()
+			if err := scanner.Err(); err != nil {
+				log.Printf("Stream ended: %v", err)
+			}
+			record()
+			// finish() returns true when bufferForRetry && !contentProduced,
+			// which signals HandleProxy to retry the upstream.
+			return finish()
+		}
+		flushTerminal()
 		flushSSEEvent()
 		if err := scanner.Err(); err != nil {
 			log.Printf("Stream ended: %v", err)
@@ -1075,6 +1123,39 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	var eventLine string
 	var dataLines []string
 	var doneSent bool // tracks whether downstream sent [DONE] marker
+
+	// heldTerminalBytes accumulates a terminal event ([DONE] /
+	// message_stop / response.completed) so we can suppress it at
+	// end-of-stream when the upstream needs to be retried (the client
+	// should not see [DONE] for an empty response). Reasoning tokens
+	// remain visible to the client; only the terminal marker is held.
+	var heldTerminalBytes []byte
+	holdTerminal := func(rawData string) {
+		// Reconstruct the full SSE event the way it arrived from the
+		// downstream (preserving event: line if present).
+		var b bytes.Buffer
+		if eventLine != "" {
+			fmt.Fprintf(&b, "event: %s\ndata: %s\n\n", eventLine, rawData)
+		} else {
+			fmt.Fprintf(&b, "data: %s\n\n", rawData)
+		}
+		heldTerminalBytes = b.Bytes()
+	}
+	flushHeldTerminal := func() {
+		if len(heldTerminalBytes) == 0 || clientGone {
+			heldTerminalBytes = nil
+			return
+		}
+		if !tryWrite(heldTerminalBytes) {
+			heldTerminalBytes = nil
+			return
+		}
+		SafeFlush(flusher)
+		heldTerminalBytes = nil
+	}
+	discardHeldTerminal := func() {
+		heldTerminalBytes = nil
+	}
 
 	flushEvent := func() bool {
 		if len(dataLines) == 0 {
@@ -1094,23 +1175,6 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		// Combine data lines to get the raw SSE payload
 		rawData := strings.Join(dataLines, "\n")
 		chunk := SSEChunk{EventType: eventLine, Data: []byte(rawData)}
-
-		// Content detection for retry: check raw event data for content.
-		// Detect the actual stream format from the chunk if we haven't
-		// already — the seed value is just a hint, the actual format
-		// may differ when auto-translation is in effect.
-		if !contentProduced && bufferForRetry {
-			if streamFormat == "" {
-				streamFormat = DetectStreamFormat(chunk)
-				if streamFormat == "" {
-					streamFormat = seedFormat
-				}
-			}
-			if IsStreamContentLine("data: "+rawData, streamFormat) {
-				contentProduced = true
-				flushBuffer()
-			}
-		}
 
 		// Track whether the downstream sent [DONE] so we know if synthetic
 		// termination is needed when the stream ends.
@@ -1134,9 +1198,34 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			return true
 		}
 
+		// Detect real content vs reasoning-only.
+		eventHasRealContent := false
+		if bufferForRetry {
+			if streamFormat == "" {
+				streamFormat = DetectStreamFormat(chunk)
+				if streamFormat == "" {
+					streamFormat = seedFormat
+				}
+			}
+			eventHasRealContent = IsStreamContentLine("data: "+rawData, streamFormat)
+		}
+
+		// Detect terminal events (held until end-of-stream).
+		isTerminal := bufferForRetry && isTerminalEvent(rawData, streamFormat)
+
 		// If the transformer output contains SSE event boundaries (\n\n), it is
 		// already formatted SSE — write it directly without wrapping in data:.
 		if strings.Contains(string(chunk.Data), "\n\n") {
+			if isTerminal {
+				holdTerminal(rawData)
+				return true
+			}
+			if eventHasRealContent {
+				contentProduced = true
+				// If we held a terminal, flush it now (real content
+				// confirms the stream isn't empty).
+				flushHeldTerminal()
+			}
 			return writeAndFlush(chunk.Data)
 		}
 
@@ -1148,6 +1237,14 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		out.Write(chunk.Data)
 		out.WriteString("\n\n")
 
+		if isTerminal {
+			holdTerminal(rawData)
+			return true
+		}
+		if eventHasRealContent {
+			contentProduced = true
+			flushHeldTerminal()
+		}
 		return writeAndFlush(out.Bytes())
 	}
 
@@ -1203,7 +1300,11 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	// If the downstream closed the stream without a [DONE] marker and the client
 	// is still connected, send a synthetic one through the pipeline so stream
 	// transformers can emit their termination sequence.
-	if !doneSent && !clientGone {
+	// When retry-on-empty is enabled and no real content was produced,
+	// skip the synthetic [DONE] — the upstream will be retried and any
+	// held terminal will be discarded so the client doesn't see an
+	// empty completion.
+	if !doneSent && !clientGone && !bufferForRetry {
 		select {
 		case <-clientCtx.Done():
 			record()
@@ -1216,6 +1317,19 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			}
 		}
 	}
+
+	// At end-of-stream, decide whether to flush or discard any held
+	// terminal event. If no real content was produced, discard it and
+	// signal retry to the engine.
+	if bufferForRetry && !contentProduced && len(heldTerminalBytes) > 0 {
+		discardHeldTerminal()
+		if err := scanner.Err(); err != nil {
+			log.Printf("Stream ended: %v", err)
+		}
+		record()
+		return finish()
+	}
+	flushHeldTerminal()
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("Stream ended: %v", err)

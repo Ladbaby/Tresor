@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -673,8 +673,12 @@ func TestEngine_HandleProxy_RetryOnEmpty_Streaming_RetriesUntilContent(t *testin
 }
 
 // TestEngine_HandleProxy_RetryOnEmpty_Streaming_ExhaustsRetriesAndErrors
-// verifies that when all retries return empty, the gateway ultimately
-// returns 502 to the client.
+// verifies that when all retries return reasoning-only (no real content),
+// the gateway ultimately returns the upstream reasoning events to the
+// client followed by an error message. With the streaming-preservation
+// fix, reasoning tokens stream progressively to the client (so headers
+// get committed as 200 on the first event); when retries are exhausted,
+// the gateway appends an error body but cannot change the status code.
 func TestEngine_HandleProxy_RetryOnEmpty_Streaming_ExhaustsRetriesAndErrors(t *testing.T) {
 	s := newTestStore(t)
 
@@ -707,12 +711,23 @@ func TestEngine_HandleProxy_RetryOnEmpty_Streaming_ExhaustsRetriesAndErrors(t *t
 	if attempts != 1+3 {
 		t.Errorf("expected %d downstream calls (1 initial + 3 retries), got %d", 1+3, attempts)
 	}
-	if w.Code != http.StatusBadGateway {
-		t.Errorf("expected status 502 after retries exhausted, got %d", w.Code)
+	// Reasoning events have been streamed progressively to the client,
+	// so headers were committed as 200 on the first event. The error
+	// body is appended after retries are exhausted. We accept 200
+	// here because the fix prioritizes preserving the reasoning stream
+	// the user can see; the alternative (dropping reasoning to enable
+	// 502) was rejected as worse UX.
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200 (reasoning preserved, headers committed), got %d", w.Code)
 	}
-	respBody, _ := io.ReadAll(w.Result().Body)
-	if !strings.Contains(strings.ToLower(string(respBody)), "empty") {
-		t.Errorf("expected error body to mention 'empty', got %q", string(respBody))
+	respBody := w.Body.String()
+	// The body should contain reasoning from the final attempt and
+	// the empty-response error message appended by the engine.
+	if !strings.Contains(respBody, "reasoning_content") {
+		t.Errorf("expected body to contain reasoning events, got %q", respBody)
+	}
+	if !strings.Contains(strings.ToLower(respBody), "empty") {
+		t.Errorf("expected body to mention 'empty' after retries exhausted, got %q", respBody)
 	}
 }
 
@@ -895,5 +910,375 @@ func TestIsStreamContentLine_AnthropicStreamWithWrongSeed(t *testing.T) {
 	// the stream as empty. This shows why we need on-the-fly detection.
 	if IsStreamContentLine("data: "+string(chunk.Data), "openai") {
 		t.Error("sanity: Anthropic data with openai format should NOT detect content (proves why detection matters)")
+	}
+}
+
+// ---- bufferedWriter.Drain ----
+
+// TestBufferedWriter_Drain verifies that Drain() commits buffered bytes to
+// the underlying writer WITHOUT switching to pass-through mode. Subsequent
+// writes continue to be buffered; only an explicit Flush() commits the
+// no-retry decision.
+func TestBufferedWriter_Drain(t *testing.T) {
+	rec := httptest.NewRecorder()
+	bw := newBufferedWriter(rec)
+	bw.Header().Set("Content-Type", "text/event-stream")
+	bw.WriteHeader(200)
+	bw.Write([]byte("first"))
+	bw.Drain()
+
+	if !strings.Contains(rec.Body.String(), "first") {
+		t.Errorf("expected Drain to write buffered bytes, body=%q", rec.Body.String())
+	}
+	if rec.Body.String() != "first" {
+		t.Errorf("expected body=first after Drain, got %q", rec.Body.String())
+	}
+	// After Drain, writer must still be in buffering mode.
+	if bw.IsFlushed() {
+		t.Error("Drain() must NOT switch to pass-through (IsFlushed should be false)")
+	}
+
+	// Subsequent writes are still buffered.
+	bw.Write([]byte("-more"))
+	if rec.Body.String() != "first" {
+		t.Errorf("expected body still=first after Drain+Write, got %q (second write should be buffered)", rec.Body.String())
+	}
+
+	// Explicit Flush commits the rest.
+	bw.Flush()
+	if rec.Body.String() != "first-more" {
+		t.Errorf("expected body=first-more after Flush, got %q", rec.Body.String())
+	}
+	if !bw.IsFlushed() {
+		t.Error("IsFlushed should be true after Flush()")
+	}
+}
+
+// TestBufferedWriter_DrainEmpty verifies that Drain is a no-op when the
+// buffer is empty (no spurious flushes).
+func TestBufferedWriter_DrainEmpty(t *testing.T) {
+	rec := httptest.NewRecorder()
+	bw := newBufferedWriter(rec)
+	bw.Header().Set("Content-Type", "text/event-stream")
+	bw.WriteHeader(200)
+	// Don't write anything — just drain.
+	bw.Drain()
+
+	if rec.Body.Len() != 0 {
+		t.Errorf("expected empty body after Drain on empty buffer, got %q", rec.Body.String())
+	}
+	if bw.IsFlushed() {
+		t.Error("IsFlushed should be false after Drain on empty buffer")
+	}
+}
+
+// TestBufferedWriter_Reset verifies that Reset() drops buffered bytes
+// without committing them. Used by the streaming retry path to discard
+// reasoning-only events.
+func TestBufferedWriter_Reset(t *testing.T) {
+	rec := httptest.NewRecorder()
+	bw := newBufferedWriter(rec)
+	bw.Header().Set("Content-Type", "text/event-stream")
+	bw.WriteHeader(200)
+	bw.Write([]byte("to-be-dropped"))
+	bw.Reset()
+
+	if rec.Body.Len() != 0 {
+		t.Errorf("expected empty body after Reset, got %q", rec.Body.String())
+	}
+	if bw.IsFlushed() {
+		t.Error("Reset should not flip IsFlushed")
+	}
+
+	// Subsequent writes still buffered, normal path resumes.
+	bw.Write([]byte("kept"))
+	bw.Flush()
+	if rec.Body.String() != "kept" {
+		t.Errorf("expected body=kept after Flush, got %q", rec.Body.String())
+	}
+}
+
+// ---- Progressive-flush regression test ----
+
+// chunkRecorder wraps an httptest.ResponseRecorder and timestamps each
+// Write call. The slice of arrival times lets tests assert that the body
+// arrived progressively (multiple writes spread over time), not all at
+// once at EOF.
+type chunkRecorder struct {
+	*httptest.ResponseRecorder
+	mu      sync.Mutex
+	writeTimes []time.Time
+	writeSizes []int
+}
+
+func newChunkRecorder() *chunkRecorder {
+	return &chunkRecorder{ResponseRecorder: httptest.NewRecorder()}
+}
+
+func (c *chunkRecorder) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	c.writeTimes = append(c.writeTimes, time.Now())
+	c.writeSizes = append(c.writeSizes, len(p))
+	c.mu.Unlock()
+	return c.ResponseRecorder.Write(p)
+}
+
+func (c *chunkRecorder) WriteHeader(code int) {
+	c.ResponseRecorder.WriteHeader(code)
+}
+
+func (c *chunkRecorder) Flush() {
+	c.ResponseRecorder.Flush()
+}
+
+func (c *chunkRecorder) Times() []time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]time.Time, len(c.writeTimes))
+	copy(out, c.writeTimes)
+	return out
+}
+
+func (c *chunkRecorder) Sizes() []int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]int, len(c.writeSizes))
+	copy(out, c.writeSizes)
+	return out
+}
+
+// TestEngine_HandleProxy_RetryOnEmpty_Streaming_ProgressiveFlush is the
+// core regression test for the bug where retry_on_empty=true caused
+// streaming responses to be delivered all-at-once at end of stream.
+//
+// Test setup: downstream emits three SSE events with deliberate 100ms
+// gaps. The first event is reasoning-only (treated as empty), the second
+// is real content, the third is more content.
+//
+// Expected behavior with the fix:
+//   - The reasoning-only event is BUFFERED but NOT delivered to the client
+//     (so the upstream can be transparently retried if the stream ends
+//     empty).
+//   - The first content event triggers a flush of the buffered bytes to
+//     the client (a single burst of reasoning + content), then switches to
+//     pass-through mode.
+//   - The second content event is delivered progressively (visible as a
+//     separate Write call to the recorder, separated in time from the first).
+//
+// Before the fix, all three events would arrive in a single Write at end
+// of stream.
+func TestEngine_HandleProxy_RetryOnEmpty_Streaming_ProgressiveFlush(t *testing.T) {
+	s := newTestStore(t)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		flusher, _ := w.(http.Flusher)
+		// Event 1: reasoning-only.
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(100 * time.Millisecond)
+		// Event 2: real content.
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(100 * time.Millisecond)
+		// Event 3: more content.
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1")
+	addOutputModelIDs(t, s, "ds1", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetRetryOnEmpty(true)
+
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+
+	// Use a chunkRecorder to observe when each Write arrives.
+	cw := newChunkRecorder()
+	eng.HandleProxy(cw, req)
+
+	if cw.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", cw.Code)
+	}
+
+	// Body must contain the content (and may or may not contain reasoning
+	// depending on buffering, but content must be present).
+	bodyStr := cw.Body.String()
+	if !strings.Contains(bodyStr, `"content":"hello"`) {
+		t.Errorf("expected body to contain first content event, got %q", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"content":" world"`) {
+		t.Errorf("expected body to contain second content event, got %q", bodyStr)
+	}
+
+	// Progressive-flush assertion: we must have seen MULTIPLE Write calls
+	// with content, spread over time. Specifically, the FIRST content
+	// delivery should arrive before the downstream has finished emitting
+	// all events (which takes ~200ms).
+	times := cw.Times()
+	if len(times) < 2 {
+		t.Fatalf("expected multiple Write calls for progressive streaming, got %d", len(times))
+	}
+
+	// The actual progressive-flush assertion is the timing check below,
+	// which compares the time span across multiple Write calls.
+
+	// Compute time of FIRST write vs LAST write.
+	firstWrite := times[0]
+	lastWrite := times[len(times)-1]
+	span := lastWrite.Sub(firstWrite)
+
+	// With the fix, span must be > 50ms (the downstream's inter-event
+	// delay was 100ms, so even one burst + pass-through gives > 100ms).
+	// Without the fix, span would be < 5ms (everything in one Write).
+	if span < 50*time.Millisecond {
+		t.Errorf("expected streaming to span > 50ms (progressive flush), got %v across %d Writes", span, len(times))
+	}
+	t.Logf("streaming took %v across %d Write calls (first non-zero size: %d bytes)", span, len(times), firstNonZero(cw.Sizes()))
+}
+
+// firstNonZero returns the index of the first non-zero entry, or -1 if none.
+func firstNonZero(sizes []int) int {
+	for i, s := range sizes {
+		if s > 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestEngine_HandleProxy_RetryOnEmpty_Streaming_ReasoningOnlyRetries
+// verifies that when the entire stream is reasoning-only (no real content)
+// and terminates with [DONE], the gateway retries the upstream request
+// and the second attempt's content reaches the client.
+func TestEngine_HandleProxy_RetryOnEmpty_Streaming_ReasoningOnlyRetries(t *testing.T) {
+	s := newTestStore(t)
+
+	var attempts int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		flusher, _ := w.(http.Flusher)
+		if attempts == 1 {
+			// First attempt: reasoning-only stream.
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			// Terminate without content.
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		} else {
+			// Second attempt: real content.
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer ts.Close()
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1")
+	addOutputModelIDs(t, s, "ds1", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetRetryOnEmpty(true)
+
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if attempts < 2 {
+		t.Errorf("expected at least 2 downstream attempts (retry on reasoning-only empty), got %d", attempts)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 after retry, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"content":"recovered"`) {
+		t.Errorf("expected recovered content from retry attempt, got %q", w.Body.String())
+	}
+}
+
+// TestEngine_HandleProxy_RetryOnEmpty_Streaming_PreservesReasoning is the
+// regression test for the user-reported bug: when retry_on_empty=true was
+// enabled, reasoning blocks were being STRIPPED from the streaming
+// response. With the fix, reasoning tokens must be streamed to the
+// client progressively while still triggering retry on reasoning-only
+// (terminal [DONE] held) and fully-empty streams.
+//
+// Test setup: downstream emits a reasoning event followed by a content
+// event. Expected behavior with the fix:
+//   - The reasoning event is streamed to the client (preserved).
+//   - The content event is streamed progressively.
+//   - [DONE] is also streamed (since real content was produced).
+func TestEngine_HandleProxy_RetryOnEmpty_Streaming_PreservesReasoning(t *testing.T) {
+	s := newTestStore(t)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		flusher, _ := w.(http.Flusher)
+		// Reasoning-only event (must be preserved in client output).
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"let me think...\"}}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(50 * time.Millisecond)
+		// Real content event.
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"the answer is 42\"}}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		// [DONE] terminal event.
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1")
+	addOutputModelIDs(t, s, "ds1", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetRetryOnEmpty(true)
+
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	bodyStr := w.Body.String()
+	// Reasoning block MUST be preserved.
+	if !strings.Contains(bodyStr, "reasoning_content") {
+		t.Errorf("expected reasoning block to be preserved, got %q", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "let me think") {
+		t.Errorf("expected reasoning text to be preserved, got %q", bodyStr)
+	}
+	// Content must also be present.
+	if !strings.Contains(bodyStr, `"content":"the answer is 42"`) {
+		t.Errorf("expected content event in body, got %q", bodyStr)
+	}
+	// [DONE] must be present (real content was produced).
+	if !strings.Contains(bodyStr, "[DONE]") {
+		t.Errorf("expected [DONE] terminal marker in body, got %q", bodyStr)
 	}
 }

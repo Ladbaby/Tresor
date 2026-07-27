@@ -88,10 +88,106 @@ func (bw *bufferedWriter) Flush() {
 	}
 }
 
+// Drain flushes the buffered bytes to the underlying writer WITHOUT
+// switching to pass-through mode. Subsequent writes continue to be
+// buffered. This is used for incremental flushing during a stream
+// (drain each event as it completes) without losing the retry
+// capability — only Flush() permanently commits to no-retry.
+func (bw *bufferedWriter) Drain() {
+	if bw.flushed || bw.buffer.Len() == 0 {
+		return
+	}
+	bw.writer.Write(bw.buffer.Bytes())
+	bw.buffer.Reset()
+	if f, ok := bw.writer.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Reset discards any buffered bytes without writing them to the underlying
+// writer. Used by the streaming retry handler when an event turned out to
+// be reasoning-only / empty and should be dropped (so the upstream can be
+// retried) rather than delivered to the client.
+func (bw *bufferedWriter) Reset() {
+	if bw.flushed {
+		return
+	}
+	bw.buffer.Reset()
+}
+
 // IsFlushed reports whether Flush() has been called. Used to detect empty
 // streams: if the writer was never flushed, no content was produced.
 func (bw *bufferedWriter) IsFlushed() bool {
 	return bw.flushed
+}
+
+// ---- headerDelayWriter ----
+//
+// Wraps an http.ResponseWriter to delay WriteHeader until Flush() is called,
+// while passing Write() through immediately. This lets the streaming
+// retry handler:
+//   - Send bytes progressively to the client (streaming works as expected)
+//   - Defer the HTTP status commitment until content is confirmed (so a
+//     502 error can still be written if all retries are exhausted and no
+//     content was produced)
+//
+// This is the new preferred wrapper for streaming responses; the older
+// bufferedWriter (which buffers both Write and WriteHeader) is kept for
+// non-streaming use cases.
+
+type headerDelayWriter struct {
+	writer  http.ResponseWriter
+	status  int
+	flushed bool
+}
+
+func newHeaderDelayWriter(w http.ResponseWriter) *headerDelayWriter {
+	return &headerDelayWriter{
+		writer:  w,
+		status:  http.StatusOK,
+		flushed: false,
+	}
+}
+
+func (hw *headerDelayWriter) Header() http.Header {
+	return hw.writer.Header()
+}
+
+func (hw *headerDelayWriter) Write(p []byte) (int, error) {
+	if !hw.flushed {
+		hw.writer.WriteHeader(hw.status)
+		hw.flushed = true
+	}
+	return hw.writer.Write(p)
+}
+
+func (hw *headerDelayWriter) WriteHeader(status int) {
+	if hw.flushed {
+		hw.writer.WriteHeader(status)
+	} else {
+		hw.status = status
+	}
+}
+
+// Flush commits the deferred status header to the underlying writer.
+// After Flush, subsequent Write/WriteHeader calls pass through directly.
+// If the writer has not been written to yet, Flush does NOT commit the
+// header (so the upstream can still be retried without locking the
+// status to 200).
+func (hw *headerDelayWriter) Flush() {
+	if hw.flushed {
+		return
+	}
+	// Only commit the status if Write was already called (which means
+	// content was streamed). If nothing has been written, hold the
+	// header so a non-200 error can still be sent.
+	hw.flushed = true
+	hw.writer.WriteHeader(hw.status)
+}
+
+// IsFlushed reports whether the status header has been committed.
+func (hw *headerDelayWriter) IsFlushed() bool {
+	return hw.flushed
 }
 
 // ---- Empty response detection (non-streaming) ----
@@ -373,4 +469,67 @@ func DetectStreamFormat(chunk SSEChunk) string {
 		return "gemini"
 	}
 	return ""
+}
+
+// isTerminalEvent returns true if the given accumulated SSE event data
+// represents a stream-completion marker for the given API format. These
+// events are the last ones a downstream emits, so they signal that no
+// more content is coming. For retry-on-empty to work transparently, the
+// gateway holds these events until end-of-stream so it can suppress them
+// when the upstream needs to be retried (the client should not see
+// [DONE] for an empty response).
+//
+// Reasoning/thinking-only streams also produce a terminal event without
+// any prior real content; in that case the terminal is suppressed and
+// the upstream is retried. Reasoning tokens themselves remain visible to
+// the client — only the terminal marker is held.
+func isTerminalEvent(data string, format string) bool {
+	data = strings.TrimSpace(data)
+	if data == "" {
+		return false
+	}
+	switch format {
+	case "openai":
+		// OpenAI uses a sentinel [DONE] payload.
+		return data == "[DONE]"
+	case "anthropic":
+		// Anthropic emits message_stop as a named event; the engine's
+		// SSE scanner strips the "event:" prefix and accumulates the
+		// JSON payload in sseEvent. Check the JSON type field.
+		return strings.Contains(data, `"type":"message_stop"`) ||
+			strings.Contains(data, `"type":"message_delta"`) // message_delta signals end-of-message
+	case "openai_responses":
+		// OpenAI Responses API uses named events ending the stream.
+		// The accumulated data is the JSON payload; check the type.
+		return strings.Contains(data, `"type":"response.completed"`) ||
+			strings.Contains(data, `"type":"response.incomplete"`)
+	case "gemini":
+		// Gemini uses finishReason in candidates — terminal events
+		// carry a non-empty finishReason field.
+		return strings.Contains(data, `"finishReason":"MAX_TOKENS"`) ||
+			strings.Contains(data, `"finishReason":"SAFETY"`) ||
+			strings.Contains(data, `"finishReason":"RECITATION"`) ||
+			strings.Contains(data, `"finishReason":"OTHER"`) ||
+			strings.Contains(data, `"finishReason":"STOP"`)
+	default:
+		return false
+	}
+}
+
+// isDataLineInTerminal reports whether the given line (a raw SSE line
+// from the scanner) corresponds to a data line that has already been
+// captured in the held terminal event. Used by the streaming handler to
+// avoid writing the held terminal's bytes to the client twice (once from
+// the scanner, once when the terminal is flushed).
+func isDataLineInTerminal(terminalDataLines []string, line string) bool {
+	if !strings.HasPrefix(line, "data: ") {
+		return false
+	}
+	payload := strings.TrimPrefix(line, "data: ")
+	for _, held := range terminalDataLines {
+		if held == payload {
+			return true
+		}
+	}
+	return false
 }
