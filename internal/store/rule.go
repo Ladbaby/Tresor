@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"tresor/internal/config"
@@ -272,14 +273,119 @@ func (s *Store) FindMatchingRules(path, model, inputFormat string, dsID string, 
 		  AND (
 		    (pattern_path = ? AND pattern_model = ?)
 		    OR (pattern_path = ? AND (pattern_model = '' OR pattern_model IS NULL))
-		    OR pattern_path = '*'
+		    OR (pattern_path = '*' AND pattern_model = ?)
+		    OR (pattern_path = '*' AND (pattern_model = '' OR pattern_model IS NULL))
 		  )
 		 ORDER BY
 		  CASE
 		    WHEN pattern_path = ? AND pattern_model = ? THEN 0
-		    WHEN pattern_path = ? AND (pattern_model = '' OR pattern_model IS NULL) THEN 1
-		    WHEN pattern_path = '*' THEN 2
-		  END`, path, model, path, path, model, path)
+		    WHEN pattern_path = '*' AND pattern_model = ? THEN 1
+		    WHEN pattern_path = ? AND (pattern_model = '' OR pattern_model IS NULL) THEN 2
+		    WHEN pattern_path = '*' AND (pattern_model = '' OR pattern_model IS NULL) THEN 3
+		    ELSE 4
+		  END`, path, model, path, model, path, model, path, model)
+	if err != nil {
+		return nil, fmt.Errorf("find matching rules: %w", err)
+	}
+	defer rows.Close()
+
+	var matches []Rule
+	for rows.Next() {
+		var id, name, patternPath, patternModel, pipelineConfig string
+		var enabled int64
+		var createdAt time.Time
+		var matchFormat, matchDownstreamFmt, matchDownstreams []byte
+		if err := rows.Scan(&id, &name, &patternPath, &patternModel, &pipelineConfig, &enabled, &createdAt, &matchFormat, &matchDownstreamFmt, &matchDownstreams); err != nil {
+			return nil, err
+		}
+		r := scanRule(id, name, patternPath, patternModel, pipelineConfig, enabled, createdAt, matchFormat, matchDownstreamFmt, matchDownstreams)
+		if r.MatchRule(inputFormat, dsID, dsFormats) {
+			matches = append(matches, *r)
+		}
+	}
+	if matches == nil {
+		return []Rule{}, rows.Err()
+	}
+	return matches, rows.Err()
+}
+
+// FindMatchingRulesWithCandidates is the engine-aware variant of
+// FindMatchingRules. The engine passes every model string that could
+// legitimately be the subject of a rule's pattern_model field:
+//   - the raw incoming model name
+//   - every output_model_id of the resolved downstream
+//   - the active alias's output_model_id
+//   - the regex pattern of an active regex alias (InputModelID)
+//   - every announced name of an active regex alias
+//
+// A rule's pattern_model matches when it equals ANY of these strings
+// (exact, case-sensitive). This is how a rule keyed on a downstream
+// model ID, an alias name, a regex pattern, or an announced name fires
+// without forcing the user to know exactly what the client will send.
+//
+// Rules with an empty pattern_model still match (any-model behavior).
+// Returns matching rules sorted by priority:
+// exact path+candidate > exact path > wildcard.
+func (s *Store) FindMatchingRulesWithCandidates(path string, candidates []string, inputFormat string, dsID string, dsFormats []string) ([]Rule, error) {
+	if len(candidates) == 0 {
+		// No candidates → fall back to wildcard matching only.
+		return s.FindMatchingRules(path, "", inputFormat, dsID, dsFormats)
+	}
+
+	// Build "(?,?,?,...)" placeholders for the IN clause.
+	placeholders := strings.Repeat("?,", len(candidates))
+	placeholders = strings.TrimRight(placeholders, ",")
+
+	// Args layout (matching the placeholders in query):
+	//   1.       path (WHERE branch 1: exact path)
+	//   2..N+1.   candidates (WHERE branch 1: IN clause)
+	//   N+2.    path (WHERE branch 2: exact path, any model)
+	//   N+3..2N+2.  candidates (WHERE branch 3: pattern_path='*', IN clause)
+	//   2N+3.  path (ORDER BY branch 1)
+	//   2N+4..3N+3. candidates (ORDER BY branch 1: IN clause)
+	//   3N+4.  path (ORDER BY branch 2)
+	//   3N+5..4N+4. candidates (ORDER BY branch 3: IN clause)
+	//   4N+5.  path (ORDER BY branch 4)
+	args := make([]any, 0, 4+4*len(candidates))
+	args = append(args, path)
+	for _, c := range candidates {
+		args = append(args, c)
+	}
+	args = append(args, path)
+	for _, c := range candidates {
+		args = append(args, c)
+	}
+	args = append(args, path)
+	for _, c := range candidates {
+		args = append(args, c)
+	}
+	args = append(args, path)
+	for _, c := range candidates {
+		args = append(args, c)
+	}
+	args = append(args, path)
+
+	query := `SELECT id, name, pattern_path, COALESCE(pattern_model,''),
+		pipeline_config, is_enabled, created_at,
+		COALESCE(match_format,'[]'), COALESCE(match_downstream_format,'[]'),
+		COALESCE(match_downstreams,'[]')
+	 FROM rules WHERE is_enabled = 1
+	  AND (
+	    (pattern_path = ? AND pattern_model IN (` + placeholders + `))
+	    OR (pattern_path = ? AND (pattern_model = '' OR pattern_model IS NULL))
+	    OR (pattern_path = '*' AND pattern_model IN (` + placeholders + `))
+	    OR (pattern_path = '*' AND (pattern_model = '' OR pattern_model IS NULL))
+	  )
+	  ORDER BY
+	   CASE
+	    WHEN pattern_path = ? AND pattern_model IN (` + placeholders + `) THEN 0
+	    WHEN pattern_path = '*' AND pattern_model IN (` + placeholders + `) THEN 1
+	    WHEN pattern_path = ? AND (pattern_model = '' OR pattern_model IS NULL) THEN 2
+	    WHEN pattern_path = '*' AND (pattern_model = '' OR pattern_model IS NULL) THEN 3
+	    ELSE 4
+	   END`
+
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("find matching rules: %w", err)
 	}

@@ -429,9 +429,41 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 // buildPipeline constructs the transformation pipeline from matching rules and
 // adds auto-translation transformers when input format differs from downstream format.
 // Returns the pipeline and the list of matching rules (for logging).
-func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store.Downstream) (Pipeline, []store.Rule, *gatewayError) {
+func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store.Downstream, alias *store.Alias) (Pipeline, []store.Rule, *gatewayError) {
+	// Build the candidate model list for pattern_model matching.
+	// A rule's pattern_model matches if it equals ANY of these strings
+	// (exact match). This makes rules useful whether the user keys them
+	// on the raw incoming model, a downstream output_model_id, the alias
+	// input_model_id, the regex pattern of a regex alias, or one of the
+	// announced names of a regex alias.
+	candidateModels := []string{model}
+	if ds != nil {
+		candidateModels = append(candidateModels, ds.OutputModelIDs...)
+	}
+	if alias != nil {
+		candidateModels = append(candidateModels, alias.OutputModelID)
+		if alias.IsRegex {
+			candidateModels = append(candidateModels, alias.InputModelID) // the regex pattern itself
+			candidateModels = append(candidateModels, alias.AnnouncedNames...)
+		}
+	}
+	// De-duplicate and drop empty strings.
+	seen := make(map[string]struct{}, len(candidateModels))
+	uniq := candidateModels[:0]
+	for _, m := range candidateModels {
+		if m == "" {
+			continue
+		}
+		if _, ok := seen[m]; ok {
+			continue
+		}
+		seen[m] = struct{}{}
+		uniq = append(uniq, m)
+	}
+	candidateModels = uniq
+
 	// Find all matching rules (path+model+format filters)
-	rules, err := e.store.FindMatchingRules(path, model, inputFormat, ds.ID, ds.ApiFormats)
+	rules, err := e.store.FindMatchingRulesWithCandidates(path, candidateModels, inputFormat, ds.ID, ds.ApiFormats)
 	if err != nil {
 		return Pipeline{}, nil, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error finding rules: %v", err), "internal error", "rule lookup error", err}
 	}
@@ -588,7 +620,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Build transformation pipeline (rule matching + auto-translation)
 	inputFormat := detectInputFormat(r.URL.Path)
-	pipeline, rules, ge := e.buildPipeline(r.URL.Path, result.model, inputFormat, result.ds)
+	pipeline, rules, ge := e.buildPipeline(r.URL.Path, result.model, inputFormat, result.ds, result.alias)
 	if ge != nil {
 		e.logAndReturnError(cw, &entry, start, ge)
 		return
@@ -677,7 +709,16 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				bw = newBufferedWriter(cw)
 				targetWriter = bw
 			}
-			isEmpty := e.handleStreamingResponse(targetWriter, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, inputFormat)
+			// Seed the streaming handler with the downstream's format (fall back to
+			// inputFormat when the downstream has no api_formats declared).
+			// The handler confirms this from the first SSE chunk — the seed
+			// is only a hint, since auto-translation may have converted to
+			// a different format.
+			streamFormatSeed := downstreamFormat
+			if streamFormatSeed == "" {
+				streamFormatSeed = inputFormat
+			}
+			isEmpty := e.handleStreamingResponse(targetWriter, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, streamFormatSeed)
 
 			if isEmpty && resp.StatusCode == http.StatusOK {
 				// Empty stream with HTTP 200 — retry if attempts remain
@@ -778,7 +819,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 // When the engine's payload store is attached, rawReq/reqCT/respCT and
 // the raw downstream SSE bytes are recorded on completion so the
 // inspector can show the wire bytes — pre-transformer.
-func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context, rawReq []byte, reqCT, respCT string, entry *RequestLogEntry, bufferForRetry bool, inputFormat string) bool {
+func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context, rawReq []byte, reqCT, respCT string, entry *RequestLogEntry, bufferForRetry bool, seedFormat string) bool {
 	defer resp.Body.Close()
 	defer cancel()
 
@@ -787,6 +828,16 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	if bufferForRetry {
 		buffered = true
 	}
+
+	// streamFormat is the format used for IsStreamContentLine. It starts
+	// as seedFormat (downstream's declared format, falling back to
+	// inputFormat) and is then confirmed or overridden by on-the-fly
+	// detection from the first SSE chunk we actually read. On-the-fly
+	// detection is required because auto-translation may convert the
+	// request format to the downstream's format, so seedFormat is only
+	// a hint — the actual response format is what matters for content
+	// detection (otherwise we'd retry every non-empty response as empty).
+	var streamFormat string = seedFormat
 
 	var respBuf bytes.Buffer
 	var truncated bool
@@ -959,9 +1010,20 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			trimmed := strings.TrimRight(line, "\r")
 			teeLine(trimmed)
 
-			// Content detection for retry: check data: lines
+			// Content detection for retry: check data: lines.
+			// Confirm streamFormat from the first chunk we see — the
+			// downstream may speak a different format than the input.
 			if !contentProduced && bufferForRetry && strings.HasPrefix(trimmed, "data: ") {
-				if IsStreamContentLine(trimmed, inputFormat) {
+				if streamFormat == "" {
+					streamFormat = DetectStreamFormat(SSEChunk{
+						EventType: sseEvent,
+						Data:      []byte(strings.TrimPrefix(trimmed, "data: ")),
+					})
+					if streamFormat == "" {
+						streamFormat = seedFormat
+					}
+				}
+				if IsStreamContentLine(trimmed, streamFormat) {
 					contentProduced = true
 					flushBuffer()
 				}
@@ -1015,9 +1077,18 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		rawData := strings.Join(dataLines, "\n")
 		chunk := SSEChunk{EventType: eventLine, Data: []byte(rawData)}
 
-		// Content detection for retry: check raw event data for content
+		// Content detection for retry: check raw event data for content.
+		// Detect the actual stream format from the chunk if we haven't
+		// already — the seed value is just a hint, the actual format
+		// may differ when auto-translation is in effect.
 		if !contentProduced && bufferForRetry {
-			if IsStreamContentLine("data: "+rawData, inputFormat) {
+			if streamFormat == "" {
+				streamFormat = DetectStreamFormat(chunk)
+				if streamFormat == "" {
+					streamFormat = seedFormat
+				}
+			}
+			if IsStreamContentLine("data: "+rawData, streamFormat) {
 				contentProduced = true
 				flushBuffer()
 			}

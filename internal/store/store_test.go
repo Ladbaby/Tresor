@@ -300,6 +300,70 @@ func TestStore_FindMatchingRules_NoMatch(t *testing.T) {
 	}
 }
 
+// TestStore_FindMatchingRules_WildcardPathRespectsModel is the
+// regression test for FindMatchingRules (single-model variant): a rule
+// with pattern_path='*' must NOT override a non-empty pattern_model.
+// Only wildcard path with empty pattern_model should match any model.
+func TestStore_FindMatchingRules_WildcardPathRespectsModel(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{Name: "Test", BaseURL: "https://test.com", ApiFormats: []string{"openai"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	r := &Rule{
+		Name:             "wildcard-with-model",
+		PatternPath:      "*",
+		PatternModel:     "claude-sonnet",
+		MatchFormat:      []string{"anthropic"},
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(r); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+
+	// Model doesn't match — must not match even though path is wildcard.
+	matches, err := s.FindMatchingRules("/v1/messages", "qwen3.5:9b-mtp", "anthropic", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("expected 0 matches for qwen3.5 with wildcard path + claude-sonnet pattern_model, got %d", len(matches))
+	}
+
+	// Model matches — wildcard path rule fires.
+	matches, err = s.FindMatchingRules("/v1/messages", "claude-sonnet", "anthropic", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Name != "wildcard-with-model" {
+		t.Errorf("expected wildcard-with-model to match, got %+v", matches)
+	}
+
+	// Wildcard path + empty pattern_model rule still matches any model.
+	anyRule := &Rule{
+		Name:             "any-model-any-path",
+		PatternPath:      "*",
+		MatchFormat:      []string{"anthropic"},
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(anyRule); err != nil {
+		t.Fatalf("create any rule: %v", err)
+	}
+	matches, err = s.FindMatchingRules("/v1/messages", "qwen3.5:9b-mtp", "anthropic", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Name != "any-model-any-path" {
+		t.Errorf("expected any-model-any-path to match, got %+v", matches)
+	}
+}
+
 func TestStore_FindMatchingRules_ModelPriority(t *testing.T) {
 	s := newTestStore(t)
 
@@ -716,5 +780,315 @@ func TestSessions_PersistAcrossInstances(t *testing.T) {
 	}
 	if len(tokens) != 2 {
 		t.Fatalf("expected 2 tokens to survive restart, got %d: %v", len(tokens), tokens)
+	}
+}
+
+// ---- FindMatchingRulesWithCandidates ----
+//
+// pattern_model is exact-string matched against ANY candidate passed in.
+// Candidates come from the engine: the raw incoming model name, the
+// resolved downstream's output_model_ids, the active alias's
+// output_model_id, the regex pattern of an active regex alias, and the
+// announced names of an active regex alias.
+
+func TestStore_FindMatchingRulesWithCandidates_MatchesDownstreamOutputModel(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{Name: "Test", BaseURL: "https://test.com", ApiFormats: []string{"openai"}, OutputModelIDs: []string{"claude-3-5-sonnet-20241022"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	r := &Rule{
+		Name:             "downstream-output-match",
+		PatternPath:      "/v1/chat/completions",
+		PatternModel:     "claude-3-5-sonnet-20241022",
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(r); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+
+	// Client sent "claude-3-5-sonnet" (an alias input_model_id) which
+	// resolves to downstream output_model_id "claude-3-5-sonnet-20241022".
+	// The engine passes both as candidates.
+	candidates := []string{"claude-3-5-sonnet", "claude-3-5-sonnet-20241022"}
+	matches, err := s.FindMatchingRulesWithCandidates("/v1/chat/completions", candidates, "openai", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+	if matches[0].Name != "downstream-output-match" {
+		t.Errorf("got %q", matches[0].Name)
+	}
+}
+
+func TestStore_FindMatchingRulesWithCandidates_MatchesAliasOutputModel(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{Name: "Test", BaseURL: "https://test.com", ApiFormats: []string{"openai"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	// Rule keyed on the alias output_model_id.
+	r := &Rule{
+		Name:             "alias-output-match",
+		PatternPath:      "/v1/chat/completions",
+		PatternModel:     "my-alias-output",
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(r); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+
+	candidates := []string{"my-alias-input", "my-alias-output"}
+	matches, err := s.FindMatchingRulesWithCandidates("/v1/chat/completions", candidates, "openai", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Name != "alias-output-match" {
+		t.Errorf("expected alias-output-match, got %+v", matches)
+	}
+}
+
+func TestStore_FindMatchingRulesWithCandidates_MatchesRegexPattern(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{Name: "Test", BaseURL: "https://test.com", ApiFormats: []string{"openai"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	// Rule keyed on the regex pattern of an active regex alias.
+	r := &Rule{
+		Name:             "regex-pattern-match",
+		PatternPath:      "/v1/chat/completions",
+		PatternModel:     "gpt-.*",
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(r); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+
+	// Engine passes the raw model + the regex pattern as a candidate
+	// (since the alias is regex). pattern_model is exact-string against
+	// the pattern itself.
+	candidates := []string{"gpt-4o", "gpt-.*"}
+	matches, err := s.FindMatchingRulesWithCandidates("/v1/chat/completions", candidates, "openai", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Name != "regex-pattern-match" {
+		t.Errorf("expected regex-pattern-match, got %+v", matches)
+	}
+
+	// Without the regex pattern as a candidate, the rule should NOT match.
+	matches, err = s.FindMatchingRulesWithCandidates("/v1/chat/completions", []string{"gpt-4o"}, "openai", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("expected no match without regex pattern in candidates, got %d", len(matches))
+	}
+}
+
+func TestStore_FindMatchingRulesWithCandidates_MatchesAnnouncedName(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{Name: "Test", BaseURL: "https://test.com", ApiFormats: []string{"openai"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	r := &Rule{
+		Name:             "announced-name-match",
+		PatternPath:      "/v1/chat/completions",
+		PatternModel:     "claude-haiku-4-5",
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(r); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+
+	candidates := []string{"claude-haiku-4-5"} // announced name
+	matches, err := s.FindMatchingRulesWithCandidates("/v1/chat/completions", candidates, "openai", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Name != "announced-name-match" {
+		t.Errorf("expected announced-name-match, got %+v", matches)
+	}
+}
+
+func TestStore_FindMatchingRulesWithCandidates_EmptyCandidates(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{Name: "Test", BaseURL: "https://test.com", ApiFormats: []string{"openai"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	// No candidates → only rules with empty pattern_model (wildcard-ish)
+	// should be considered.
+	r := &Rule{
+		Name:             "any-model",
+		PatternPath:      "/v1/chat/completions",
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(r); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+
+	matches, err := s.FindMatchingRulesWithCandidates("/v1/chat/completions", nil, "openai", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("expected 1 match (any-model), got %d", len(matches))
+	}
+}
+
+func TestStore_FindMatchingRulesWithCandidates_DedupCandidates(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{Name: "Test", BaseURL: "https://test.com", ApiFormats: []string{"openai"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	r := &Rule{
+		Name:             "dedup-match",
+		PatternPath:      "/v1/chat/completions",
+		PatternModel:     "gpt-4o",
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(r); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+
+	// Duplicate candidates must not break the IN clause.
+	candidates := []string{"gpt-4o", "gpt-4o", "gpt-4o"}
+	matches, err := s.FindMatchingRulesWithCandidates("/v1/chat/completions", candidates, "openai", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("expected 1 match with duplicates, got %d", len(matches))
+	}
+}
+
+func TestStore_FindMatchingRulesWithCandidates_MultipleMatches(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{Name: "Test", BaseURL: "https://test.com", ApiFormats: []string{"openai"}, OutputModelIDs: []string{"claude-3-5-sonnet-20241022"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	// Two rules, both will fire — one keyed on the downstream output,
+	// one on a candidate input name.
+	rules := []*Rule{
+		{Name: "r-output", PatternPath: "/v1/chat/completions", PatternModel: "claude-3-5-sonnet-20241022", MatchDownstreams: []string{ds.ID}, PipelineConfig: "[]", IsEnabled: true},
+		{Name: "r-input", PatternPath: "/v1/chat/completions", PatternModel: "claude-3-5-sonnet", MatchDownstreams: []string{ds.ID}, PipelineConfig: "[]", IsEnabled: true},
+	}
+	for _, r := range rules {
+		if err := s.CreateRule(r); err != nil {
+			t.Fatalf("create rule %s: %v", r.Name, err)
+		}
+	}
+
+	candidates := []string{"claude-3-5-sonnet", "claude-3-5-sonnet-20241022"}
+	matches, err := s.FindMatchingRulesWithCandidates("/v1/chat/completions", candidates, "openai", ds.ID, []string{"openai"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 2 {
+		t.Errorf("expected 2 matches, got %d", len(matches))
+	}
+}
+
+// TestStore_FindMatchingRulesWithCandidates_WildcardPathRespectsModel is
+// the regression test for the original Bug 3 follow-up: a rule with
+// pattern_path='*' and a non-empty pattern_model must only fire when
+// the candidate model list contains that pattern_model. A wildcard
+// path does NOT mean "ignore pattern_model".
+func TestStore_FindMatchingRulesWithCandidates_WildcardPathRespectsModel(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{Name: "Test", BaseURL: "https://test.com", ApiFormats: []string{"openai"}, OutputModelIDs: []string{"claude-3-5-sonnet-20241022", "qwen3.5:9b-mtp"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	r := &Rule{
+		Name:             "wildcard-with-model",
+		PatternPath:      "*",
+		PatternModel:     "claude-sonnet",
+		MatchFormat:      []string{"anthropic"},
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(r); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+
+	// Request model is qwen3.5:9b-mtp — the rule must NOT match even
+	// though pattern_path is '*', because pattern_model=claude-sonnet
+	// doesn't appear in the candidate list.
+	candidates := []string{"qwen3.5:9b-mtp", "qwen3.5:9b-mtp:instruct"}
+	matches, err := s.FindMatchingRulesWithCandidates("/v1/messages", candidates, "anthropic", ds.ID, []string{"openai", "anthropic"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("expected 0 matches for qwen3.5 with wildcard path + claude-sonnet pattern_model, got %d: %+v", len(matches), matches)
+	}
+
+	// Request model is claude-sonnet (announced-name scenario) — the
+	// rule MUST match via the wildcard-path-with-model branch.
+	candidates = []string{"claude-sonnet", "claude-sonnet.*"}
+	matches, err = s.FindMatchingRulesWithCandidates("/v1/messages", candidates, "anthropic", ds.ID, []string{"openai", "anthropic"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Name != "wildcard-with-model" {
+		t.Errorf("expected wildcard-with-model to match for claude-sonnet, got %+v", matches)
+	}
+
+	// Request model is something else but pattern_path='*' AND empty
+	// pattern_model rule — must still match the any-model wildcard.
+	anyModelRule := &Rule{
+		Name:             "any-model-any-path",
+		PatternPath:      "*",
+		MatchFormat:      []string{"anthropic"},
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
+	}
+	if err := s.CreateRule(anyModelRule); err != nil {
+		t.Fatalf("create any-model rule: %v", err)
+	}
+	matches, err = s.FindMatchingRulesWithCandidates("/v1/messages", []string{"qwen3.5:9b-mtp"}, "anthropic", ds.ID, []string{"openai", "anthropic"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Name != "any-model-any-path" {
+		t.Errorf("expected any-model-any-path to match, got %+v", matches)
 	}
 }
