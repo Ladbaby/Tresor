@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -18,6 +19,8 @@ import (
 // Alias represents a single input-model -> output-model mapping entry.
 // Multiple aliases sharing the same InputModelID form a group.
 // If IsRegex is true, InputModelID is treated as a regular expression.
+// AnnouncedNames are concrete model IDs surfaced by regex groups in /v1/models
+// listings; the column is group-level (same value across siblings).
 type Alias struct {
 	ID              string    `json:"id"`
 	InputModelID    string    `json:"input_model_id"`
@@ -29,20 +32,24 @@ type Alias struct {
 	IsRegex         bool      `json:"is_regex"`
 	GroupOrder      int       `json:"group_order"`
 	CreatedAt       time.Time `json:"created_at"`
+	AnnouncedNames  []string  `json:"announced_names,omitempty"`
 }
 
 // AliasGroup represents one alias group: an input model and its available options.
+// AnnouncedNames is the group-level set of concrete model IDs surfaced by regex
+// groups in /v1/models listings.
 type AliasGroup struct {
-	InputModelID string  `json:"input_model_id"`
-	IsRegex      bool    `json:"is_regex"`
-	ActiveID     *string `json:"active_id,omitempty"`
-	Options      []Alias `json:"options"`
+	InputModelID   string   `json:"input_model_id"`
+	IsRegex        bool     `json:"is_regex"`
+	ActiveID       *string  `json:"active_id,omitempty"`
+	Options        []Alias  `json:"options"`
+	AnnouncedNames []string `json:"announced_names,omitempty"`
 }
 
 // ListAliases returns all aliases ordered by group_order, then rowid.
 func (s *Store) ListAliases() ([]Alias, error) {
 	rows, err := s.db.Query(
-		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at
+		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at, announced_names
 		 FROM aliases ORDER BY group_order, rowid`)
 	if err != nil {
 		return nil, fmt.Errorf("list aliases: %w", err)
@@ -53,12 +60,14 @@ func (s *Store) ListAliases() ([]Alias, error) {
 	for rows.Next() {
 		var a Alias
 		var active, isRegex, groupOrder int
-		if err := rows.Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt); err != nil {
+		var announcedJSON string
+		if err := rows.Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt, &announcedJSON); err != nil {
 			return nil, err
 		}
 		a.IsActive = active == 1
 		a.IsRegex = isRegex == 1
 		a.GroupOrder = groupOrder
+		a.AnnouncedNames = decodeAnnouncedNames(announcedJSON)
 		aliases = append(aliases, a)
 	}
 	return aliases, rows.Err()
@@ -68,16 +77,18 @@ func (s *Store) ListAliases() ([]Alias, error) {
 func (s *Store) GetAlias(id string) (*Alias, error) {
 	var a Alias
 	var active, isRegex, groupOrder int
+	var announcedJSON string
 	err := s.db.QueryRow(
-		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at
+		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at, announced_names
 		 FROM aliases WHERE id = ?`, id).
-		Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt)
+		Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt, &announcedJSON)
 	if err != nil {
 		return nil, fmt.Errorf("get alias %s: %w", id, err)
 	}
 	a.IsActive = active == 1
 	a.IsRegex = isRegex == 1
 	a.GroupOrder = groupOrder
+	a.AnnouncedNames = decodeAnnouncedNames(announcedJSON)
 	return &a, nil
 }
 
@@ -85,6 +96,9 @@ func (s *Store) GetAlias(id string) (*Alias, error) {
 // If IsActive is true, all other aliases with the same InputModelID are
 // deactivated within a transaction.
 // If the group doesn't exist yet, group_order is auto-assigned (max + 1).
+// AnnouncedNames are group-level; they are validated against existing
+// downstream models and other alias groups when IsRegex is true, then
+// stored identically on every sibling row of the group.
 func (s *Store) CreateAlias(a *Alias) error {
 	if a.ID == "" {
 		a.ID = uuid.New().String()[:8]
@@ -104,6 +118,16 @@ func (s *Store) CreateAlias(a *Alias) error {
 		if !strings.HasPrefix(a.InputModelID, "^") && !strings.HasSuffix(a.InputModelID, "$") {
 			log.Printf("warning: regex alias %q has unanchored pattern %q — consider adding ^ and $ for precise matching", a.ID, a.InputModelID)
 		}
+		// Validate announced names against existing downstream models and
+		// other alias groups. Exclude this group's input_model_id from the
+		// protected-name set so the group's own row never self-conflicts.
+		if err := s.validateAnnouncedNames(a.InputModelID, a.AnnouncedNames, a.InputModelID); err != nil {
+			return err
+		}
+	} else if len(a.AnnouncedNames) > 0 {
+		// Non-regex groups don't carry announced names — reject so callers
+		// don't think they have an effect.
+		return fmt.Errorf("announced_names may only be set on regex alias groups (is_regex: true)")
 	}
 
 	active := 0
@@ -154,11 +178,41 @@ func (s *Store) CreateAlias(a *Alias) error {
 		}
 	}
 
+	announcedJSON := encodeAnnouncedNames(a.AnnouncedNames)
+
 	if _, err := tx.Exec(
-		`INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		a.ID, a.InputModelID, a.DownstreamID, a.OutputModelID, active, isRegex, groupOrder); err != nil {
+		`INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, announced_names)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.InputModelID, a.DownstreamID, a.OutputModelID, active, isRegex, groupOrder, announcedJSON); err != nil {
 		return fmt.Errorf("create alias: %w", err)
+	}
+
+	// Sync announced_names across siblings so the group is consistent. There
+	// are two cases:
+	//   (a) Caller explicitly supplied announced_names: write that value to
+	//       every sibling.
+	//   (b) Caller did NOT supply announced_names (e.g. adding a new sibling
+	//       to an existing group): copy the group's current value to the new
+	//       row so siblings stay aligned.
+	if isRegex == 1 {
+		finalJSON := announcedJSON
+		if len(a.AnnouncedNames) == 0 {
+			var existing string
+			if err := tx.QueryRow(
+				`SELECT announced_names FROM aliases WHERE input_model_id = ? AND id != ? LIMIT 1`,
+				a.InputModelID, a.ID).Scan(&existing); err == nil {
+				finalJSON = existing
+			}
+			if _, err := tx.Exec(
+				`UPDATE aliases SET announced_names = ? WHERE id = ?`,
+				finalJSON, a.ID); err != nil {
+				return fmt.Errorf("inherit announced_names: %w", err)
+			}
+		}
+		if _, err := tx.Exec("UPDATE aliases SET announced_names = ? WHERE input_model_id = ?",
+			finalJSON, a.InputModelID); err != nil {
+			return fmt.Errorf("sync announced_names to siblings: %w", err)
+		}
 	}
 
 	s.invalidateRegexCache()
@@ -167,6 +221,8 @@ func (s *Store) CreateAlias(a *Alias) error {
 
 // UpdateAlias updates mutable fields of an existing alias.
 // If setting IsActive to true, it deactivates all sibling aliases.
+// If IsRegex is true, the new AnnouncedNames are validated and propagated to
+// all siblings in the group (the column is group-level).
 func (s *Store) UpdateAlias(a *Alias) error {
 	active := 0
 	if a.IsActive {
@@ -186,6 +242,13 @@ func (s *Store) UpdateAlias(a *Alias) error {
 		if !strings.HasPrefix(a.InputModelID, "^") && !strings.HasSuffix(a.InputModelID, "$") {
 			log.Printf("warning: regex alias %q has unanchored pattern %q — consider adding ^ and $ for precise matching", a.ID, a.InputModelID)
 		}
+		// Validate announced names against existing downstream models and
+		// other alias groups.
+		if err := s.validateAnnouncedNames(a.InputModelID, a.AnnouncedNames, a.InputModelID); err != nil {
+			return err
+		}
+	} else if len(a.AnnouncedNames) > 0 {
+		return fmt.Errorf("announced_names may only be set on regex alias groups (is_regex: true)")
 	}
 
 	tx, err := s.db.Begin()
@@ -202,10 +265,12 @@ func (s *Store) UpdateAlias(a *Alias) error {
 		}
 	}
 
+	announcedJSON := encodeAnnouncedNames(a.AnnouncedNames)
+
 	res, err := tx.Exec(
-		`UPDATE aliases SET downstream_id = ?, output_model_id = ?, is_active = ?, is_regex = ?, group_order = ?
+		`UPDATE aliases SET downstream_id = ?, output_model_id = ?, is_active = ?, is_regex = ?, group_order = ?, announced_names = ?
 		 WHERE id = ?`,
-		a.DownstreamID, a.OutputModelID, active, isRegex, a.GroupOrder, a.ID)
+		a.DownstreamID, a.OutputModelID, active, isRegex, a.GroupOrder, announcedJSON, a.ID)
 	if err != nil {
 		return fmt.Errorf("update alias: %w", err)
 	}
@@ -214,9 +279,11 @@ func (s *Store) UpdateAlias(a *Alias) error {
 		return fmt.Errorf("alias %s not found", a.ID)
 	}
 
-	// Sync is_regex to all siblings in the group (group-level property)
-	if _, err := tx.Exec("UPDATE aliases SET is_regex = ? WHERE input_model_id = ?", isRegex, a.InputModelID); err != nil {
-		return fmt.Errorf("sync is_regex to siblings: %w", err)
+	// Sync is_regex + announced_names to all siblings in the group
+	// (both are group-level properties).
+	if _, err := tx.Exec("UPDATE aliases SET is_regex = ?, announced_names = ? WHERE input_model_id = ?",
+		isRegex, announcedJSON, a.InputModelID); err != nil {
+		return fmt.Errorf("sync is_regex/announced_names to siblings: %w", err)
 	}
 
 	s.invalidateRegexCache()
@@ -345,12 +412,15 @@ func (s *Store) DeleteGroup(inputModelID string) (int, error) {
 }
 
 // FindActiveAlias returns the active alias for a given input model ID.
-// First tries exact match on input_model_id. If no exact match, tries
-// regex match against active aliases where is_regex = 1.
+// Resolution priority:
+//   1. Exact match against any regex group's announced_names (a regex group
+//      announces concrete model IDs that route to its currently active option).
+//   2. Exact match on input_model_id with is_active = 1.
+//   3. Regex match against active regex aliases.
 // Returns nil if no active alias exists for that input model.
 func (s *Store) FindActiveAlias(inputModelID string) (*Alias, error) {
-	// Try exact match first
-	a, err := findActiveAliasExact(s.db, inputModelID)
+	// Step 1: Try announced-name exact match (highest priority)
+	a, err := s.FindActiveAliasByAnnouncedName(inputModelID)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +428,16 @@ func (s *Store) FindActiveAlias(inputModelID string) (*Alias, error) {
 		return a, nil
 	}
 
-	// Try regex match (uses cached active regex aliases)
+	// Step 2: Try exact match on input_model_id
+	a, err = findActiveAliasExact(s.db, inputModelID)
+	if err != nil {
+		return nil, err
+	}
+	if a != nil {
+		return a, nil
+	}
+
+	// Step 3: Try regex match (uses cached active regex aliases)
 	return s.findActiveAliasRegexCached(inputModelID)
 }
 
@@ -407,6 +486,12 @@ func (s *Store) ListGroups() ([]AliasGroup, error) {
 		if a.IsActive {
 			g.ActiveID = &a.ID
 		}
+		// The announced_names column is group-level: every sibling stores the
+		// same value, so the first row we see is canonical. All sibling rows
+		// are kept identical by CreateAlias/UpdateAlias/upsertAliases.
+		if g.AnnouncedNames == nil {
+			g.AnnouncedNames = a.AnnouncedNames
+		}
 	}
 
 	var groups []AliasGroup
@@ -452,7 +537,15 @@ func (s *Store) upsertAliases(groups []config.AliasGroupCfg) error {
 			if !strings.HasPrefix(g.InputModelID, "^") && !strings.HasSuffix(g.InputModelID, "$") {
 				log.Printf("warning: alias group %q has unanchored regex pattern %q — consider adding ^ and $ for precise matching", g.InputModelID, g.InputModelID)
 			}
+			// Validate announced names against existing models and other alias groups.
+			if err := s.validateAnnouncedNames(g.InputModelID, g.AnnouncedNames, g.InputModelID); err != nil {
+				return err
+			}
+		} else if len(g.AnnouncedNames) > 0 {
+			return fmt.Errorf("announced_names may only be set on regex alias group %q", g.InputModelID)
 		}
+
+		announcedJSON := encodeAnnouncedNames(g.AnnouncedNames)
 
 		// YAML array position determines group_order (1-based)
 		groupOrder := i + 1
@@ -494,8 +587,8 @@ func (s *Store) upsertAliases(groups []config.AliasGroupCfg) error {
 					isRegex = 1
 				}
 				if _, err := tx.Exec(
-					`UPDATE aliases SET downstream_id = ?, output_model_id = ?, is_regex = ?, group_order = ? WHERE id = ?`,
-					o.DownstreamID, o.OutputModelID, isRegex, groupOrder, o.ID); err != nil {
+					`UPDATE aliases SET downstream_id = ?, output_model_id = ?, is_regex = ?, group_order = ?, announced_names = ? WHERE id = ?`,
+					o.DownstreamID, o.OutputModelID, isRegex, groupOrder, announcedJSON, o.ID); err != nil {
 					return fmt.Errorf("update alias %s: %w", o.ID, err)
 				}
 			} else {
@@ -504,9 +597,9 @@ func (s *Store) upsertAliases(groups []config.AliasGroupCfg) error {
 					isRegex = 1
 				}
 				if _, err := tx.Exec(
-					`INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order)
-					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-					o.ID, g.InputModelID, o.DownstreamID, o.OutputModelID, 0, isRegex, groupOrder); err != nil {
+					`INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, announced_names)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					o.ID, g.InputModelID, o.DownstreamID, o.OutputModelID, 0, isRegex, groupOrder, announcedJSON); err != nil {
 					return fmt.Errorf("insert alias %s: %w", o.ID, err)
 				}
 			}
@@ -617,4 +710,142 @@ func compileRegex(pattern string) (*regexp.Regexp, error) {
 	regexCache.m[pattern] = re
 	regexCache.ord = append(regexCache.ord, pattern)
 	return re, nil
+}
+
+// encodeAnnouncedNames marshals a list of announced names into a JSON array
+// string suitable for SQLite storage. Nil/empty input produces "[]".
+func encodeAnnouncedNames(names []string) string {
+	if names == nil {
+		names = []string{}
+	}
+	b, err := json.Marshal(names)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// decodeAnnouncedNames unmarshals a stored JSON array string back into a
+// []string, returning an empty slice on missing/empty/invalid input.
+func decodeAnnouncedNames(s string) []string {
+	if s == "" || s == "[]" {
+		return []string{}
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return []string{}
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+// validateAnnouncedNames enforces the announced-name invariants:
+//   1. Every name must match the group's regex pattern.
+//   2. No name may duplicate another within the same set.
+//   3. No name may collide with: a downstream output_model_id, a non-regex
+//      alias input_model_id, another regex group's input_model_id, or any
+//      announced name belonging to a different regex group.
+//
+// The optional excludingInputModelID lets callers skip a group's own row
+// when checking against the existing announced-name set (so re-saving a
+// group with its current value doesn't false-positive).
+func (s *Store) validateAnnouncedNames(pattern string, names []string, excludingInputModelID string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	re, err := compileRegex(pattern)
+	if err != nil {
+		// Pattern validity is checked elsewhere; here we just trust it.
+		return fmt.Errorf("invalid regex pattern %q: %w", pattern, err)
+	}
+
+	// 1. Each name must match the regex pattern.
+	// 2. No duplicates within the set.
+	seen := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if n == "" {
+			return fmt.Errorf("announced name must not be empty")
+		}
+		if !re.MatchString(n) {
+			return fmt.Errorf("announced name %q does not match regex pattern %q", n, pattern)
+		}
+		if _, dup := seen[n]; dup {
+			return fmt.Errorf("announced name %q appears more than once in the list", n)
+		}
+		seen[n] = struct{}{}
+	}
+
+	// 3. Build the protected-name set: downstream output_model_ids, all alias
+	//    input_model_ids, and announced names from other regex groups.
+	protected := make(map[string]string)
+
+	downstreams, err := s.ListDownstreams()
+	if err != nil {
+		return fmt.Errorf("load downstreams for announced-name validation: %w", err)
+	}
+	for _, ds := range downstreams {
+		for _, m := range ds.OutputModelIDs {
+			protected[m] = fmt.Sprintf("downstream %q output_model_id", ds.ID)
+		}
+	}
+
+	aliases, err := s.ListAliases()
+	if err != nil {
+		return fmt.Errorf("load aliases for announced-name validation: %w", err)
+	}
+	for _, a := range aliases {
+		if a.InputModelID == excludingInputModelID {
+			continue
+		}
+		if !a.IsRegex {
+			protected[a.InputModelID] = fmt.Sprintf("non-regex alias %q", a.ID)
+		} else {
+			protected[a.InputModelID] = fmt.Sprintf("regex alias group %q", a.InputModelID)
+		}
+		for _, n := range a.AnnouncedNames {
+			protected[n] = fmt.Sprintf("announced name of regex group %q", a.InputModelID)
+		}
+	}
+
+	for _, n := range names {
+		if reason, ok := protected[n]; ok {
+			return fmt.Errorf("announced name %q conflicts with existing %s", n, reason)
+		}
+	}
+	return nil
+}
+
+// FindActiveAliasByAnnouncedName returns the active option of the regex group
+// that announced the given concrete model ID. Returns nil if no match.
+// This is the highest-priority lookup in FindActiveAlias: a client requesting
+// an announced name gets routed to the currently active option of the group
+// that announced it (so hot-switching still works).
+func (s *Store) FindActiveAliasByAnnouncedName(name string) (*Alias, error) {
+	if name == "" {
+		return nil, nil
+	}
+	var a Alias
+	var active, isRegex, groupOrder int
+	var announcedJSON string
+	// Use json_each to test membership in the JSON array.
+	err := s.db.QueryRow(
+		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at, announced_names
+		 FROM aliases
+		 WHERE is_active = 1
+		   AND EXISTS (SELECT 1 FROM json_each(announced_names) WHERE value = ?)
+		 LIMIT 1`, name).
+		Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt, &announcedJSON)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find announced alias %s: %w", name, err)
+	}
+	a.IsActive = active == 1
+	a.IsRegex = isRegex == 1
+	a.GroupOrder = groupOrder
+	a.AnnouncedNames = decodeAnnouncedNames(announcedJSON)
+	return &a, nil
 }

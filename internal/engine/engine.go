@@ -1430,6 +1430,12 @@ func (e *Engine) handleModels(w http.ResponseWriter) {
 		if !a.IsRegex {
 			data = append(data, newRecord(a.InputModelID, dsName[a.DownstreamID], a.DownstreamID, "alias"))
 		}
+		// Surface announced names from regex groups so clients see routable model IDs.
+		// Announced names always win over the group's output_model_id in dedup because
+		// they're emitted earlier and the dedup pass keeps the first occurrence.
+		for _, n := range a.AnnouncedNames {
+			data = append(data, newRecord(n, dsName[a.DownstreamID], a.DownstreamID, "alias"))
+		}
 		data = append(data, newRecord(a.OutputModelID, dsName[a.DownstreamID], a.DownstreamID, "alias"))
 	}
 
@@ -1559,24 +1565,43 @@ func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
 	// as above (auto-translation makes any of them reachable).
 	for _, a := range aliases {
 		if a.IsRegex {
-			// Skip regex patterns — they aren't concrete model IDs.
-			continue
+			// Skip the regex pattern itself — it's not a concrete model ID.
+			// Announced names (if any) are surfaced below.
+		} else {
+			ds, err := e.store.GetDownstream(a.DownstreamID)
+			if err != nil || ds == nil {
+				continue
+			}
+			name := "models/" + a.InputModelID
+			if _, ok := seen[name]; !ok {
+				seen[name] = struct{}{}
+				out = append(out, geminiModelRecord{
+					Name:                     name,
+					DisplayName:              a.InputModelID,
+					Description:              "via " + dsName[ds.ID] + " (alias for " + a.OutputModelID + ")",
+					SupportedGenerationMethods: geminiMethods,
+				})
+			}
 		}
+		// Surface announced names from regex groups. These are concrete IDs
+		// the user wants clients to see in the picker.
 		ds, err := e.store.GetDownstream(a.DownstreamID)
 		if err != nil || ds == nil {
 			continue
 		}
-		name := "models/" + a.InputModelID
-		if _, ok := seen[name]; ok {
-			continue
+		for _, n := range a.AnnouncedNames {
+			name := "models/" + n
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, geminiModelRecord{
+				Name:                     name,
+				DisplayName:              n,
+				Description:              "via " + dsName[ds.ID] + " (alias for " + a.OutputModelID + ")",
+				SupportedGenerationMethods: geminiMethods,
+			})
 		}
-		seen[name] = struct{}{}
-		out = append(out, geminiModelRecord{
-			Name:                     name,
-			DisplayName:              a.InputModelID,
-			Description:              "via " + dsName[ds.ID] + " (alias for " + a.OutputModelID + ")",
-			SupportedGenerationMethods: geminiMethods,
-		})
 	}
 
 	// Sort by name for deterministic output.

@@ -39,6 +39,10 @@ type cachedRegexAlias struct {
 	GroupOrder     int
 	CreatedAt      time.Time
 	CompiledPattern *regexp.Regexp
+	// AnnouncedNames are concrete model IDs announced by this regex group.
+	// These are surfaced in /v1/models listings and resolved as exact matches
+	// at request time (routing to the group's currently active option).
+	AnnouncedNames []string
 }
 
 // Open opens (or creates) the SQLite database and runs migrations.
@@ -85,7 +89,7 @@ func (s *Store) invalidateRegexCache() {
 // Returns the populated cache entries.
 func (s *Store) populateRegexCache() ([]cachedRegexAlias, error) {
 	rows, err := s.db.Query(
-		`SELECT a.id, a.input_model_id, a.downstream_id, a.output_model_id, a.is_active, a.is_regex, a.group_order, a.created_at
+		`SELECT a.id, a.input_model_id, a.downstream_id, a.output_model_id, a.is_active, a.is_regex, a.group_order, a.created_at, a.announced_names
 		 FROM aliases a
 		 WHERE a.is_active = 1
 		   AND (a.is_regex = 1
@@ -102,16 +106,23 @@ func (s *Store) populateRegexCache() ([]cachedRegexAlias, error) {
 
 	var entries []cachedRegexAlias
 	for rows.Next() {
-		var id, inputModelID, downstreamID, outputModelID string
+		var id, inputModelID, downstreamID, outputModelID, announcedJSON string
 		var active, isRegex, groupOrder int
 		var createdAt time.Time
-		if err := rows.Scan(&id, &inputModelID, &downstreamID, &outputModelID, &active, &isRegex, &groupOrder, &createdAt); err != nil {
+		if err := rows.Scan(&id, &inputModelID, &downstreamID, &outputModelID, &active, &isRegex, &groupOrder, &createdAt, &announcedJSON); err != nil {
 			return nil, err
 		}
 		re, err := compileRegex(inputModelID)
 		if err != nil {
 			// Skip aliases with invalid regex patterns
 			continue
+		}
+		announcedNames := []string{}
+		if announcedJSON != "" && announcedJSON != "[]" {
+			if err := json.Unmarshal([]byte(announcedJSON), &announcedNames); err != nil {
+				// Skip aliases with invalid announced_names JSON
+				continue
+			}
 		}
 		entries = append(entries, cachedRegexAlias{
 			ID:             id,
@@ -122,6 +133,7 @@ func (s *Store) populateRegexCache() ([]cachedRegexAlias, error) {
 			GroupOrder:     groupOrder,
 			CreatedAt:      createdAt,
 			CompiledPattern: re,
+			AnnouncedNames: announcedNames,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -161,6 +173,7 @@ func (s *Store) findActiveAliasRegexCached(model string) (*Alias, error) {
 				IsRegex:      e.IsRegex,
 				GroupOrder:   e.GroupOrder,
 				CreatedAt:    e.CreatedAt,
+				AnnouncedNames: e.AnnouncedNames,
 			}, nil
 		}
 	}
@@ -425,6 +438,14 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Add announced_names column to aliases table (group-level JSON array of
+	// concrete model IDs surfaced in /v1/models for regex alias groups).
+	if !s.columnExists("aliases", "announced_names") {
+		if _, err := s.db.Exec(`ALTER TABLE aliases ADD COLUMN announced_names TEXT DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("migrate add aliases.announced_names: %w", err)
+		}
+	}
+
 	// Recreate index
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_rules_enabled ON rules(is_enabled)`); err != nil {
 		return fmt.Errorf("migrate recreate idx_rules_enabled: %w", err)
@@ -504,7 +525,7 @@ func (s *Store) SeedDefaults() error {
 		{"alias-sonnet-anthropic", "claude-sonnet", "anthropic-sonnet", "claude-sonnet-4-20250514", 1, 2},
 	}
 
-	stmtAlias, err := tx.Prepare("INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order) VALUES (?, ?, ?, ?, ?, 0, ?)")
+	stmtAlias, err := tx.Prepare("INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, announced_names) VALUES (?, ?, ?, ?, ?, 0, ?, '[]')")
 	if err != nil {
 		return fmt.Errorf("seed alias prepare: %w", err)
 	}

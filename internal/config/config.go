@@ -100,10 +100,15 @@ type PipelineStep struct {
 // output model options. The first option in the list is the active one.
 // "is_active" is no longer stored in YAML — it is managed by the DB.
 // If IsRegex is true, input_model_id is treated as a regular expression pattern.
+// AnnouncedNames are concrete model IDs surfaced by regex groups in /v1/models;
+// each entry must match InputModelID and must not collide with any existing
+// downstream output_model_id, non-regex alias input_model_id, or another
+// regex group's input_model_id or announced_name.
 type AliasGroupCfg struct {
-	InputModelID  string             `yaml:"input_model_id"`
-	IsRegex       bool               `yaml:"is_regex,omitempty"`
-	Options       []AliasOptionCfg   `yaml:"options"`
+	InputModelID   string             `yaml:"input_model_id"`
+	IsRegex        bool               `yaml:"is_regex,omitempty"`
+	Options        []AliasOptionCfg   `yaml:"options"`
+	AnnouncedNames []string           `yaml:"announced_names,omitempty"`
 }
 
 // AliasOptionCfg defines a single output-model option within an alias group.

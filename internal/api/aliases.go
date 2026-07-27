@@ -40,7 +40,7 @@ func (r *Router) handleAliases(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		if err := r.store.CreateAlias(&alias); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeAliasValidationError(w, err)
 			return
 		}
 		r.requestConfigWrite()
@@ -91,7 +91,7 @@ func (r *Router) handleAliasByID(w http.ResponseWriter, req *http.Request) {
 		}
 
 		if err := r.store.UpdateAlias(&update); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeAliasValidationError(w, err)
 			return
 		}
 
@@ -213,5 +213,26 @@ func enrichAliasGroups(s *store.Store, groups []store.AliasGroup) {
 				groups[i].Options[j].APIFormats = info.Formats
 			}
 		}
+	}
+}
+
+// writeAliasValidationError maps user-input validation failures (invalid regex,
+// announced-name conflicts, missing downstream, etc.) to HTTP 400, and genuine
+// server faults to HTTP 500. The store layer uses plain error strings today;
+// we use a small set of stable prefixes to keep this mapping explicit.
+func writeAliasValidationError(w http.ResponseWriter, err error) {
+	msg := err.Error()
+	switch {
+	case strings.HasPrefix(msg, "invalid regex pattern"):
+		writeError(w, http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "downstream"):
+		writeError(w, http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "announced name"):
+		writeError(w, http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "alias "):
+		// "alias X not found" from UpdateAlias when the ID doesn't exist
+		writeError(w, http.StatusNotFound, msg)
+	default:
+		writeError(w, http.StatusInternalServerError, msg)
 	}
 }
