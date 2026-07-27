@@ -1554,7 +1554,7 @@ function renderAliasGroup(container, group) {
     // so we still pass the full pattern through the same /api/icons endpoint —
     // the server's pattern table resolves the brand from the leading segment.
     title.innerHTML = modelIconHTML(group.input_model_id) + esc(group.input_model_id) +
-        (isRegexGroup ? '<span class="badge" style="background:#6e256d;color:#e879f9;margin-left:0.4rem;font-size:0.7rem;">regex</span>' : '');
+        (isRegexGroup ? '<span class="badge" style="background:#0969da;color:white;margin-left:0.4rem;font-size:0.7rem;border:0;">regex</span>' : '');
     if (isRegexGroup) {
         title.appendChild(makeHelpIcon(tooltipTexts['alias.regex_badge']));
     }
@@ -1588,9 +1588,19 @@ function renderAliasGroup(container, group) {
     // model IDs surfaced in /v1/models. Each name must match the regex and
     // must not collide with any existing downstream or alias model ID —
     // validation is enforced server-side; we surface the error message below.
+    //
+    // UX mirrors the Downstreams tab's "Add Model" flow: a header row with
+    // the label and an "＋ Add" toggle, a chip list (or empty hint), and a
+    // hidden inline row [input | Add | Cancel] that appears when toggled.
     if (isRegexGroup) {
         const announced = document.createElement('div');
         announced.className = 'alias-announced-names';
+
+        // Header row: label on the left, "+ Add" button on the right (only
+        // when there are no names yet — once names exist the chips have
+        // per-chip "×" buttons).
+        const headerRow = document.createElement('div');
+        headerRow.className = 'alias-announced-header';
 
         const label = document.createElement('div');
         label.className = 'alias-announced-label';
@@ -1598,10 +1608,13 @@ function renderAliasGroup(container, group) {
         label.appendChild(makeHelpIcon(
             'The regex pattern will not appear in LLM Apps\' "Fetch Available Models" results (i.e., /v1/models results). Instead, you can specify concrete model IDs here that will appear in available models. (e.g., regex pattern "claude-sonnet.*" is not discoverable, but its announced names "claude-sonnet-4-6" and "claude-sonnet-5" are discoverable.)  Each name must match the regex pattern above, and must not collide with existing downstream model IDs or other aliases.'
         ));
-        announced.appendChild(label);
+        headerRow.appendChild(label);
 
-        const chips = document.createElement('div');
-        chips.className = 'alias-announced-chips';
+        const addToggle = document.createElement('button');
+        addToggle.type = 'button';
+        addToggle.className = 'btn-small alias-announced-add-toggle';
+        addToggle.textContent = '＋ Add Name';
+
         // `names` is the local working copy; `originalNames` is the last
         // server-confirmed value. On save failure we roll `names` back to
         // `originalNames` so the rejected entry doesn't linger in the UI.
@@ -1614,6 +1627,7 @@ function renderAliasGroup(container, group) {
                 const chip = document.createElement('span');
                 chip.className = 'alias-announced-chip';
                 const text = document.createElement('span');
+                text.className = 'alias-announced-chip-text';
                 text.textContent = n;
                 chip.appendChild(text);
                 const rm = document.createElement('button');
@@ -1632,18 +1646,19 @@ function renderAliasGroup(container, group) {
             });
         };
 
-        announced.appendChild(chips);
+        const chips = document.createElement('div');
+        chips.className = 'alias-announced-chips';
 
         const inputRow = document.createElement('div');
         inputRow.className = 'alias-announced-input-row';
+        inputRow.style.display = 'none';
+
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'alias-announced-input';
-        input.placeholder = 'add name (must match regex)';
-        const add = document.createElement('button');
-        add.type = 'button';
-        add.className = 'btn-small';
-        add.textContent = 'Add';
+        input.placeholder = 'Type an announced name';
+        input.autocomplete = 'off';
+
         const submit = () => {
             const v = input.value.trim();
             if (!v) return;
@@ -1653,15 +1668,50 @@ function renderAliasGroup(container, group) {
             }
             names.push(v);
             input.value = '';
+            inputRow.style.display = 'none';
             renderChips();
             saveAnnouncedNames(group, names, errEl, originalNames);
         };
-        add.onclick = submit;
+
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'btn-small btn-primary';
+        addBtn.textContent = 'Add';
+        addBtn.onclick = submit;
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn-small';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.onclick = () => {
+            input.value = '';
+            inputRow.style.display = 'none';
+            errEl.textContent = '';
+        };
+
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { e.preventDefault(); submit(); }
+            if (e.key === 'Escape') { e.preventDefault(); cancelBtn.click(); }
         });
+
+        addToggle.onclick = () => {
+            errEl.textContent = '';
+            inputRow.style.display = '';
+            input.focus();
+        };
+
         inputRow.appendChild(input);
-        inputRow.appendChild(add);
+        inputRow.appendChild(addBtn);
+        inputRow.appendChild(cancelBtn);
+
+        // The "+ Add Name" toggle lives in the header row alongside the
+        // label — always visible. Clicking it reveals the inline input
+        // row. Once names exist, individual chips have their own × buttons
+        // for removal.
+        headerRow.appendChild(addToggle);
+
+        announced.appendChild(headerRow);
+        announced.appendChild(chips);
         announced.appendChild(inputRow);
 
         const errEl = document.createElement('div');
@@ -1669,6 +1719,8 @@ function renderAliasGroup(container, group) {
         announced.appendChild(errEl);
 
         renderChips();
+        // Inline input row stays hidden until the user clicks "+ Add Name".
+        inputRow.style.display = 'none';
         card.appendChild(announced);
     }
 

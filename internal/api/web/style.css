@@ -1677,18 +1677,38 @@ html[data-theme="light"] form select {
 
 /* Announced-names editor: appears under the header of regex alias groups. */
 .alias-announced-names {
-    padding: 0.4rem 0.85rem 0.75rem 0.85rem;
+    padding: 0.5rem 0.85rem 0.5rem 0.85rem;
     border-top: 1px dashed var(--border-color);
-    background: rgba(110, 37, 109, 0.05);
+    background: rgba(157, 209, 255, 0.15);
+}
+
+.alias-announced-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.4rem;
 }
 
 .alias-announced-label {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    margin-bottom: 0.35rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
+    flex: 1;
+    min-width: 0;
+}
+
+.alias-announced-add-toggle {
+    flex-shrink: 0;
+}
+
+.alias-announced-empty {
+    color: var(--text-secondary);
+    font-style: italic;
+    font-size: 0.78rem;
+    padding: 0.15rem 0;
 }
 
 .alias-announced-chips {
@@ -1696,26 +1716,33 @@ html[data-theme="light"] form select {
     flex-wrap: wrap;
     gap: 0.3rem;
     margin-bottom: 0.4rem;
-    min-height: 1.5rem;
+}
+
+.alias-announced-chips:empty {
+    display: none;
 }
 
 .alias-announced-chip {
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
-    background: #3a1f4a;
-    color: #f1d8ff;
-    border: 1px solid #6e256d;
-    border-radius: 999px;
-    padding: 0.15rem 0.55rem;
+    background: #093467;
+    color: white;
+    border: 1px solid #0969da;
+    border-radius: 6px;
+    padding: 0.15rem 0.45rem;
     font-size: 0.78rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 [data-theme="light"] .alias-announced-chip {
-    background: #f3e6fb;
-    color: #4a1d6b;
-    border-color: #c89ee0;
+    background: white;
+    color: #0969da;
+    border-color: #0969da;
+}
+
+.alias-announced-chip-text {
+    line-height: 1.2;
 }
 
 .alias-announced-chip-remove {
@@ -1726,6 +1753,7 @@ html[data-theme="light"] form select {
     font-size: 1rem;
     line-height: 1;
     padding: 0;
+    margin-left: 0.1rem;
 }
 
 .alias-announced-chip-remove:hover {
@@ -1733,32 +1761,21 @@ html[data-theme="light"] form select {
 }
 
 .alias-announced-input-row {
-    display: inline-flex;
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.4rem;
     align-items: center;
-    gap: 0.3rem;
 }
 
-.alias-announced-input {
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 0.25rem 0.5rem;
-    font-size: 0.8rem;
-    color: var(--text-primary);
-    min-width: 220px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
 
 .alias-announced-input:focus {
-    outline: 1px solid #6e256d;
-    outline-offset: -1px;
+    border-color: #0969da;
 }
 
 .alias-announced-error {
     color: #ff6b6b;
     font-size: 0.75rem;
     margin-top: 0.35rem;
-    min-height: 1em;
     word-break: break-word;
 }
 
