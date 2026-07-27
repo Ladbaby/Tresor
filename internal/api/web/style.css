@@ -1675,6 +1675,93 @@ html[data-theme="light"] form select {
     padding: 0.75rem;
 }
 
+/* Announced-names editor: appears under the header of regex alias groups. */
+.alias-announced-names {
+    padding: 0.4rem 0.85rem 0.75rem 0.85rem;
+    border-top: 1px dashed var(--border-color);
+    background: rgba(110, 37, 109, 0.05);
+}
+
+.alias-announced-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-bottom: 0.35rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.alias-announced-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-bottom: 0.4rem;
+    min-height: 1.5rem;
+}
+
+.alias-announced-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: #3a1f4a;
+    color: #f1d8ff;
+    border: 1px solid #6e256d;
+    border-radius: 999px;
+    padding: 0.15rem 0.55rem;
+    font-size: 0.78rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+[data-theme="light"] .alias-announced-chip {
+    background: #f3e6fb;
+    color: #4a1d6b;
+    border-color: #c89ee0;
+}
+
+.alias-announced-chip-remove {
+    background: transparent;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0;
+}
+
+.alias-announced-chip-remove:hover {
+    color: #ffb4b4;
+}
+
+.alias-announced-input-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.alias-announced-input {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    min-width: 220px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.alias-announced-input:focus {
+    outline: 1px solid #6e256d;
+    outline-offset: -1px;
+}
+
+.alias-announced-error {
+    color: #ff6b6b;
+    font-size: 0.75rem;
+    margin-top: 0.35rem;
+    min-height: 1em;
+    word-break: break-word;
+}
+
 .alias-option-btn {
     background: var(--bg-tertiary);
     border: 1px solid var(--border-color);

@@ -1584,6 +1584,90 @@ function renderAliasGroup(container, group) {
     header.appendChild(actions);
     card.appendChild(header);
 
+    // Announced-names editor (regex groups only). These are the concrete
+    // model IDs surfaced in /v1/models. Each name must match the regex and
+    // must not collide with any existing downstream or alias model ID —
+    // validation is enforced server-side; we surface the error message below.
+    if (isRegexGroup) {
+        const announced = document.createElement('div');
+        announced.className = 'alias-announced-names';
+
+        const label = document.createElement('div');
+        label.className = 'alias-announced-label';
+        label.textContent = 'Announced names';
+        label.appendChild(makeHelpIcon(
+            'Concrete model IDs surfaced in /v1/models. Each name must match the regex pattern above. Server rejects collisions with existing downstream models or other aliases.'
+        ));
+        announced.appendChild(label);
+
+        const chips = document.createElement('div');
+        chips.className = 'alias-announced-chips';
+        const names = Array.isArray(group.announced_names) ? group.announced_names : [];
+
+        const renderChips = () => {
+            chips.innerHTML = '';
+            names.forEach((n, idx) => {
+                const chip = document.createElement('span');
+                chip.className = 'alias-announced-chip';
+                const text = document.createElement('span');
+                text.textContent = n;
+                chip.appendChild(text);
+                const rm = document.createElement('button');
+                rm.type = 'button';
+                rm.className = 'alias-announced-chip-remove';
+                rm.textContent = '×';
+                rm.title = 'Remove';
+                rm.onclick = (e) => {
+                    e.stopPropagation();
+                    names.splice(idx, 1);
+                    renderChips();
+                    saveAnnouncedNames(group, names, errEl);
+                };
+                chip.appendChild(rm);
+                chips.appendChild(chip);
+            });
+        };
+
+        announced.appendChild(chips);
+
+        const inputRow = document.createElement('div');
+        inputRow.className = 'alias-announced-input-row';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'alias-announced-input';
+        input.placeholder = 'add name (must match regex)';
+        const add = document.createElement('button');
+        add.type = 'button';
+        add.className = 'btn-small';
+        add.textContent = 'Add';
+        const submit = () => {
+            const v = input.value.trim();
+            if (!v) return;
+            if (names.includes(v)) {
+                input.value = '';
+                return;
+            }
+            names.push(v);
+            input.value = '';
+            renderChips();
+            saveAnnouncedNames(group, names, errEl);
+        };
+        add.onclick = submit;
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); submit(); }
+        });
+        inputRow.appendChild(input);
+        inputRow.appendChild(add);
+        announced.appendChild(inputRow);
+
+        const errEl = document.createElement('div');
+        errEl.className = 'alias-announced-error';
+        announced.appendChild(errEl);
+
+        renderChips();
+        card.appendChild(announced);
+    }
+
     // Options grid
     const grid = document.createElement('div');
     grid.className = 'alias-options-grid';
@@ -1667,6 +1751,39 @@ async function deleteAliasGroup(inputModelId) {
         loadAliasGroups();
     } catch (err) {
         alert('Error: ' + err.message);
+    }
+}
+
+/**
+ * Save the announced-names list for a regex alias group. Sends a PUT to the
+ * group's first option with the new list (the store propagates it to all
+ * siblings). On validation failure, the message is shown inline; on success,
+ * the local cache is reloaded.
+ */
+async function saveAnnouncedNames(group, names, errEl) {
+    errEl.textContent = '';
+    if (!group.options || group.options.length === 0) {
+        errEl.textContent = 'Add at least one option before setting announced names.';
+        return;
+    }
+    const target = group.options[0];
+    const payload = {
+        input_model_id: group.input_model_id,
+        downstream_id: target.downstream_id,
+        output_model_id: target.output_model_id,
+        is_active: target.is_active,
+        is_regex: true,
+        group_order: target.group_order,
+        announced_names: names,
+    };
+    try {
+        await api('/aliases/' + target.id, {
+            method: 'PUT',
+            body: JSON.stringify(payload),
+        });
+        loadAliasGroups();
+    } catch (err) {
+        errEl.textContent = err.message || String(err);
     }
 }
 
