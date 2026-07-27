@@ -1767,6 +1767,18 @@ html[data-theme="light"] form select {
     align-items: center;
 }
 
+.alias-announced-input {
+    flex: 1;
+    padding: 0.45rem 0.65rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    outline: none;
+    min-width: 0;
+}
 
 .alias-announced-input:focus {
     border-color: #0969da;
