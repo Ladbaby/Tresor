@@ -637,10 +637,16 @@ func TestGemini2Anthropic_TransformStreamChunk_TextDelta(t *testing.T) {
 	}
 }
 
-// TestOpenAI2Gemini_TransformStreamChunk_DropsDoneMarker verifies that an
-// OpenAI [DONE] terminator arriving via the stream is dropped by the response
-// pipeline so it doesn't leak to a Gemini client (which does not use [DONE]).
-func TestOpenAI2Gemini_TransformStreamChunk_DropsDoneMarker(t *testing.T) {
+// TestOpenAI2Gemini_TransformStreamChunk_EmitsDoneMarker verifies that the
+// engine-synthesized [DONE] terminator at end-of-stream is forwarded as a
+// fully-formatted OpenAI `data: [DONE]\n\n` SSE event for the OpenAI client.
+// The Gemini upstream does not send [DONE] (it terminates with a final
+// finishReason chunk), so the transformer must surface the synthetic
+// terminator the engine injects so OpenAI clients receive the [DONE] they
+// expect after the final finish_reason chunk. The engine writes
+// transformed.Data verbatim when no \n\n boundary is detected, so the
+// transformer must include the `data: ` prefix and trailing `\n\n`.
+func TestOpenAI2Gemini_TransformStreamChunk_EmitsDoneMarker(t *testing.T) {
 	p := &OpenAI2Gemini{}
 	chunk := engine.SSEChunk{
 		EventType: "",
@@ -650,8 +656,8 @@ func TestOpenAI2Gemini_TransformStreamChunk_DropsDoneMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transform: %v", err)
 	}
-	if len(out.Data) != 0 {
-		t.Fatalf("expected empty Data for [DONE] input, got %q", out.Data)
+	if string(out.Data) != "data: [DONE]\n\n" {
+		t.Fatalf("expected `data: [DONE]\\n\\n` output, got %q", out.Data)
 	}
 }
 
