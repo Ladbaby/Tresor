@@ -161,7 +161,11 @@ func (e *Engine) isResponseEmpty(body []byte, downstreamFormat string) bool {
 // shouldRetry determines whether the gateway should retry a failed request.
 // Returns true only if the response meets ALL retry conditions:
 // - HTTP status is 200 (OK)
-// - The response body is empty (no useful content)
+// - The request path is a generation endpoint (retry_on_empty is
+//   generation-only; utility endpoints like /v1/messages/count_tokens
+//   serve structured data that lacks a `content` field and must not be
+//   classified as empty — see count-tokens-trigger-empty-response.txt)
+// - The response body is empty for the downstream's API format
 //
 // Non-200 responses are never retried — LLM client apps handle their own
 // retries for HTTP errors (4xx client errors, 5xx server errors), and
@@ -169,9 +173,12 @@ func (e *Engine) isResponseEmpty(body []byte, downstreamFormat string) bool {
 //
 // This method is designed to be extensible for future retry conditions
 // (e.g., retry on 429 rate limits, retry on specific error messages).
-func (e *Engine) shouldRetry(resp *http.Response, body []byte, downstreamFormat string) bool {
+func (e *Engine) shouldRetry(resp *http.Response, body []byte, downstreamFormat string, path string) bool {
 	if resp.StatusCode != http.StatusOK {
 		return false // non-200 responses are not retried
+	}
+	if !isGenerationEndpoint(path) {
+		return false // utility endpoints don't produce conversational content
 	}
 	return e.isResponseEmpty(body, downstreamFormat)
 }
@@ -359,6 +366,35 @@ func isLLMPath(path string) bool {
 	}
 	// Gemini endpoints: /v1beta/models and /v1beta/models/{model}:{action}
 	if strings.HasPrefix(path, "/v1beta/models") {
+		return true
+	}
+	return false
+}
+
+// isGenerationEndpoint reports whether the path is a generation endpoint whose
+// response carries conversational content (text, tool_use, function_call, etc.).
+// These are the only endpoints where retry_on_empty makes sense: empty
+// generation responses are the symptom of an upstream coil that produced no
+// content (e.g. thinking-only).
+//
+// Utility endpoints like /v1/messages/count_tokens, /v1/models,
+// /v1/embeddings, and /v1beta/models/* return structured data with no
+// `content` field. Treating them as empty would trigger spurious retries
+// and eventually a 502 (see count-tokens-trigger-empty-response.txt for a
+// real capture: `{"input_tokens":7802}`).
+func isGenerationEndpoint(path string) bool {
+	// Normalize: clients may hit /v1/... or bare paths such as /messages.
+	// Strip a leading /v1 prefix so both forms map to the same canonical
+	// suffix.
+	normalized := path
+	if strings.HasPrefix(normalized, "/v1/") {
+		normalized = strings.TrimPrefix(normalized, "/v1")
+	}
+	switch normalized {
+	case "/chat/completions",
+		"/completions",
+		"/messages",
+		"/responses":
 		return true
 	}
 	return false
@@ -778,8 +814,12 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Check for empty response (using raw upstream body, not transformed)
-		// Only retry if HTTP status is 200 AND response is empty.
-		if e.retryOnEmpty && e.shouldRetry(resp, respBody, downstreamFormat) {
+		// Only retry if HTTP status is 200 AND response is empty AND the path
+		// is a generation endpoint. Utility endpoints like /count_tokens can
+		// legitimately return 200 with bodies that look "empty" to the
+		// parser (e.g. {"input_tokens":7802}); retrying them produces a
+		// spurious 502.
+		if e.retryOnEmpty && e.shouldRetry(resp, respBody, downstreamFormat, r.URL.Path) {
 			if attempt >= maxRetries {
 				entry.Status = resp.StatusCode
 				entry.Duration = DurationMs(time.Since(start))

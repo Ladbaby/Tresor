@@ -255,6 +255,15 @@ func TestIsAnthropicEmpty(t *testing.T) {
 			want: true,
 		},
 		{
+			// REGRESSION: count_tokens responses carry only {"input_tokens":N}
+			// (no content field). The parser still reports them as empty —
+			// the GATE is the path check in shouldRetry, not the parser.
+			// See count-tokens-trigger-empty-response.txt.
+			name: "count_tokens shape (input_tokens only) treated as empty",
+			body: `{"input_tokens":7802}`,
+			want: true,
+		},
+		{
 			name: "malformed JSON treated as non-empty (defensive — can't parse, assume not empty)",
 			body: `not-json`,
 			want: false,
@@ -439,23 +448,141 @@ func TestEngine_ShouldRetry_OnlyRetries200WithEmptyBody(t *testing.T) {
 	eng := &Engine{}
 	respOK := &http.Response{StatusCode: 200}
 
-	// 200 + empty → retry
-	if !eng.shouldRetry(respOK, []byte(`{"choices":[]}`), "openai") {
+	// 200 + empty + generation endpoint → retry
+	if !eng.shouldRetry(respOK, []byte(`{"choices":[]}`), "openai", "/v1/chat/completions") {
 		t.Error("200 with empty OpenAI body should retry")
 	}
-	// 200 + non-empty → no retry
-	if eng.shouldRetry(respOK, []byte(`{"choices":[{"message":{"content":"hi"}}]}`), "openai") {
+	// 200 + non-empty + generation endpoint → no retry
+	if eng.shouldRetry(respOK, []byte(`{"choices":[{"message":{"content":"hi"}}]}`), "openai", "/v1/chat/completions") {
 		t.Error("200 with non-empty body should NOT retry")
 	}
 	// 500 + empty → no retry (HTTP errors are the client's responsibility)
 	resp500 := &http.Response{StatusCode: 500}
-	if eng.shouldRetry(resp500, []byte(`{"choices":[]}`), "openai") {
+	if eng.shouldRetry(resp500, []byte(`{"choices":[]}`), "openai", "/v1/chat/completions") {
 		t.Error("500 must NOT trigger retry regardless of body")
 	}
 	// 429 + empty → no retry
 	resp429 := &http.Response{StatusCode: 429}
-	if eng.shouldRetry(resp429, []byte(`{"choices":[]}`), "openai") {
+	if eng.shouldRetry(resp429, []byte(`{"choices":[]}`), "openai", "/v1/chat/completions") {
 		t.Error("429 must NOT trigger retry (client handles rate limits)")
+	}
+}
+
+// TestEngine_ShouldRetry_SkipsNonGenerationEndpoints pins down the
+// retry_on_empty eligibility gate. retry_on_empty is generation-only;
+// utility endpoints like /v1/messages/count_tokens can legitimately return
+// 200 with bodies that look "empty" to the parser (e.g.
+// {"input_tokens":7802}). retrying them produces a spurious 502.
+func TestEngine_ShouldRetry_SkipsNonGenerationEndpoints(t *testing.T) {
+	eng := &Engine{}
+	respOK := &http.Response{StatusCode: 200}
+
+	tests := []struct {
+		name     string
+		body     string
+		format   string
+		path     string
+		wantRetry bool
+	}{
+		{
+			name: "count_tokens skipped (anthropic format, no content)",
+			body: `{"input_tokens":7802}`,
+			format: "anthropic",
+			path: "/v1/messages/count_tokens",
+			wantRetry: false,
+		},
+		{
+			name: "bare /count_tokens path also skipped",
+			body: `{"input_tokens":42}`,
+			format: "anthropic",
+			path: "/count_tokens",
+			wantRetry: false,
+		},
+		{
+			name: "models listing endpoint skipped",
+			body: `{"data":[]}`,
+			format: "openai",
+			path: "/v1/models",
+			wantRetry: false,
+		},
+		{
+			name: "embeddings endpoint skipped",
+			body: `{"data":[]}`,
+			format: "openai",
+			path: "/v1/embeddings",
+			wantRetry: false,
+		},
+		{
+			name: "gemini model listing skipped",
+			body: `{"models":[]}`,
+			format: "gemini",
+			path: "/v1beta/models",
+			wantRetry: false,
+		},
+		{
+			name: "unknown custom path skipped (conservative default)",
+			body: `{"choices":[]}`,
+			format: "openai",
+			path: "/v1/custom-thing",
+			wantRetry: false,
+		},
+		{
+			name: "generation path with empty content still retries",
+			body: `{"content":[]}`,
+			format: "anthropic",
+			path: "/v1/messages",
+			wantRetry: true,
+		},
+		{
+			name: "generation path with non-empty content does not retry",
+			body: `{"content":[{"type":"text","text":"hi"}]}`,
+			format: "anthropic",
+			path: "/v1/messages",
+			wantRetry: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := eng.shouldRetry(respOK, []byte(tt.body), tt.format, tt.path)
+			if got != tt.wantRetry {
+				t.Errorf("shouldRetry(%q, %q) = %v, want %v", tt.path, tt.body, got, tt.wantRetry)
+			}
+		})
+	}
+}
+
+func TestIsGenerationEndpoint(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		// Generation endpoints (allowed)
+		{"/v1/chat/completions", true},
+		{"/v1/completions", true},
+		{"/v1/messages", true},
+		{"/v1/responses", true},
+		// Bare forms (no /v1 prefix) — also allowed since the engine
+		// sometimes sees paths without the prefix.
+		{"/chat/completions", true},
+		{"/messages", true},
+		// Utility endpoints (skipped)
+		{"/v1/messages/count_tokens", false},
+		{"/v1/models", false},
+		{"/v1/embeddings", false},
+		{"/v1beta/models", false},
+		{"/v1beta/models/foo:generateContent", false},
+		{"/count_tokens", false},
+		{"", false},
+		{"/", false},
+		// Unknown custom path — conservative default
+		{"/v1/custom-thing", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isGenerationEndpoint(tt.path); got != tt.want {
+				t.Errorf("isGenerationEndpoint(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -810,6 +937,63 @@ func TestEngine_HandleProxy_RetryOnEmpty_NonStreaming_DoesNotRetryOnNon200(t *te
 	}
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("expected status 500 to pass through, got %d", w.Code)
+	}
+}
+
+// TestEngine_HandleProxy_RetryOnEmpty_NonStreaming_CountTokensNotRetried
+// is the regression test for the count_tokens false positive.
+//
+// Anthropic's POST /v1/messages/count_tokens returns
+// `{"input_tokens":<int>}` with no `content` field. The parser
+// (IsAnthropicEmpty) sees an empty content slice and reports the body
+// as empty. Before the fix, retry_on_empty would retry the request
+// three times and eventually return 502 "empty response after
+// retries exhausted" — even though the downstream reply was correct.
+//
+// After the fix, retry_on_empty is gated on the request path: only
+// generation endpoints are eligible. count_tokens is a utility
+// endpoint and the body is passed through verbatim on the first try.
+func TestEngine_HandleProxy_RetryOnEmpty_NonStreaming_CountTokensNotRetried(t *testing.T) {
+	s := newTestStore(t)
+
+	var attempts int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Real Anthropic count_tokens payload shape.
+		fmt.Fprint(w, `{"input_tokens":7802}`)
+	}))
+	defer ts.Close()
+	// Anthropic-format downstream so IsAnthropicEmpty is the parser
+	// that would (incorrectly) call this body empty.
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1", "anthropic")
+	addOutputModelIDs(t, s, "ds1", "claude-sonnet-4-20250514")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetRetryOnEmpty(true) // the bug only manifests with this enabled
+
+	body := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	// The downstream must be hit exactly once — the gate is the path,
+	// not the parser, so the body is passed through.
+	if attempts != 1 {
+		t.Errorf("expected downstream called once (no retry on count_tokens), got %d", attempts)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	// The body must be delivered to the client verbatim.
+	if got := strings.TrimSpace(w.Body.String()); got != `{"input_tokens":7802}` {
+		t.Errorf("expected body to be passed through verbatim, got %q", got)
+	}
+	// And the response must NOT be a 502 gate.
+	if strings.Contains(strings.ToLower(w.Body.String()), "empty response") {
+		t.Errorf("expected no 502/empty-response error, got %q", w.Body.String())
 	}
 }
 
