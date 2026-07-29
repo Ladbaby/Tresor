@@ -46,13 +46,24 @@ func (r *Router) handleIcon(w http.ResponseWriter, req *http.Request) {
 	}
 
 	data, ct, err := r.iconFetcher.Icon(modelID)
-	if err != nil || len(data) == 0 {
-		// Distinguish "no pattern matched" (no log) from "fetch failed" (warn).
-		// Either way, fall back to the generic dummy icon so the <img> slot
-		// stays filled instead of cascading an onerror=hide chain.
+	if len(data) == 0 {
+		// "No pattern matched" — every candidate slug was absent from the
+		// CDN index. Return 404 so the browser's <img onerror> hides the
+		// broken image instead of substituting a generic placeholder the
+		// user can't tell apart from a real provider icon.
 		if err != nil {
-			log.Printf("icons: fetch failed for %q: %v", modelID, err)
+			// Should not happen together with len(data)==0 from the fetcher
+			// today, but log defensively if a future refactor couples them.
+			log.Printf("icons: no match for %q: %v", modelID, err)
 		}
+		http.NotFound(w, req)
+		return
+	}
+	if err != nil {
+		// Fetch failed (CDN outage, network error). Fall back to the generic
+		// dummy icon so the <img> slot stays filled instead of cascading
+		// through the onerror=hide chain on every model in the list.
+		log.Printf("icons: fetch failed for %q: %v", modelID, err)
 		data, ct = DefaultIcon()
 		// Shorter max-age than real icons: the dummy is branding-generic and
 		// may be replaced with a custom art asset at any release boundary.
