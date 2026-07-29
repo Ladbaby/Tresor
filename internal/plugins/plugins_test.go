@@ -206,6 +206,164 @@ func TestOpenAI2Anthropic_TransformRequest_ToolChoice_Object(t *testing.T) {
 	}
 }
 
+// TestOpenAI2Anthropic_TransformRequest_MaxCompletionTokens verifies that the
+// modern Chat Completions field `max_completion_tokens` is forwarded to
+// Anthropic's `max_tokens`. Without this, OpenAI's modern SDK silently hits
+// the transformer's hard-coded default and downstream models truncate.
+func TestOpenAI2Anthropic_TransformRequest_MaxCompletionTokens(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+
+	openAIReq := map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hi"},
+		},
+		"max_completion_tokens": 2048,
+	}
+	body, _ := json.Marshal(openAIReq)
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-ant-test"}}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var anthReq map[string]interface{}
+	json.Unmarshal(newBody, &anthReq)
+
+	if mt := anthReq["max_tokens"]; mt != float64(2048) {
+		t.Fatalf("expected max_tokens 2048 from max_completion_tokens, got %v", mt)
+	}
+}
+
+// TestOpenAI2Anthropic_TransformRequest_MaxCompletionTokensBeatsMaxTokens
+// pins the precedence order: the modern field wins over the legacy field when
+// both are present. This matches OpenAI's documented behavior where the more
+// recent parameter is canonical.
+func TestOpenAI2Anthropic_TransformRequest_MaxCompletionTokensBeatsMaxTokens(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+
+	openAIReq := map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hi"},
+		},
+		"max_tokens":             100,
+		"max_completion_tokens":  500,
+	}
+	body, _ := json.Marshal(openAIReq)
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-ant-test"}}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var anthReq map[string]interface{}
+	json.Unmarshal(newBody, &anthReq)
+
+	if mt := anthReq["max_tokens"]; mt != float64(500) {
+		t.Fatalf("expected max_tokens 500 (max_completion_tokens precedence), got %v", mt)
+	}
+}
+
+// TestOpenAI2Anthropic_TransformRequest_MaxCompletionTokensBeatsDefault makes
+// sure a small explicit modern value is not silently rounded up to the default
+// fallback when the client asked for a deliberately tiny cap.
+func TestOpenAI2Anthropic_TransformRequest_MaxCompletionTokensBeatsDefault(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+
+	openAIReq := map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hi"},
+		},
+		"max_completion_tokens": 50,
+	}
+	body, _ := json.Marshal(openAIReq)
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-ant-test"}}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var anthReq map[string]interface{}
+	json.Unmarshal(newBody, &anthReq)
+
+	if mt := anthReq["max_tokens"]; mt != float64(50) {
+		t.Fatalf("expected max_tokens 50 (explicit client cap), got %v", mt)
+	}
+}
+
+// TestOpenAI2Anthropic_TransformRequest_NoCapDefaultsTo32000 is the
+// regression guard for the captures that motivated this fix. When the OpenAI
+// client sends neither field, we forward Anthropic's Sonnet 4.5 / Claude Code
+// default of 32000 so the downstream does not stop at an undocumented 1024 cap
+// and silently strip the response tail.
+func TestOpenAI2Anthropic_TransformRequest_NoCapDefaultsTo32000(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+
+	openAIReq := map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hi"},
+		},
+	}
+	body, _ := json.Marshal(openAIReq)
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-ant-test"}}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var anthReq map[string]interface{}
+	json.Unmarshal(newBody, &anthReq)
+
+	if mt := anthReq["max_tokens"]; mt != float64(32000) {
+		t.Fatalf("expected max_tokens 32000 (default), got %v", mt)
+	}
+}
+
+// TestOpenAI2Anthropic_TransformRequest_NegativeMaxTokensClampedToDefault
+// ensures a malformed `max_tokens: -1` does not silently cap output at zero.
+func TestOpenAI2Anthropic_TransformRequest_NegativeMaxTokensClampedToDefault(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+
+	openAIReq := map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hi"},
+		},
+		"max_tokens": -1,
+	}
+	body, _ := json.Marshal(openAIReq)
+
+	req, _ := http.NewRequest("POST", "http://example.com/", bytes.NewReader(body))
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-ant-test"}}
+
+	_, newBody, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var anthReq map[string]interface{}
+	json.Unmarshal(newBody, &anthReq)
+
+	if mt := anthReq["max_tokens"]; mt != float64(32000) {
+		t.Fatalf("expected max_tokens 32000 (clamped default), got %v", mt)
+	}
+}
+
 func TestOpenAI2Anthropic_TransformRequest_MultimodalContent(t *testing.T) {
 	p := &OpenAI2Anthropic{}
 
@@ -2287,6 +2445,229 @@ data: {"type":"message_stop"}
 	}
 	if !strings.Contains(output, `"finish_reason":"stop"`) {
 		t.Fatal("expected finish_reason stop (mapped from end_turn)")
+	}
+}
+
+// TestOpenAI2Anthropic_TransformResponse_StopReasonMappings verifies the
+// non-streaming (transformJSONResponse) path maps Anthropic's stop_reason
+// values into OpenAI's finish_reason vocabulary across all three known values.
+// Regression guard: previously `max_tokens` was passed through verbatim, which
+// makes OpenAI clients unable to detect a token-cutoff response.
+func TestOpenAI2Anthropic_TransformResponse_StopReasonMappings(t *testing.T) {
+	cases := []struct {
+		name     string
+		stop     string
+		expected string
+	}{
+		{"end_turn mapped to stop", "end_turn", "stop"},
+		{"max_tokens mapped to length", "max_tokens", "length"},
+		{"tool_use mapped to tool_calls", "tool_use", "tool_calls"},
+		{"unknown value passed through", "refusal", "refusal"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &OpenAI2Anthropic{}
+			anthroResp := map[string]interface{}{
+				"id":    "msg_map",
+				"model": "claude-sonnet-4-20250514",
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "Hello"},
+				},
+				"usage":       map[string]interface{}{"input_tokens": 5, "output_tokens": 10},
+				"stop_reason": tc.stop,
+			}
+			body, _ := json.Marshal(anthroResp)
+			resp := &http.Response{Header: http.Header{}}
+			resp.Header.Set("Content-Type", "application/json")
+
+			newBody, err := p.TransformResponse(resp, body, &engine.PipelineContext{})
+			if err != nil {
+				t.Fatalf("transform response: %v", err)
+			}
+
+			var openAIResp map[string]interface{}
+			if err := json.Unmarshal(newBody, &openAIResp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			choices := openAIResp["choices"].([]interface{})
+			fr := choices[0].(map[string]interface{})["finish_reason"].(string)
+			if fr != tc.expected {
+				t.Fatalf("expected finish_reason %q, got %q", tc.expected, fr)
+			}
+		})
+	}
+}
+
+// TestOpenAI2Anthropic_TransformStreamChunk_StopReasonMappings exercises the
+// per-chunk TransformStreamChunk path (the one the live daemon uses) for each
+// of the three known stop_reason values plus an unknown pass-through value.
+func TestOpenAI2Anthropic_TransformStreamChunk_StopReasonMappings(t *testing.T) {
+	cases := []struct {
+		name     string
+		stop     string
+		expected string
+	}{
+		{"end_turn mapped to stop", "end_turn", "stop"},
+		{"max_tokens mapped to length", "max_tokens", "length"},
+		{"tool_use mapped to tool_calls", "tool_use", "tool_calls"},
+		{"unknown value passed through", "refusal", "refusal"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &OpenAI2Anthropic{}
+			ctx := &engine.PipelineContext{Variables: map[string]interface{}{}}
+
+			// Seed state with message_start so message_delta has access to
+			// the message ID and model.
+			if _, err := p.TransformStreamChunk(engine.SSEChunk{
+				EventType: "message_start",
+				Data:      []byte(`{"type":"message_start","message":{"id":"msg_map","model":"claude-sonnet-4-20250514"}}`),
+			}, ctx); err != nil {
+				t.Fatalf("seed message_start: %v", err)
+			}
+
+			out, err := p.TransformStreamChunk(engine.SSEChunk{
+				EventType: "message_delta",
+				Data:      []byte(fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":%q,"stop_sequence":null}}`, tc.stop)),
+			}, ctx)
+			if err != nil {
+				t.Fatalf("message_delta: %v", err)
+			}
+			expected := fmt.Sprintf(`"finish_reason":%q`, tc.expected)
+			if !strings.Contains(string(out.Data), expected) {
+				t.Fatalf("expected %s in output, got: %s", expected, string(out.Data))
+			}
+		})
+	}
+}
+
+// capture1TerminalSequence is the exact terminal sequence from
+// `incomplete-response-openai-client-anthropic-server.txt` (deepseek-v4-flash,
+// output_tokens=1024, stop_reason=max_tokens, ends mid-sentence).
+func capture1TerminalSequence() []engine.SSEChunk {
+	return []engine.SSEChunk{
+		{EventType: "message_start", Data: []byte(`{"type":"message_start","message":{"id":"capture1","model":"deepseek-v4-flash","role":"assistant"}}`)},
+		{EventType: "content_block_start", Data: []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"still fails due"}}`)},
+		{EventType: "content_block_stop", Data: []byte(`{"type":"content_block_stop","index":0}`)},
+		{EventType: "message_delta", Data: []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":1024}}`)},
+		{EventType: "message_stop", Data: []byte(`{"type":"message_stop"}`)},
+	}
+}
+
+// capture2TerminalSequence is the precise terminal sequence from
+// `incomplete-response-openai-client-anthropic-server-2.txt` (qwen3.6-27b-mtp,
+// output_tokens=4096, stop_reason=max_tokens, ends mid-sentence). It includes
+// the signature_delta event that captures Anthropic emits for the final
+// thinking block before the message-level delta.
+func capture2TerminalSequence() []engine.SSEChunk {
+	return []engine.SSEChunk{
+		{EventType: "message_start", Data: []byte(`{"type":"message_start","message":{"id":"capture2","model":"qwen3.6-27b-mtp","role":"assistant"}}`)},
+		{EventType: "content_block_start", Data: []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Add the"}}`)},
+		{EventType: "content_block_delta", Data: []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}}`)},
+		{EventType: "content_block_stop", Data: []byte(`{"type":"content_block_stop","index":0}`)},
+		{EventType: "content_block_stop", Data: []byte(`{"type":"content_block_stop","index":1}`)},
+		{EventType: "message_delta", Data: []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":4096}}`)},
+		{EventType: "message_stop", Data: []byte(`{"type":"message_stop"}`)},
+	}
+}
+
+// TestOpenAI2Anthropic_TransformStreamChunk_CaptureMaxTokensRegression
+// replays the terminal sequence from the two incomplete-response captures
+// through the per-chunk transformer and asserts the OpenAI stream emitted to
+// the client ends with finish_reason=length and [DONE] — matching what an
+// OpenAI client expects when the model is cut by a cap. Regression guard for
+// the symptom reported in the issue: chat-completions clients saw a
+// "stripped" response because stop_reason was passed through as
+// "max_tokens" and clients could not detect the cap.
+func TestOpenAI2Anthropic_TransformStreamChunk_CaptureMaxTokensRegression(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		chunks           []engine.SSEChunk
+		finalTextToken   string
+		expectedOTTokens float64
+	}{
+		{
+			name:             "capture1-deepseek-v4-flash",
+			chunks:           capture1TerminalSequence(),
+			finalTextToken:   "still fails due",
+			expectedOTTokens: 1024,
+		},
+		{
+			// capture2 has the signature_delta event before message_delta,
+			// which is the wire shape Anthropic emits when the model finishes
+			// a thinking block and is then capped mid visible text.
+			name:             "capture2-qwen3.6-27b-mtp",
+			chunks:           capture2TerminalSequence(),
+			finalTextToken:   "Add the",
+			expectedOTTokens: 4096,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &OpenAI2Anthropic{}
+			ctx := &engine.PipelineContext{Variables: map[string]interface{}{}}
+
+			var combined strings.Builder
+			for _, c := range tc.chunks {
+				out, err := p.TransformStreamChunk(c, ctx)
+				if err != nil {
+					t.Fatalf("chunk %s: %v", c.EventType, err)
+				}
+				if len(out.Data) > 0 {
+					combined.Write(out.Data)
+				}
+			}
+			output := combined.String()
+
+			if !strings.Contains(output, tc.finalTextToken) {
+				t.Fatalf("expected final text token %q in output, got: %s", tc.finalTextToken, output)
+			}
+			if !strings.Contains(output, `[DONE]`) {
+				t.Fatalf("expected [DONE] marker in output, got: %s", output)
+			}
+			if !strings.Contains(output, `"finish_reason":"length"`) {
+				t.Fatalf("expected finish_reason length (mapped from max_tokens), got: %s", output)
+			}
+		})
+	}
+}
+
+// TestOpenAI2Anthropic_ResponseStreaming_MaxTokensRegression drives the
+// batch transformStreamingResponse path with the capture 1 terminal sequence,
+// asserting the wire output ends with finish_reason=length and [DONE].
+func TestOpenAI2Anthropic_ResponseStreaming_MaxTokensRegression(t *testing.T) {
+	p := &OpenAI2Anthropic{}
+
+	// Reconstruct the SSE bundle from capture1TerminalSequence as a single
+	// text feed for transformStreamingResponse.
+	parts := []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"capture1\",\"model\":\"deepseek-v4-flash\",\"role\":\"assistant\"}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"still fails due\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1024}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	}
+	input := strings.Join(parts, "")
+
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Type", "text/event-stream")
+
+	newBody, err := p.TransformResponse(resp, []byte(input), &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform streaming response: %v", err)
+	}
+	output := string(newBody)
+
+	if !strings.Contains(output, "still fails due") {
+		t.Fatalf("expected final text token still fails due, got: %s", output)
+	}
+	if !strings.Contains(output, `[DONE]`) {
+		t.Fatalf("expected [DONE] marker, got: %s", output)
+	}
+	if !strings.Contains(output, `"finish_reason":"length"`) {
+		t.Fatalf("expected finish_reason length (mapped from max_tokens), got: %s", output)
 	}
 }
 

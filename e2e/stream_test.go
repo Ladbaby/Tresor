@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -496,5 +497,234 @@ downstreams:
 		if messageOI != 1 {
 			t.Fatalf("expected message at output_index 1, got %d", messageOI)
 		}
+	}
+}
+
+// startMockAnthropicCapServer emits an Anthropic SSE stream whose message_delta
+// carries `stop_reason: max_tokens`, mirroring the wire shape captured in
+// `incomplete-response-openai-client-anthropic-server*.txt`. The captured
+// `max_tokens` value is reported back via `*atomic.Int64` so E2E tests can
+// assert that the gateway forwarded the correct cap to the downstream.
+func startMockAnthropicCapServer(t *testing.T, port int, captured *atomic.Int64) *http.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if mt, ok := req["max_tokens"].(float64); ok && captured != nil {
+			captured.Store(int64(mt))
+		}
+		t.Logf("Mock Anthropic cap server received: max_tokens=%v", req["max_tokens"])
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		events := []struct {
+			event string
+			data  map[string]interface{}
+		}{
+			{"message_start", map[string]interface{}{"type": "message_start", "message": map[string]interface{}{"id": "msg_cap", "model": "cap-model", "role": "assistant"}}},
+			{"content_block_start", map[string]interface{}{"type": "content_block_start", "index": 0, "content_block": map[string]interface{}{"type": "text", "text": ""}}},
+			{"content_block_delta", map[string]interface{}{"type": "content_block_delta", "index": 0, "delta": map[string]interface{}{"type": "text_delta", "text": "Hi"}}},
+			{"content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 0}},
+			{"message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": "max_tokens", "stop_sequence": nil}, "usage": map[string]interface{}{"output_tokens": 256}}},
+			{"message_stop", map[string]interface{}{"type": "message_stop"}},
+		}
+		for _, e := range events {
+			writeMockSSEEvent(w, e.event, e.data)
+			flusher.Flush()
+		}
+	})
+	return startMockServer(t, port, mux)
+}
+
+// TestOpenAIToAnthropicStreaming_DefaultMaxTokensForwarded verifies that when
+// an OpenAI Chat Completions client sends NO token cap, the gateway forwards
+// the Anthropic Sonnet 4.5 / Claude Code default of 32000 to the downstream.
+// Regression guard for the issue where Tresor injected 1024 and Anthropic
+// obediently truncated at that ceiling.
+func TestOpenAIToAnthropicStreaming_DefaultMaxTokensForwarded(t *testing.T) {
+	mockPort := 9302
+	var capturedMaxTokens atomic.Int64
+	mockSrv := startMockAnthropicCapServer(t, mockPort, &capturedMaxTokens)
+	defer mockSrv.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	cfg := fmt.Sprintf(`
+bind_addr: 127.0.0.1:%d
+db_path: %s
+
+downstreams:
+  - id: mock-anthropic
+    name: Mock Anthropic
+    api_formats: [anthropic]
+    base_url: http://127.0.0.1:%d
+    api_key: sk-mock-key
+    output_model_ids:
+      - cap-model
+`, streamPort, dbPath, mockPort)
+	apiBase, cleanup := startTresor(t, cfg, streamPort)
+	defer cleanup()
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	// NO max_tokens / max_completion_tokens: the gateway must default to 32000.
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model":    "cap-model",
+		"stream":   true,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Say hi"}},
+	})
+	req, _ := http.NewRequest(http.MethodPost, apiBase+"/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected 200, got %d: %s", resp.StatusCode, bodyBytes)
+	}
+	// Drain the stream so the daemon flushes its request to the mock.
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if got := capturedMaxTokens.Load(); got != 32000 {
+		t.Fatalf("expected downstream max_tokens 32000 (default), got %d", got)
+	}
+}
+
+// TestOpenAIToAnthropicStreaming_MaxCompletionTokensForwarded verifies that
+// the modern Chat Completions field max_completion_tokens is forwarded as
+// Anthropic max_tokens. Without this, modern OpenAI SDKs silently hit the
+// transformer's default cap and downstreams truncate.
+func TestOpenAIToAnthropicStreaming_MaxCompletionTokensForwarded(t *testing.T) {
+	mockPort := 9303
+	var capturedMaxTokens atomic.Int64
+	mockSrv := startMockAnthropicCapServer(t, mockPort, &capturedMaxTokens)
+	defer mockSrv.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	cfg := fmt.Sprintf(`
+bind_addr: 127.0.0.1:%d
+db_path: %s
+
+downstreams:
+  - id: mock-anthropic
+    name: Mock Anthropic
+    api_formats: [anthropic]
+    base_url: http://127.0.0.1:%d
+    api_key: sk-mock-key
+    output_model_ids:
+      - cap-model
+`, streamPort, dbPath, mockPort)
+	apiBase, cleanup := startTresor(t, cfg, streamPort)
+	defer cleanup()
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model":                "cap-model",
+		"max_completion_tokens": 1024,
+		"stream":               true,
+		"messages":             []map[string]interface{}{{"role": "user", "content": "Say hi"}},
+	})
+	req, _ := http.NewRequest(http.MethodPost, apiBase+"/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected 200, got %d: %s", resp.StatusCode, bodyBytes)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if got := capturedMaxTokens.Load(); got != 1024 {
+		t.Fatalf("expected downstream max_tokens 1024 (max_completion_tokens), got %d", got)
+	}
+}
+
+// TestOpenAIToAnthropicStreaming_StopReasonLength verifies that when the
+// Anthropic downstream emits `stop_reason: max_tokens`, the OpenAI client sees
+// `finish_reason: length` and the terminal [DONE] marker. Regression guard for
+// the captured symptom where the stream "appeared stripped" because the
+// OpenAI client had no way to detect the cap.
+func TestOpenAIToAnthropicStreaming_StopReasonLength(t *testing.T) {
+	mockPort := 9304
+	mockSrv := startMockAnthropicCapServer(t, mockPort, nil)
+	defer mockSrv.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	cfg := fmt.Sprintf(`
+bind_addr: 127.0.0.1:%d
+db_path: %s
+
+downstreams:
+  - id: mock-anthropic
+    name: Mock Anthropic
+    api_formats: [anthropic]
+    base_url: http://127.0.0.1:%d
+    api_key: sk-mock-key
+    output_model_ids:
+      - cap-model
+`, streamPort, dbPath, mockPort)
+	apiBase, cleanup := startTresor(t, cfg, streamPort)
+	defer cleanup()
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model":      "cap-model",
+		"max_tokens": 100,
+		"stream":     true,
+		"messages":   []map[string]interface{}{{"role": "user", "content": "Say hi"}},
+	})
+	req, _ := http.NewRequest(http.MethodPost, apiBase+"/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected 200, got %d: %s", resp.StatusCode, bodyBytes)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	var sawLength, sawDone bool
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			sawDone = true
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		for _, c := range chunk.Choices {
+			if c.FinishReason != nil && *c.FinishReason == "length" {
+				sawLength = true
+			}
+		}
+	}
+	if !sawLength {
+		t.Fatal("expected at least one chunk with finish_reason=length, got none")
+	}
+	if !sawDone {
+		t.Fatal("expected [DONE] marker at end of stream")
 	}
 }

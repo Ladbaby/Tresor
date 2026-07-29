@@ -68,15 +68,42 @@ type openAIChatToolCall struct {
 }
 
 type openAIChatRequest struct {
-	Model       string              `json:"model"`
-	Messages    []openAIChatMessage `json:"messages"`
-	MaxTokens   int                 `json:"max_tokens,omitempty"`
-	Temperature float64             `json:"temperature,omitempty"`
-	Stream      bool                `json:"stream,omitempty"`
-	System      string              `json:"system,omitempty"`
-	Tools       json.RawMessage     `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage     `json:"tool_choice,omitempty"`
-	Stop        []string            `json:"stop,omitempty"`
+	Model               string              `json:"model"`
+	Messages            []openAIChatMessage `json:"messages"`
+	MaxTokens           int                 `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int                 `json:"max_completion_tokens,omitempty"`
+	Temperature         float64             `json:"temperature,omitempty"`
+	Stream              bool                `json:"stream,omitempty"`
+	System              string              `json:"system,omitempty"`
+	Tools               json.RawMessage     `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage     `json:"tool_choice,omitempty"`
+	Stop                []string            `json:"stop,omitempty"`
+}
+
+// defaultAnthropicMaxTokens is the Anthropic max_tokens value Tresor injects
+// when the OpenAI client sends no output-token cap. Matches Claude Code's
+// default and is also Anthropic's Sonnet 4.5 ceiling, so it is the largest
+// universally-accepted value across the Anthropic API family.
+const defaultAnthropicMaxTokens = 32000
+
+// mapAnthropicStopReasonToOpenAIFinishReason translates Anthropic
+// stop_reason values into the OpenAI Chat Completions finish_reason vocabulary.
+// Unknown values are passed through unchanged so downstream OpenAI clients
+// can still see Anthropic-specific termination reasons if they care.
+//
+//	end_turn   -> stop
+//	max_tokens -> length        (NEW — OpenAI's canonical token-cap reason)
+//	tool_use   -> tool_calls
+func mapAnthropicStopReasonToOpenAIFinishReason(stopReason string) string {
+	switch stopReason {
+	case "end_turn":
+		return "stop"
+	case "max_tokens":
+		return "length"
+	case "tool_use":
+		return "tool_calls"
+	}
+	return stopReason
 }
 
 // PluginName returns the stable type name for deduplication.
@@ -92,10 +119,22 @@ func (t *OpenAI2Anthropic) TransformRequest(req *http.Request, body []byte, ctx 
 	// Map OpenAI model name to Anthropic model name
 	anthropicModel := mapModel(openAIReq.Model)
 
+	// Determine max_tokens with precedence:
+	//   max_completion_tokens (modern OpenAI SDK) > max_tokens (legacy) > default
+	// Negative values are clamped to 0 so the default branch fires — a
+	// client-supplied value of -1 should not silently cap output at zero.
+	maxTokens := openAIReq.MaxCompletionTokens
+	if maxTokens <= 0 {
+		maxTokens = openAIReq.MaxTokens
+	}
+	if maxTokens <= 0 {
+		maxTokens = defaultAnthropicMaxTokens
+	}
+
 	// Build Anthropic request body as a map
 	anthropicReq := map[string]interface{}{
 		"model":       anthropicModel,
-		"max_tokens":  openAIReq.MaxTokens,
+		"max_tokens":  maxTokens,
 		"temperature": openAIReq.Temperature,
 		"stream":      openAIReq.Stream,
 	}
@@ -256,11 +295,6 @@ func (t *OpenAI2Anthropic) TransformRequest(req *http.Request, body []byte, ctx 
 	}
 	anthropicReq["messages"] = anthroMessages
 
-	// Ensure max_tokens is set
-	if openAIReq.MaxTokens <= 0 {
-		anthropicReq["max_tokens"] = 1024
-	}
-
 	newBody, err := json.Marshal(anthropicReq)
 	if err != nil {
 		return nil, nil, fmt.Errorf("openai2anthropic: failed to marshal request: %w", err)
@@ -367,10 +401,7 @@ func (t *OpenAI2Anthropic) transformJSONResponse(body []byte) ([]byte, error) {
 		}
 	}
 
-	finishReason := anthropicResp.StopReason
-	if finishReason == "end_turn" {
-		finishReason = "stop"
-	}
+	finishReason := mapAnthropicStopReasonToOpenAIFinishReason(anthropicResp.StopReason)
 
 	msg := openAIChatMessage{
 		Role: "assistant",
@@ -542,13 +573,7 @@ func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 			if err := json.Unmarshal(data, &md); err != nil {
 				return false
 			}
-			finishReason := md.Delta.StopReason
-			if finishReason == "end_turn" {
-				finishReason = "stop"
-			}
-			if finishReason == "tool_use" {
-				finishReason = "tool_calls"
-			}
+			finishReason := mapAnthropicStopReasonToOpenAIFinishReason(md.Delta.StopReason)
 			chunk := openAIChunk{
 				ID:      id,
 				Object:  "chat.completion.chunk",
@@ -720,13 +745,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		if err := json.Unmarshal(chunk.Data, &md); err != nil {
 			return chunk, nil
 		}
-		finishReason := md.Delta.StopReason
-		if finishReason == "end_turn" {
-			finishReason = "stop"
-		}
-		if finishReason == "tool_use" {
-			finishReason = "tool_calls"
-		}
+		finishReason := mapAnthropicStopReasonToOpenAIFinishReason(md.Delta.StopReason)
 		outChunk := openAIChunk{
 			ID:      state.ID,
 			Object:  "chat.completion.chunk",
