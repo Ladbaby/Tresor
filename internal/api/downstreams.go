@@ -291,19 +291,23 @@ func fetchModelsByCreds(baseURL, apiKey string, apiFormats []string) ([]string, 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Gemini probe: GET {baseURL}/models?key={apiKey} (or x-goog-api-key header).
+	// Gemini probe: GET {baseURL}{path}?key={apiKey} (or x-goog-api-key header).
 	// Response shape: { "models": [ { "name": "models/gemini-2.5-pro", ... }, ... ] }.
+	// The official Google Generative AI endpoint is {baseURL}/v1beta/models,
+	// but providers occasionally mount it at bare /models. Probe both.
 	if slices.Contains(apiFormats, "gemini") {
-		url := baseURL + "/models"
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return nil, fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("x-goog-api-key", apiKey)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			// Fall through to OpenAI-style probes below.
-		} else {
+		geminiEndpoints := []string{baseURL + "/v1beta/models", baseURL + "/models"}
+		for _, url := range geminiEndpoints {
+			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+			if err != nil {
+				continue
+			}
+			req.Header.Set("x-goog-api-key", apiKey)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				// Try the next probe URL.
+				continue
+			}
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == 401 || resp.StatusCode == 403 {
@@ -328,9 +332,12 @@ func fetchModelsByCreds(baseURL, apiKey string, apiFormats []string) ([]string, 
 						return models, nil
 					}
 				}
-				return nil, fmt.Errorf("gemini /models returned no models in expected format")
+				// Body decoded but no models found — try the next URL.
+				continue
 			}
+			// Non-2xx (e.g. 404): try the next URL.
 		}
+		return nil, fmt.Errorf("gemini /v1beta/models and /models both returned no models in expected format")
 	}
 
 	// Try common model endpoint patterns (OpenAI / Anthropic / generic)
