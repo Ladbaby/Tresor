@@ -64,7 +64,8 @@ aliases:
       - id: alias-gpt4o-anthropic
         downstream_id: anthropic-sonnet
         output_model_id: claude-sonnet-4-20250514
-`
+`,
+		e2ePort, dbPath)
 	apiBase, cleanup := startTresor(t, cfg, e2ePort)
 	defer cleanup()
 
