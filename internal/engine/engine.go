@@ -748,24 +748,39 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 		// Handle streaming response
 		if isEventStream(resp.Header.Get("Content-Type")) {
-			// For streaming responses, wrap the client writer with a
-			// headerDelayWriter when retry-on-empty is enabled. This
-			// delays the HTTP status header commitment until content
-			// is being streamed, so a 502 error can still be sent if
-			// all retries are exhausted. Content bytes pass through
-			// progressively to preserve streaming behavior.
+			// Streaming responses always go through a headerDelayWriter so the
+			// HTTP status stays uncommitted until the first bytes are released.
+			// This is what lets the gateway replace a downstream's 200 with a
+			// real error status when the stream turns out to carry an in-band
+			// error event, and what lets retry-on-empty send a 502 after
+			// exhausting its attempts.
 			//
 			// Reasoning tokens are preserved (streamed to the client),
 			// but reasoning-only streams are detected as empty and
 			// retried transparently by holding the terminal [DONE]
 			// marker until end-of-stream.
-			var targetWriter http.ResponseWriter = cw
-			if e.retryOnEmpty {
-				targetWriter = newHeaderDelayWriter(cw)
-			}
-			isEmpty := e.handleStreamingResponse(targetWriter, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, inputFormat, downstreamFormat)
+			hw := newHeaderDelayWriter(cw)
+			outcome := e.handleStreamingResponse(hw, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, inputFormat, downstreamFormat)
 
-			if isEmpty && resp.StatusCode == http.StatusOK {
+			// An explicit error event is a definitive answer, never an empty
+			// response — do not retry it.
+			if outcome.streamErr != nil {
+				if outcome.committed {
+					// Bytes already reached the client, so the 200 status cannot
+					// be recalled; the error event was passed through verbatim.
+					// Record it as a failure so it does not log as a success.
+					entry.Status = cw.status
+					entry.Error = "upstream stream error"
+					entry.Duration = DurationMs(time.Since(start))
+					e.logger.Record(&entry)
+					log.Printf("upstream stream error after content: %s", outcome.streamErr.Message)
+					return
+				}
+				e.logAndReturnError(cw, &entry, start, &gatewayError{outcome.streamErr.Status, "upstream stream error", outcome.streamErr.Message, "upstream stream error", nil})
+				return
+			}
+
+			if outcome.empty && resp.StatusCode == http.StatusOK {
 				// Empty stream with HTTP 200 — retry if attempts remain
 				if attempt >= maxRetries {
 					entry.Status = cw.status
@@ -877,7 +892,20 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 // requestFormat when the downstream declared no api_formats), and is
 // then confirmed or overridden by on-the-fly detection from the first
 // SSE chunk we actually read.
-func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context, rawReq []byte, reqCT, respCT string, entry *RequestLogEntry, bufferForRetry bool, requestFormat, downstreamFormat string) bool {
+// streamOutcome reports how a streamed response ended.
+type streamOutcome struct {
+	// empty is true when no real content was produced and retry-on-empty is
+	// enabled, signalling HandleProxy to retry the upstream.
+	empty bool
+	// streamErr is non-nil when the downstream delivered a fatal error event
+	// in-band on an otherwise-200 stream.
+	streamErr *StreamError
+	// committed reports whether the HTTP status reached the client. When false,
+	// the caller can still replace it with an error status.
+	committed bool
+}
+
+func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Response, ctx *PipelineContext, pipeline *Pipeline, cancel context.CancelFunc, clientCtx context.Context, rawReq []byte, reqCT, respCT string, entry *RequestLogEntry, bufferForRetry bool, requestFormat, downstreamFormat string) streamOutcome {
 	defer resp.Body.Close()
 	defer cancel()
 
@@ -949,21 +977,44 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		e.recordAndCapture(entry, rawReq, respBody, reqCT, respCT, truncated, requestFormat, downstreamFormat)
 	}
 
-	// finish handles the end-of-stream return. It returns true when the
-	// stream was empty (no real content produced) and retry-on-empty
-	// is enabled, which signals HandleProxy to retry the upstream.
-	// (The legacy bufferedWriter flush for non-200 status is no longer
-	// needed because we write directly to the underlying writer now.)
-	finish := func() bool {
-		return bufferForRetry && !contentProduced
+	// streamErr is set when a fatal in-band error event is seen. Scanning stops
+	// at that point — nothing after the error is meaningful.
+	var streamErr *StreamError
+
+	// releaseHeld and commitStatus are assigned below, once the write helpers
+	// exist. finish() is declared first because the early-exit paths that run
+	// before those helpers are set up also need it.
+	releaseHeld := func() {}
+
+	// finish handles the end-of-stream return.
+	//
+	// It commits the deferred status header only when the caller is done with
+	// the response. When an error was detected or the stream was empty, the
+	// header is left open so HandleProxy can send the provider's error status
+	// (or a 502 after retries are exhausted) instead of the downstream's 200.
+	finish := func() streamOutcome {
+		empty := bufferForRetry && !contentProduced
+		if streamErr == nil && !empty {
+			// Release any bytes still being held (e.g. a stream of nothing but
+			// keep-alives) and commit the downstream's status. For a stream
+			// that already wrote bytes the status was committed on the first
+			// Write; this covers streams that wrote nothing, so a non-200
+			// downstream status is not silently replaced by an implicit 200.
+			releaseHeld()
+			w.Flush()
+		}
+		return streamOutcome{
+			empty:     empty,
+			streamErr: streamErr,
+			committed: w.IsFlushed(),
+		}
 	}
 
 	// Always copy SSE-relevant headers to the underlying writer BEFORE capturing
 	// the status. Go's net/http commits headers at WriteHeader time and ignores
-	// subsequent Header() mutations, so headers must be set first regardless of
-	// whether the response is buffered for retry or not. bufferedWriter.Header()
-	// is a passthrough to the underlying writer, so these Set calls take effect
-	// immediately on the real response writer.
+	// subsequent Header() mutations, so headers must be set first.
+	// headerDelayWriter.Header() is a passthrough to the underlying writer, so
+	// these Set calls take effect immediately on the real response writer.
 	for _, header := range []string{"Content-Type", "Cache-Control", "Connection"} {
 		if v := resp.Header.Get(header); v != "" {
 			w.Header().Set(header, v)
@@ -977,18 +1028,12 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		w.Header().Set("X-Accel-Buffering", "no")
 	}
 
-	// Capture the downstream's status code. When buffering, bufferedWriter.WriteHeader
-	// stores it without writing to the underlying writer (the headers committed above
-	// will be flushed together with the buffered body on first content detection).
-	// When not buffering, this writes the status directly to the client.
+	// Record the downstream's status without committing it. headerDelayWriter
+	// stores it and commits on the first Write (or on Flush), which keeps the
+	// status replaceable until bytes are actually released to the client.
 	w.WriteHeader(resp.StatusCode)
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		log.Printf("Streaming failed: ResponseWriter does not support Flusher")
-		record()
-		return finish()
-	}
+	flusher := http.Flusher(w)
 
 	scanner := bufio.NewScanner(resp.Body)
 	buf := make([]byte, 0, 1024*1024)
@@ -999,6 +1044,18 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 	// clientGone is set when a write to the response fails, indicating the client
 	// has disconnected. Once set, the function stops reading from the downstream.
 	var clientGone bool
+
+	// Until the first substantive SSE event has been vetted, outgoing lines are
+	// held in pendingBuf rather than written, because writing anything commits
+	// the HTTP status. Some providers emit a long run of ":" keep-alive comments
+	// and then a fatal `event: error`; holding those bytes keeps the status
+	// replaceable so the error can surface as a real HTTP error instead of a
+	// 200. The hold is released as soon as one complete non-error event has been
+	// seen, so streaming stays progressive.
+	var pendingBuf bytes.Buffer
+	holding := true
+	const maxPendingBytes = 8 * 1024
+
 	tryWrite := func(p []byte) bool {
 		if clientGone {
 			return false
@@ -1019,24 +1076,69 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		}
 		return true
 	}
-	// writeAndFlush is the standard "send some bytes and flush" pair.
-	writeAndFlush := func(p []byte) bool {
+	// releasePending writes any held bytes and stops holding for good.
+	releasePending := func() bool {
+		holding = false
+		if pendingBuf.Len() == 0 {
+			return true
+		}
+		p := pendingBuf.Bytes()
+		pendingBuf.Reset()
 		if !tryWrite(p) {
 			return false
 		}
 		return tryFlush()
 	}
+	// discardPending drops held bytes without writing them. Used when the held
+	// event turned out to be a fatal error the client should not receive.
+	discardPending := func() {
+		pendingBuf.Reset()
+	}
+	// writeLine sends one raw SSE line, buffering it while the status is still
+	// being held open.
+	writeLine := func(line string) bool {
+		if holding {
+			if pendingBuf.Len()+len(line)+1 <= maxPendingBytes {
+				pendingBuf.WriteString(line)
+				pendingBuf.WriteByte('\n')
+				return true
+			}
+			// Hold buffer full — release so a client behind an intermediary
+			// keeps receiving bytes rather than being starved.
+			if !releasePending() {
+				return false
+			}
+		}
+		if !tryWrite([]byte(line + "\n")) {
+			return false
+		}
+		return tryFlush()
+	}
+	// writeAndFlush is the standard "send some bytes and flush" pair. Any held
+	// bytes are released first so ordering is preserved.
+	writeAndFlush := func(p []byte) bool {
+		if holding && !releasePending() {
+			return false
+		}
+		return tryWrite(p) && tryFlush()
+	}
+	releaseHeld = func() { releasePending() }
 
 	// Passthrough mode: no transformers — write each line immediately with flush
 	if !hasTransformers {
-		// SSE state tracker for usage extraction.
+		// SSE state trackers for usage extraction and error detection.
 		var sseEvent string
+		var sseEventName string
+		// hadData tracks whether the event currently being accumulated carried
+		// any event:/data: lines, distinguishing a real event from a bare
+		// keep-alive comment followed by its blank line.
+		var hadData bool
 		flushSSEEvent := func() {
-			if sseEvent == "" {
-				return
+			if sseEvent != "" {
+				scrapeUsage([]byte(sseEvent))
 			}
-			scrapeUsage([]byte(sseEvent))
 			sseEvent = ""
+			sseEventName = ""
 		}
 		// terminalBuf holds terminal events ([DONE] / message_stop /
 		// response.completed) until end-of-stream, so we can suppress
@@ -1051,10 +1153,7 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			if !terminalEventActive {
 				return
 			}
-			if !clientGone {
-				_, _ = w.Write(terminalBuf.Bytes())
-				SafeFlush(flusher)
-			}
+			writeAndFlush(terminalBuf.Bytes())
 			terminalBuf.Reset()
 			terminalEventActive = false
 			terminalDataLines = nil
@@ -1091,10 +1190,29 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 			// Track simple event boundaries for the cache scraper.
 			if trimmed == "" {
-				// End of an SSE event. If buffering for retry is on,
-				// check whether this event carries real content (excludes
-				// reasoning/thinking). Reasoning events are still streamed
-				// to the client (preserved) but do not flip contentProduced.
+				// End of an SSE event. Check first for a fatal in-band error
+				// event — the downstream said 200 but is reporting a failure.
+				if se, isErr := ParseStreamError(sseEventName, []byte(sseEvent)); isErr {
+					streamErr = se
+					if w.IsFlushed() {
+						// Bytes already went out, so the 200 cannot be recalled.
+						// Pass the error event through so the client's SDK can
+						// surface it, then stop reading.
+						writeLine(line)
+					} else {
+						// Nothing has reached the client yet: suppress the error
+						// event and the held keep-alives so HandleProxy can
+						// answer with the provider's real status instead.
+						discardPending()
+					}
+					flushSSEEvent()
+					record()
+					return finish()
+				}
+				// If buffering for retry is on, check whether this event carries
+				// real content (excludes reasoning/thinking). Reasoning events
+				// are still streamed to the client (preserved) but do not flip
+				// contentProduced.
 				if bufferForRetry {
 					if sseEvent != "" && IsStreamContentLine("data: "+sseEvent, streamFormat) {
 						contentProduced = true
@@ -1116,11 +1234,15 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 					}
 				}
 				flushSSEEvent()
+			} else if strings.HasPrefix(trimmed, "event: ") {
+				sseEventName = strings.TrimPrefix(trimmed, "event: ")
+				hadData = true
 			} else if strings.HasPrefix(trimmed, "data: ") {
 				if sseEvent != "" {
 					sseEvent += "\n"
 				}
 				sseEvent += strings.TrimPrefix(trimmed, "data: ")
+				hadData = true
 			}
 
 			// Write the line. While we're holding a terminal event,
@@ -1130,10 +1252,21 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			if terminalEventActive && bufferForRetry && isDataLineInTerminal(terminalDataLines, line) {
 				continue
 			}
-			if !writeAndFlush([]byte(line + "\n")) {
+			if !writeLine(line) {
 				flushSSEEvent()
 				record()
 				return finish()
+			}
+			// A substantive event completed without being an error, so the bytes
+			// held to keep the status replaceable can be released now. Keep-alive
+			// comments carry no data and do not end the hold — that is what lets
+			// a provider's trailing `event: error` still become a real HTTP error.
+			if trimmed == "" && hadData && holding && !releasePending() {
+				record()
+				return finish()
+			}
+			if trimmed == "" {
+				hadData = false
 			}
 		}
 		// End of stream. If a terminal event is still held and no
@@ -1186,16 +1319,16 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			heldTerminalBytes = nil
 			return
 		}
-		if !tryWrite(heldTerminalBytes) {
-			heldTerminalBytes = nil
-			return
-		}
-		SafeFlush(flusher)
+		writeAndFlush(heldTerminalBytes)
 		heldTerminalBytes = nil
 	}
 	discardHeldTerminal := func() {
 		heldTerminalBytes = nil
 	}
+
+	// errorDetected is set by flushEvent when it sees a fatal in-band error, so
+	// the scan loop knows to stop reading.
+	var errorDetected bool
 
 	flushEvent := func() bool {
 		if len(dataLines) == 0 {
@@ -1215,6 +1348,31 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 		// Combine data lines to get the raw SSE payload
 		rawData := strings.Join(dataLines, "\n")
 		chunk := SSEChunk{EventType: eventLine, Data: []byte(rawData)}
+
+		// Check for a fatal in-band error before running transformers, so a
+		// format translator cannot mangle the error into something
+		// unrecognisable. The downstream said 200 but is reporting a failure.
+		if se, isErr := ParseStreamError(eventLine, []byte(rawData)); isErr {
+			streamErr = se
+			errorDetected = true
+			if w.IsFlushed() {
+				// Bytes already went out, so the 200 cannot be recalled. Pass
+				// the error event through verbatim so the client's SDK can
+				// surface it.
+				var out bytes.Buffer
+				if eventLine != "" {
+					fmt.Fprintf(&out, "event: %s\n", eventLine)
+				}
+				fmt.Fprintf(&out, "data: %s\n\n", rawData)
+				writeAndFlush(out.Bytes())
+			} else {
+				// Nothing has reached the client yet: suppress the error event
+				// and any held bytes so HandleProxy can answer with the
+				// provider's real status instead.
+				discardPending()
+			}
+			return false
+		}
 
 		// Track whether the downstream sent [DONE] so we know if synthetic
 		// termination is needed when the stream ends.
@@ -1302,12 +1460,26 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 
 		if line == "" {
 			// Empty line terminates an SSE event — flush it
+			hadEventData := eventLine != "" || len(dataLines) > 0
 			if !flushEvent() {
+				if errorDetected {
+					// Fatal in-band error: drop any held terminal so the client
+					// does not also receive a completion marker.
+					discardHeldTerminal()
+				}
 				record()
 				return finish()
 			}
 			eventLine = ""
 			dataLines = nil
+			// A substantive event completed without being an error, so the bytes
+			// held to keep the status replaceable can be released now. Keep-alive
+			// comments carry no data and do not end the hold — that is what lets
+			// a provider's trailing `event: error` still become a real HTTP error.
+			if hadEventData && holding && !releasePending() {
+				record()
+				return finish()
+			}
 			continue
 		}
 
@@ -1327,15 +1499,20 @@ func (e *Engine) handleStreamingResponse(w http.ResponseWriter, resp *http.Respo
 			continue
 		}
 
-		// Unknown line type — pass through as-is
-		if !writeAndFlush([]byte(line + "\n")) {
+		// Unknown line type (including ":" keep-alive comments) — pass through
+		// as-is, held while the status is still open.
+		if !writeLine(line) {
 			record()
 			return finish()
 		}
 	}
 
 	// Flush any remaining event (handles responses that don't end with \n\n)
-	flushEvent()
+	if !flushEvent() && errorDetected {
+		discardHeldTerminal()
+		record()
+		return finish()
+	}
 
 	// If the downstream closed the stream without a [DONE] marker and the client
 	// is still connected, send a synthetic one through the pipeline so stream

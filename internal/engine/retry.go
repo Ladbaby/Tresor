@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -169,20 +170,21 @@ func (hw *headerDelayWriter) WriteHeader(status int) {
 	}
 }
 
-// Flush commits the deferred status header to the underlying writer.
-// After Flush, subsequent Write/WriteHeader calls pass through directly.
-// If the writer has not been written to yet, Flush does NOT commit the
-// header (so the upstream can still be retried without locking the
-// status to 200).
+// Flush commits the deferred status header to the underlying writer and then
+// flushes it, so SSE bytes reach the client progressively.
+//
+// The header is only committed once; subsequent calls just flush. Note that a
+// Flush before any Write does commit the status — callers that need to keep the
+// status open (so a non-200 error can still be sent) must not call Flush until
+// they have decided to stream.
 func (hw *headerDelayWriter) Flush() {
-	if hw.flushed {
-		return
+	if !hw.flushed {
+		hw.flushed = true
+		hw.writer.WriteHeader(hw.status)
 	}
-	// Only commit the status if Write was already called (which means
-	// content was streamed). If nothing has been written, hold the
-	// header so a non-200 error can still be sent.
-	hw.flushed = true
-	hw.writer.WriteHeader(hw.status)
+	if f, ok := hw.writer.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // IsFlushed reports whether the status header has been committed.
@@ -428,6 +430,123 @@ func IsStreamContentLine(line string, format string) bool {
 	default:
 		return false
 	}
+}
+
+// ---- In-band stream error detection ----
+
+// StreamError describes a fatal error a downstream delivered in-band on an
+// SSE stream while the HTTP status was 200.
+type StreamError struct {
+	Status  int    // HTTP status to surface to the client
+	Message string // provider-supplied message
+}
+
+// anthropicErrorStatus maps Anthropic's error `type` values to HTTP statuses,
+// used when the payload carries no numeric code.
+var anthropicErrorStatus = map[string]int{
+	"overloaded_error":      529,
+	"rate_limit_error":      http.StatusTooManyRequests,
+	"invalid_request_error": http.StatusBadRequest,
+	"authentication_error":  http.StatusUnauthorized,
+	"permission_error":      http.StatusForbidden,
+	"not_found_error":       http.StatusNotFound,
+	"api_error":             http.StatusInternalServerError,
+}
+
+// streamErrorPayload is a permissive union of the error shapes providers emit.
+// Numeric codes arrive as either a JSON number or a string, so Code fields are
+// json.RawMessage and decoded by errorStatusFromRaw.
+type streamErrorPayload struct {
+	Type    string          `json:"type"`
+	Message string          `json:"message"`
+	Code    json.RawMessage `json:"code"`
+	Status  json.RawMessage `json:"status"`
+	Error   *struct {
+		Type    string          `json:"type"`
+		Message string          `json:"message"`
+		Code    json.RawMessage `json:"code"`
+	} `json:"error"`
+}
+
+// ParseStreamError reports whether an SSE event is a fatal in-band error and,
+// if so, the HTTP status and message to surface.
+//
+// Detection is deliberately conservative: it requires either an `error` event
+// name or a structural error marker in the parsed JSON. Substring matching is
+// avoided so ordinary content mentioning the word "error" is never mistaken
+// for a failure.
+func ParseStreamError(eventType string, data []byte) (*StreamError, bool) {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "[DONE]" {
+		return nil, false
+	}
+
+	var payload streamErrorPayload
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return nil, false
+	}
+
+	isError := eventType == "error" ||
+		eventType == "response.failed" ||
+		payload.Type == "error" ||
+		payload.Error != nil
+	if !isError {
+		return nil, false
+	}
+
+	status := 0
+	errType := payload.Type
+	message := payload.Message
+	if payload.Error != nil {
+		if payload.Error.Type != "" {
+			errType = payload.Error.Type
+		}
+		if payload.Error.Message != "" {
+			message = payload.Error.Message
+		}
+		status = errorStatusFromRaw(payload.Error.Code)
+	}
+	if status == 0 {
+		status = errorStatusFromRaw(payload.Code)
+	}
+	if status == 0 {
+		status = errorStatusFromRaw(payload.Status)
+	}
+	if status == 0 {
+		status = anthropicErrorStatus[errType]
+	}
+	if status == 0 {
+		status = http.StatusBadGateway
+	}
+	if message == "" {
+		message = "upstream returned an error event"
+	}
+
+	return &StreamError{Status: status, Message: message}, true
+}
+
+// errorStatusFromRaw extracts an HTTP status from a JSON value that may be a
+// number or a numeric string. Returns 0 when absent or outside 400-599.
+func errorStatusFromRaw(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var code int
+	if err := json.Unmarshal(raw, &code); err != nil {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return 0
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(s))
+		if err != nil {
+			return 0
+		}
+		code = parsed
+	}
+	if code < 400 || code > 599 {
+		return 0
+	}
+	return code
 }
 
 // ---- Stream format detection ----
