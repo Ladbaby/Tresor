@@ -391,13 +391,12 @@ func IsStreamContentLine(line string, format string) bool {
 
 	case "openai":
 		// OpenAI streaming chunks have a "delta" object with "content" field.
-		// Check for non-null, non-empty content.
+		// Check for non-null, non-empty, non-empty-array content.
 		if strings.Contains(data, `"content"`) {
-			// Exclude null and empty string content
-			if strings.Contains(data, `"content":null`) {
-				return false
-			}
-			if strings.Contains(data, `"content":""`) {
+			// Exclude null, empty string, and empty-array content
+			if strings.Contains(data, `"content":null`) ||
+				strings.Contains(data, `"content":""`) ||
+				strings.Contains(data, `"content":[]`) {
 				return false
 			}
 			return true

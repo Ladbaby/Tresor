@@ -698,9 +698,18 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	if e.retryOnEmpty {
 		maxRetries = retryMaxCount
 	}
-	// downstreamFormat is used for empty-response detection
+	// downstreamFormat is the API format the downstream will actually return.
+	// A multi-format downstream (e.g. llama-swap with [openai, anthropic])
+	// echoes the incoming request's format when it supports it (no
+	// auto-translation), so ApiFormats[0] mislabels the response and breaks
+	// empty-response detection (Anthropic SSE inspected with the OpenAI
+	// parser matches "content":[] as content, never retrying). When the
+	// request format is unknown or not supported, auto-translation rewrites
+	// the request INTO the downstream's format — fall back to ApiFormats[0].
 	downstreamFormat := ""
-	if len(result.ds.ApiFormats) > 0 {
+	if inputFormat != "" && len(result.ds.ApiFormats) > 0 && slices.Contains(result.ds.ApiFormats, inputFormat) {
+		downstreamFormat = inputFormat
+	} else if len(result.ds.ApiFormats) > 0 {
 		downstreamFormat = result.ds.ApiFormats[0]
 	}
 
@@ -1176,19 +1185,11 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 			trimmed := strings.TrimRight(line, "\r")
 			teeLine(trimmed)
 
-			// Confirm streamFormat from the first chunk we see — the
-			// downstream may speak a different format than the input.
-			if streamFormat == "" && bufferForRetry && strings.HasPrefix(trimmed, "data: ") {
-				streamFormat = DetectStreamFormat(SSEChunk{
-					EventType: sseEvent,
-					Data:      []byte(strings.TrimPrefix(trimmed, "data: ")),
-				})
-				if streamFormat == "" {
-					streamFormat = seedFormat
-				}
-			}
-
 			// Track simple event boundaries for the cache scraper.
+			// This block must run BEFORE the on-the-fly format detector
+			// below so that sseEventName holds the current event's
+			// name when the first data: line of that event is being
+			// classified.
 			if trimmed == "" {
 				// End of an SSE event. Check first for a fatal in-band error
 				// event — the downstream said 200 but is reporting a failure.
@@ -1237,12 +1238,40 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 			} else if strings.HasPrefix(trimmed, "event: ") {
 				sseEventName = strings.TrimPrefix(trimmed, "event: ")
 				hadData = true
+
+				// Detect the downstream's actual stream format from the
+				// event name as soon as we see it. The seed is only a
+				// hint — a multi-format downstream (e.g. llama-swap
+				// with [openai, anthropic]) may speak a different format
+				// than ApiFormats[0] suggested, in which case the seed
+				// would mislabel the stream and break empty-response
+				// detection. OpenAI streams have no event names and are
+				// detected via the "choices" payload marker on the first
+				// data: line.
+				if bufferForRetry {
+					if f := DetectStreamFormat(SSEChunk{EventType: sseEventName}); f != "" {
+						streamFormat = f
+					}
+				}
 			} else if strings.HasPrefix(trimmed, "data: ") {
 				if sseEvent != "" {
 					sseEvent += "\n"
 				}
 				sseEvent += strings.TrimPrefix(trimmed, "data: ")
 				hadData = true
+
+				// On the first data: line of a stream, the payload may
+				// carry the format marker that the event name doesn't
+				// (e.g. OpenAI's "choices"). Override the seed when this
+				// is the case.
+				if bufferForRetry {
+					if f := DetectStreamFormat(SSEChunk{
+						EventType: sseEventName,
+						Data:      []byte(strings.TrimPrefix(trimmed, "data: ")),
+					}); f != "" {
+						streamFormat = f
+					}
+				}
 			}
 
 			// Write the line. While we're holding a terminal event,
@@ -1383,6 +1412,22 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		// Look for a usage block on the raw upstream event.
 		scrapeUsage([]byte(rawData))
 
+		// Detect the downstream's actual stream format from the raw
+		// upstream event (pre-transform). The seed is only a hint — the
+		// downstream may speak a different format than ApiFormats[0]
+		// suggested, in which case the seed would mislabel the stream
+		// and break empty-response detection. IsStreamContentLine
+		// classifies raw rawData, so the format must describe the raw
+		// upstream event, not the post-transform output.
+		if bufferForRetry {
+			if f := DetectStreamFormat(SSEChunk{
+				EventType: eventLine,
+				Data:      []byte(rawData),
+			}); f != "" {
+				streamFormat = f
+			}
+		}
+
 		// Run through stream transformers
 		var err error
 		chunk, err = ExecuteStreamResponsePipeline(chunk, ctx, pipeline.StreamResponseSteps)
@@ -1397,16 +1442,7 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		}
 
 		// Detect real content vs reasoning-only.
-		eventHasRealContent := false
-		if bufferForRetry {
-			if streamFormat == "" {
-				streamFormat = DetectStreamFormat(chunk)
-				if streamFormat == "" {
-					streamFormat = seedFormat
-				}
-			}
-			eventHasRealContent = IsStreamContentLine("data: "+rawData, streamFormat)
-		}
+		eventHasRealContent := bufferForRetry && IsStreamContentLine("data: "+rawData, streamFormat)
 
 		// Detect terminal events (held until end-of-stream).
 		isTerminal := bufferForRetry && isTerminalEvent(rawData, streamFormat)

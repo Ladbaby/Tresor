@@ -1466,3 +1466,432 @@ func TestEngine_HandleProxy_RetryOnEmpty_Streaming_PreservesReasoning(t *testing
 		t.Errorf("expected [DONE] terminal marker in body, got %q", bodyStr)
 	}
 }
+
+// ---- regression: Anthropic streaming retry-on-empty over multi-format downstream ----
+
+// anthropicSSEdownstream returns an httptest server that emits a per-attempt
+// Anthropic SSE body. attempts is incremented on every hit so the test can
+// assert a retry happened.
+//
+// sseBodies is indexed by attempt number (0 = first try, 1 = first retry, ...).
+// Each body must be a complete Anthropic SSE stream including the trailing
+// blank line; the helper writes the body verbatim with \n line endings (the
+// engine's SSE scanner strips \r, so this is compatible with the captured
+// .txt files).
+func anthropicSSEdownstream(t *testing.T, attempts *int, sseBodies []string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := 0
+		if attempts != nil {
+			*attempts++
+			idx = *attempts - 1
+		}
+		var body string
+		if idx < len(sseBodies) {
+			body = sseBodies[idx]
+		} else if len(sseBodies) > 0 {
+			body = sseBodies[len(sseBodies)-1]
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(200)
+		flusher, _ := w.(http.Flusher)
+		// Stream with a flush per event so the engine's progressive path is
+		// exercised. Trim the trailing whitespace before splitting so we can
+		// detect the blank-line-between-events separator.
+		body = strings.TrimRight(body, "\r\n")
+		for _, line := range strings.Split(body, "\n") {
+			fmt.Fprint(w, line+"\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+}
+
+// TestEngine_HandleProxy_RetryOnEmpty_Streaming_AnthropicThinkingOnlyRetries
+// is the regression test for the user-reported bug where a multi-format
+// downstream ([openai, anthropic], like the user's "Friday" / llama-swap
+// instance) returned a thinking-only Anthropic SSE stream and the engine
+// never retried.
+//
+// Root cause: HandleProxy used ApiFormats[0] ("openai") as the response
+// format. The streaming handler's on-the-fly detection was gated on the
+// seed being empty and passed the accumulated data payload instead of the
+// event name to DetectStreamFormat, so the wrong seed was never corrected.
+// The OpenAI content classifier naively substring-matches "content", which
+// matches Anthropic's message_start ("content":[]) — flipping
+// contentProduced=true on the first event and aborting retry.
+//
+// Fix: use inputFormat when the downstream supports it (so the seed
+// matches the actual response shape), and have the on-the-fly detector
+// override the seed whenever it recognizes a concrete format.
+func TestEngine_HandleProxy_RetryOnEmpty_Streaming_AnthropicThinkingOnlyRetries(t *testing.T) {
+	s := newTestStore(t)
+
+	// Attempt 1: thinking-only stream (mirrors not_retried_empty_response_1.txt).
+	// Attempt 2: real text_delta content.
+	body1 := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","content":[],"model":"mock","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thinking..."}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":13}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	body2 := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_y","type":"message","role":"assistant","content":[],"model":"mock","usage":{"input_tokens":10,"output_tokens":0}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"recovered"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	var attempts int
+	ts := anthropicSSEdownstream(t, &attempts, []string{body1, body2})
+	defer ts.Close()
+	// Multi-format downstream, like Friday.
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1", "openai", "anthropic")
+	addOutputModelIDs(t, s, "ds1", "mock-anthropic-model")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetRetryOnEmpty(true)
+
+	body := `{"model":"mock-anthropic-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if attempts < 2 {
+		t.Fatalf("expected downstream retried at least once (attempt 1 was thinking-only empty), got %d total attempts", attempts)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	respBody := w.Body.String()
+	if !strings.Contains(respBody, `"text":"recovered"`) {
+		t.Errorf("expected client body to contain retry's recovered text, got %q", respBody)
+	}
+}
+
+// TestEngine_HandleProxy_RetryOnEmpty_Streaming_AnthropicCompletelyEmptyRetries
+// is the regression test for the second captured response
+// (not_retried_empty_response_2.txt) — a completely empty Anthropic stream
+// (just message_start + message_delta + message_stop, no content blocks).
+func TestEngine_HandleProxy_RetryOnEmpty_Streaming_AnthropicCompletelyEmptyRetries(t *testing.T) {
+	s := newTestStore(t)
+
+	body1 := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_z","type":"message","role":"assistant","content":[],"model":"mock","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	body2 := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_w","type":"message","role":"assistant","content":[],"model":"mock","usage":{"input_tokens":10,"output_tokens":0}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	var attempts int
+	ts := anthropicSSEdownstream(t, &attempts, []string{body1, body2})
+	defer ts.Close()
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1", "openai", "anthropic")
+	addOutputModelIDs(t, s, "ds1", "mock-anthropic-model")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetRetryOnEmpty(true)
+
+	body := `{"model":"mock-anthropic-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if attempts < 2 {
+		t.Fatalf("expected downstream retried at least once (attempt 1 was completely empty), got %d total attempts", attempts)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"text":"hi"`) {
+		t.Errorf("expected client body to contain retry's text, got %q", w.Body.String())
+	}
+}
+
+// TestEngine_HandleProxy_RetryOnEmpty_AnthropicNonStreaming_NoSpuriousRetry
+// is the regression test for the non-streaming side of the same root cause.
+// Before the fix, a multi-format [openai, anthropic] downstream returning
+// a real-content Anthropic body ({"content":[{"type":"text",...}]}) had
+// its downstreamFormat computed as "openai", so IsOpenAIChatEmpty saw no
+// "choices" field and reported it as empty — triggering spurious retries
+// (and ultimately a 502) on real content.
+//
+// After the fix, downstreamFormat follows inputFormat when the downstream
+// supports it, so IsAnthropicEmpty is the parser used and real content is
+// recognized as non-empty. The negative case below asserts no retry; the
+// positive case asserts a legitimately-empty Anthropic body still retries.
+func TestEngine_HandleProxy_RetryOnEmpty_AnthropicNonStreaming_NoSpuriousRetry(t *testing.T) {
+	t.Run("real content not spuriously retried", func(t *testing.T) {
+		s := newTestStore(t)
+		var attempts int
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"id":"msg_x","type":"message","role":"assistant","content":[{"type":"text","text":"real answer"}],"model":"mock","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}`)
+		}))
+		defer ts.Close()
+		addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1", "openai", "anthropic")
+		addOutputModelIDs(t, s, "ds1", "mock-anthropic-model")
+
+		eng := New(s)
+		eng.SetRegistry(&mockRegistryImpl{})
+		eng.SetRetryOnEmpty(true)
+
+		body := `{"model":"mock-anthropic-model","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+		w := httptest.NewRecorder()
+		eng.HandleProxy(w, req)
+
+		if attempts != 1 {
+			t.Errorf("expected downstream called once (no spurious retry on real content), got %d", attempts)
+		}
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `"text":"real answer"`) {
+			t.Errorf("expected client body to contain real answer, got %q", w.Body.String())
+		}
+	})
+
+	t.Run("legitimately empty content still retries", func(t *testing.T) {
+		s := newTestStore(t)
+		var attempts int
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if attempts == 1 {
+				fmt.Fprint(w, `{"id":"msg_y","type":"message","role":"assistant","content":[],"model":"mock","usage":{"input_tokens":10,"output_tokens":0}}`)
+			} else {
+				fmt.Fprint(w, `{"id":"msg_z","type":"message","role":"assistant","content":[{"type":"text","text":"recovered"}],"model":"mock","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":1}}`)
+			}
+		}))
+		defer ts.Close()
+		addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1", "openai", "anthropic")
+		addOutputModelIDs(t, s, "ds1", "mock-anthropic-model")
+
+		eng := New(s)
+		eng.SetRegistry(&mockRegistryImpl{})
+		eng.SetRetryOnEmpty(true)
+
+		body := `{"model":"mock-anthropic-model","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+		w := httptest.NewRecorder()
+		eng.HandleProxy(w, req)
+
+		if attempts != 2 {
+			t.Errorf("expected downstream retried once (empty Anthropic body), got %d", attempts)
+		}
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `"text":"recovered"`) {
+			t.Errorf("expected client body to contain retry's text, got %q", w.Body.String())
+		}
+	})
+}
+
+// TestIsStreamContentLine_AnthropicEmptyStreamEvents pins the unit-level
+// classification for every event shape that appears in the user's captured
+// thinking-only and empty Anthropic streams. With streamFormat="anthropic"
+// (post-fix), none of these events are content, so the engine's
+// contentProduced stays false and retry fires.
+func TestIsStreamContentLine_AnthropicEmptyStreamEvents(t *testing.T) {
+	events := []struct {
+		name string
+		line string
+	}{
+		{"message_start", `data: {"type":"message_start","message":{"content":[],"usage":{"output_tokens":0}}}`},
+		{"content_block_start_thinking", `data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`},
+		{"thinking_delta", `data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"pondering"}}`},
+		{"signature_delta", `data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}}`},
+		{"content_block_stop", `data: {"type":"content_block_stop","index":0}`},
+		{"message_delta", `data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":13}}`},
+		{"message_stop", `data: {"type":"message_stop"}`},
+	}
+	for _, e := range events {
+		t.Run(e.name, func(t *testing.T) {
+			if IsStreamContentLine(e.line, "anthropic") {
+				t.Errorf("Anthropic event %q should be classified as empty content", e.name)
+			}
+		})
+	}
+
+	// Sanity: real text_delta IS content, confirming the classifier works.
+	if !IsStreamContentLine(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`, "anthropic") {
+		t.Error("Anthropic text_delta must be classified as content")
+	}
+
+	// And the terminal events (message_delta, message_stop) ARE recognized
+	// as terminal under the anthropic format, so the engine holds them
+	// until end-of-stream and can suppress them when retrying.
+	terminalEvents := []string{
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+		`data: {"type":"message_stop"}`,
+	}
+	for _, d := range terminalEvents {
+		if !isTerminalEvent(d, "anthropic") {
+			t.Errorf("Anthropic terminal event must be recognized, got %q", d)
+		}
+	}
+}
+
+// TestIsStreamContentLine_OpenAIEmptyArrayContent pins the IsStreamContentLine
+// defensive hardening: an OpenAI chunk carrying `"content":[]` (an
+// empty-array content, sometimes emitted as a placeholder) must NOT be
+// classified as content. Before this fix, only "content":null and
+// "content":"" were excluded, so an empty-array content could still pass
+// the substring gate and incorrectly flip contentProduced=true.
+func TestIsStreamContentLine_OpenAIEmptyArrayContent(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{name: "empty array content not content", line: `data: {"choices":[{"delta":{"content":[]}}]}`, want: false},
+		{name: "null content not content", line: `data: {"choices":[{"delta":{"content":null}}]}`, want: false},
+		{name: "empty string content not content", line: `data: {"choices":[{"delta":{"content":""}}]}`, want: false},
+		{name: "non-empty content IS content", line: `data: {"choices":[{"delta":{"content":"hi"}}]}`, want: true},
+		{name: "array with one empty string IS content (defensive: only literal [] excluded)", line: `data: {"choices":[{"delta":{"content":[""]}}]}`, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsStreamContentLine(tt.line, "openai"); got != tt.want {
+				t.Errorf("IsStreamContentLine(%q, openai) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEngine_HandleProxy_RetryOnEmpty_Streaming_AnthropicOnOpenAISeededDownstream
+// exercises the on-the-fly detector branch (Fix B) independently of Fix A:
+// a downstream whose declared api_formats=[openai] returns Anthropic SSE.
+// Fix A cannot help here because inputFormat="anthropic" is NOT in
+// api_formats, so the seed stays "openai". Without Fix B the OpenAI
+// substring classifier would match "content" in message_start and abort
+// retry; Fix B's detection must recognize the Anthropic event names and
+// override the seed so the Anthropic classifier runs.
+func TestEngine_HandleProxy_RetryOnEmpty_Streaming_AnthropicOnOpenAISeededDownstream(t *testing.T) {
+	s := newTestStore(t)
+
+	body1 := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_a","type":"message","role":"assistant","content":[],"model":"mock","usage":{"input_tokens":10,"output_tokens":0}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ponder"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	body2 := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_b","type":"message","role":"assistant","content":[],"model":"mock","usage":{"input_tokens":10,"output_tokens":0}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"recovered"}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	var attempts int
+	ts := anthropicSSEdownstream(t, &attempts, []string{body1, body2})
+	defer ts.Close()
+	// OpenAI-only declaration: Fix A's inputFormat branch does NOT fire,
+	// so the seed is "openai" and only Fix B can save us.
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1", "openai")
+	addOutputModelIDs(t, s, "ds1", "mock-anthropic-model")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetRetryOnEmpty(true)
+
+	body := `{"model":"mock-anthropic-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if attempts < 2 {
+		t.Fatalf("expected downstream retried at least once (Fix B should override 'openai' seed), got %d total attempts", attempts)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"text":"recovered"`) {
+		t.Errorf("expected client body to contain retry's text, got %q", w.Body.String())
+	}
+}
