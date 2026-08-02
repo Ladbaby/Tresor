@@ -3792,12 +3792,14 @@ function connectLogStream() {
         let entry;
         try { entry = JSON.parse(e.data); } catch { return; }
         if (logEntries.some(e2 => e2.id === entry.id)) return;
-        // ponytail: unshift preserves recency; one-time race after a long
-        // disconnect may put an older entry above newer ones for one slot.
-        logEntries.unshift(entry);
-        if (logEntries.length > 500) logEntries.pop();
-        if (logPaused) return;
-        prependLogEntry(entry, true);
+        // Insert newest-first by id: SSE replay batches arrive newest-first,
+        // so a blind unshift would reverse the batch (oldest ends up on top).
+        let idx = logEntries.findIndex(e2 => e2.id < entry.id);
+        if (idx === -1) idx = logEntries.length;
+        logEntries.splice(idx, 0, entry);
+        if (logEntries.length > 500) logEntries.pop(); // drop oldest
+        if (logPaused) return; // paused: array-only insert (unchanged behavior)
+        insertLogEntry(entry, idx, true);
     });
 
     logSSE.addEventListener('config', function (e) {
@@ -4024,14 +4026,15 @@ function buildLogEntry(entry, isNew) {
 }
 
 /**
- * Prepend a log entry (newest at top).
+ * Insert a log entry into the stream at position idx (newest first).
+ * Assumes logEntries is already updated and mirrors the DOM.
  */
-function prependLogEntry(entry, isNew) {
+function insertLogEntry(entry, idx, isNew) {
     const container = document.getElementById('logs-stream');
     if (!container) return;
 
     const div = buildLogEntry(entry, isNew);
-    if (container.firstChild) container.insertBefore(div, container.firstChild);
+    if (idx < container.children.length) container.insertBefore(div, container.children[idx]);
     else container.appendChild(div);
 
     while (container.children.length > 500) container.removeChild(container.lastChild);
