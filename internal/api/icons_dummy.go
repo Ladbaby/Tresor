@@ -15,11 +15,13 @@ package api
 const defaultIconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="3.2"/></svg>`
 
 // DefaultIcon returns the generic fallback icon bytes + content type. Used by
-// handleIcon when the fetcher's underlying CDN request fails (network error,
-// 5xx, etc.) so the browser keeps a filled <img> slot instead of hiding every
-// model icon during a transient outage. For the more common "no slug matched"
-// path, handleIcon returns 404 directly so the browser's onerror handler hides
-// the placeholder — see internal/api/web/app.js::modelIconHTML.
+// handleIcon in two cases:
+//   - The fetcher's pattern table and first-segment fallback produced no
+//     candidate slug present on the CDN (custom providers like "Friday" or
+//     "Proxmox" that aren't in @lobehub/icons-static-svg).
+//   - The fetcher's CDN request failed (network error, 5xx, etc.).
+// In either case the browser keeps a filled <img> slot instead of seeing a
+// 404 + onerror=hide chain that would visually delete model rows.
 func DefaultIcon() ([]byte, string) {
 	return []byte(defaultIconSVG), "image/svg+xml"
 }

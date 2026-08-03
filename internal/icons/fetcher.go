@@ -253,8 +253,10 @@ func (f *Fetcher) Icon(modelID string) ([]byte, string, error) {
 		}
 		candidates = filtered
 		if len(candidates) == 0 {
-			// Index says none of these slugs exist on the CDN. Quietly
-			// return no-icon; the HTTP handler will serve the dummy.
+			// Index says none of these slugs exist on the CDN. Return no
+			// data so handleIcon can substitute the generic dummy icon
+			// (keeping the <img> slot filled) instead of letting the
+			// browser fall through to onerror=hide.
 			return nil, "", nil
 		}
 	} else if f.index != nil {

@@ -214,9 +214,11 @@ let cachedPlugins = null;
 // ---- Model icon helper ----
 // Returns an <img> tag pointing at /api/icons/{modelID}. The daemon looks up
 // the model name against its pattern table, lazily fetches the matching SVG
-// from a public CDN on first miss, and serves it back. If the model doesn't
-// match any pattern the endpoint returns 404 and the onerror handler hides
-// the broken image — so it's safe to call for any model ID.
+// from a public CDN on first miss, and serves it back. When no pattern
+// matches (e.g. custom provider names not in the LobeHub icon catalog) the
+// endpoint returns the generic dummy SVG, so the <img> always renders a
+// recognizable glyph. The onerror=hide is kept as a safety net for the
+// edge case where the daemon itself is unreachable.
 function modelIconHTML(modelID) {
     if (!modelID) return '';
     return `<img class="model-icon" src="/api/icons/${encodeURIComponent(modelID)}" alt="" loading="lazy" onerror="this.style.display='none'">`;
@@ -2126,8 +2128,10 @@ function populateOutputModelSelect(containerEl, downstreamId, excludeModels) {
         cb.style.display = 'none';
         tag.appendChild(cb);
 
-        // Render the provider's model icon (CDN-backed SVG), hidden gracefully
-        // on miss via onerror in modelIconHTML.
+        // Render the provider's model icon (CDN-backed SVG with a generic
+        // dummy fallback when no slug matches). The onerror=hide in
+        // modelIconHTML is a safety net for the daemon-unreachable edge
+        // case, not the normal "no match" path.
         const iconWrap = document.createElement('span');
         iconWrap.className = 'model-tag-model-icon';
         iconWrap.innerHTML = modelIconHTML(m);

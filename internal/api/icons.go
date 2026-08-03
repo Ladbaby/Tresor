@@ -16,8 +16,9 @@ import (
 //
 // Response:
 //   200 image/svg+xml  — bytes from the cache (lazily fetched on first miss)
-//                        or the generic dummy icon when no slug matches and
-//                        the CDN has no file at the candidate slugs.
+//                        or the generic dummy icon when no slug matches /
+//                        the CDN is unreachable. The slot is never blank; the
+//                        browser never has to substitute its own fallback.
 func (r *Router) handleIcon(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -46,24 +47,16 @@ func (r *Router) handleIcon(w http.ResponseWriter, req *http.Request) {
 	}
 
 	data, ct, err := r.iconFetcher.Icon(modelID)
-	if len(data) == 0 {
-		// "No pattern matched" — every candidate slug was absent from the
-		// CDN index. Return 404 so the browser's <img onerror> hides the
-		// broken image instead of substituting a generic placeholder the
-		// user can't tell apart from a real provider icon.
+	if len(data) == 0 || err != nil {
+		// Either no pattern matched (every candidate slug was absent from
+		// the CDN index) or the fetch failed (network error, 5xx). Both
+		// states should yield a filled <img> slot, so fall back to the
+		// generic dummy icon instead of 404-ing. The dummy is monochrome
+		// enough to be visually distinguishable from a real provider
+		// icon while still keeping the row's leading glyph consistent.
 		if err != nil {
-			// Should not happen together with len(data)==0 from the fetcher
-			// today, but log defensively if a future refactor couples them.
-			log.Printf("icons: no match for %q: %v", modelID, err)
+			log.Printf("icons: fetch failed for %q: %v", modelID, err)
 		}
-		http.NotFound(w, req)
-		return
-	}
-	if err != nil {
-		// Fetch failed (CDN outage, network error). Fall back to the generic
-		// dummy icon so the <img> slot stays filled instead of cascading
-		// through the onerror=hide chain on every model in the list.
-		log.Printf("icons: fetch failed for %q: %v", modelID, err)
 		data, ct = DefaultIcon()
 		// Shorter max-age than real icons: the dummy is branding-generic and
 		// may be replaced with a custom art asset at any release boundary.
