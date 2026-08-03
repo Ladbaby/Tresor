@@ -1257,7 +1257,13 @@ function showFetchModelsPopup(dsId, modelIds) {
                     }
                     setAddedUI();
                     // Reflect the new chip in the detail pane if it's still selected.
+                    // NOTE: _currentDownstream may be a DIFFERENT object than the
+                    // cache entry — loadAliasGroups / fetchDownstreams / etc.
+                    // replace cachedDownstreams with fresh arrays at startup, so
+                    // _currentDownstream can point at an older copy. Sync it
+                    // explicitly from the server response before re-rendering.
                     if (_currentDownstream && _currentDownstream.id === dsId) {
+                        _currentDownstream.output_model_ids = (updated && updated.output_model_ids) || (_currentDownstream.output_model_ids || []);
                         renderDownstreamDetail(_currentDownstream);
                         selectSidebarItem(dsId);
                     }
@@ -1361,10 +1367,29 @@ function formatSchema(schema) {
 }
 
 // ---- Modal close handlers ----
+function onModalHidden(modal) {
+    if (!modal) return;
+    if (modal.id === 'fetch-models-modal') {
+        // After closing the fetch-models popup, refresh any open alias
+        // modals so their model pickers reflect the freshly-added model
+        // IDs. Without this, the alias user has to reload the page.
+        loadDownstreamsForAliasSelect().then(refreshOpenAliasModals);
+    } else if (modal.id === 'alias-modal' || modal.id === 'new-group-modal') {
+        // Drop tracking entries for this modal so we don't refresh a
+        // closed dialog. Collect first to avoid mutating-while-iterating.
+        const toRemove = [];
+        for (const state of _openAliasModals) {
+            if (state.modalId === modal.id) toRemove.push(state);
+        }
+        for (const state of toRemove) _openAliasModals.delete(state);
+    }
+}
+
 document.querySelectorAll('.modal .close').forEach(btn => {
     btn.addEventListener('click', () => {
         const modal = btn.closest('.modal');
         cleanupModal(modal);
+        onModalHidden(modal);
         modal.classList.add('hidden');
     });
 });
@@ -1374,6 +1399,7 @@ document.querySelectorAll('.modal').forEach(m => {
     m.addEventListener('click', (e) => {
         if (e.target === m) {
             cleanupModal(m);
+            onModalHidden(m);
             m.classList.add('hidden');
         }
     });
@@ -1533,14 +1559,58 @@ function shortPipeline(config) {
 
 // ---- Aliases ----
 
+/**
+ * Fetch the downstream list used by alias-tab <select>s.
+ *
+ * Always hits the API — alias modals must reflect the latest
+ * output_model_ids added via the Downstreams tab's "Fetch Models" popup
+ * (e.g. a freshly added model should appear in the tag picker the next
+ * time the alias option modal is opened).
+ */
 async function loadDownstreamsForAliasSelect() {
-    if (cachedDownstreams) return cachedDownstreams;
     try {
         cachedDownstreams = await api('/downstreams');
     } catch {
-        cachedDownstreams = [];
+        cachedDownstreams = cachedDownstreams || [];
     }
     return cachedDownstreams;
+}
+
+/**
+ * Track currently-open alias modals so external actions (e.g. closing the
+ * fetch-models popup after adding new models) can refresh their pickers.
+ * Each entry: { modalId, downstreamId, outputContainerId, excludeModels }
+ * (excludeModels is captured at open time and re-applied on refresh).
+ */
+const _openAliasModals = new Set();
+
+/**
+ * Refresh any open alias modals: re-populate the downstream <select> and
+ * model tag picker so newly-added models (e.g. just added via the
+ * Downstreams tab's "Fetch Models" popup) appear immediately.
+ */
+function refreshOpenAliasModals() {
+    for (const state of _openAliasModals) {
+        const modal = document.getElementById(state.modalId);
+        if (!modal || modal.classList.contains('hidden')) {
+            _openAliasModals.delete(state);
+            continue;
+        }
+        const selectEl = modal.querySelector('select[id$="-downstream"]');
+        if (selectEl) {
+            populateDownstreamSelect(selectEl);
+            // Preserve the user's current selection if still valid
+            if (state.downstreamId && Array.from(selectEl.options).some(o => o.value === state.downstreamId)) {
+                selectEl.value = state.downstreamId;
+            } else {
+                state.downstreamId = selectEl.value || null;
+            }
+        }
+        const outputContainer = modal.querySelector('.model-multi-select');
+        if (outputContainer && state.downstreamId) {
+            populateOutputModelSelect(outputContainer, state.downstreamId, state.excludeModels);
+        }
+    }
 }
 
 // Populate downstream <select> elements from cache
@@ -2131,7 +2201,14 @@ async function openAliasOptionModal(inputModelId) {
 
     // Wire up downstream change handler to populate models
     const downstreamSelect = document.getElementById('alias-downstream');
+    const aliasModalState = {
+        modalId: 'alias-modal',
+        downstreamId: downstreamSelect.value || null,
+        excludeModels: excludeModels,
+    };
+    _openAliasModals.add(aliasModalState);
     downstreamSelect.onchange = () => {
+        aliasModalState.downstreamId = downstreamSelect.value || null;
         populateOutputModelSelect(outputContainer, downstreamSelect.value, excludeModels);
     };
 
@@ -2193,13 +2270,21 @@ document.getElementById('btn-new-alias-group').addEventListener('click', async (
 
     // Wire up downstream change handler to populate models
     const downstreamSelect = document.getElementById('new-group-downstream');
+    const newGroupState = {
+        modalId: 'new-group-modal',
+        downstreamId: downstreamSelect.value || null,
+        excludeModels: [],
+    };
+    _openAliasModals.add(newGroupState);
     downstreamSelect.onchange = () => {
+        newGroupState.downstreamId = downstreamSelect.value || null;
         populateOutputModelSelect(outputContainer, downstreamSelect.value);
     };
 
     // Reset fields
     document.getElementById('new-group-input-model').value = '';
     document.getElementById('new-group-is-regex').checked = false;
+
     document.getElementById('new-group-modal').classList.remove('hidden');
 });
 
