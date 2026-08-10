@@ -316,6 +316,15 @@ async function populateRuleMatchModels(containerEl, selectedModels) {
         cb.checked = selSet.has(m);
         tag.appendChild(cb);
 
+        // Render the provider's model icon (CDN-backed SVG with a generic
+        // dummy fallback when no slug matches). The onerror=hide in
+        // modelIconHTML is a safety net for the daemon-unreachable edge
+        // case, not the normal "no match" path.
+        const iconWrap = document.createElement('span');
+        iconWrap.className = 'model-tag-model-icon';
+        iconWrap.innerHTML = modelIconHTML(m);
+        tag.appendChild(iconWrap);
+
         const icon = document.createElement('span');
         icon.className = 'model-tag-icon';
         icon.textContent = cb.checked ? '☑' : '☐';
@@ -732,6 +741,17 @@ function populateRuleMatchDownstreams(containerEl, selectedIds) {
         cb.style.display = 'none';
         cb.checked = sel.includes(d.id);
         tag.appendChild(cb);
+
+        // Render the provider icon (CDN-backed SVG with a generic dummy
+        // fallback when no slug matches). The lookup key is the
+        // downstream's display name — same convention used by the
+        // downstreams sidebar and the alias option card. The onerror=hide
+        // in modelIconHTML is a safety net for the daemon-unreachable
+        // edge case, not the normal "no match" path.
+        const iconWrap = document.createElement('span');
+        iconWrap.className = 'model-tag-model-icon';
+        iconWrap.innerHTML = modelIconHTML(d.name);
+        tag.appendChild(iconWrap);
 
         const icon = document.createElement('span');
         icon.className = 'model-tag-icon';
