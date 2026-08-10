@@ -233,20 +233,29 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 }
 
 // ExtractClientIP returns the client IP address for rate limiting.
-// It strips the port from RemoteAddr and trusts X-Forwarded-For/X-Real-IP
-// only when the direct connection is from localhost (reverse proxy scenario).
+// It strips the port from RemoteAddr and trusts forwarded headers only
+// when the immediate peer is a local reverse proxy (loopback), i.e.
+// the reverse-proxy scenario.
+//
+// When the peer is loopback, X-Real-IP is preferred over X-Forwarded-For:
+// proxies such as nginx set X-Real-IP to $remote_addr (the true client IP,
+// which the client cannot spoof), whereas $proxy_add_x_forwarded_for
+// appends the client's own X-Forwarded-For value, so its first element can
+// be client-supplied. X-Forwarded-For is used as a fallback for proxies
+// that only set that header.
 func ExtractClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
-	// If connected via localhost, trust forwarded headers
-	if host == "127.0.0.1" || host == "::1" {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			return strings.Split(xff, ",")[0]
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	// If connected via loopback, trust forwarded headers.
+	if ip != nil && ip.IsLoopback() {
+		if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
+			return xrip
 		}
-		if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
-			return strings.TrimSpace(xrip)
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			return strings.TrimSpace(strings.Split(xff, ",")[0])
 		}
 	}
 	return host

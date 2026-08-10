@@ -437,8 +437,8 @@ func TestEngine_HandleProxy_DownstreamNameIsCaptured(t *testing.T) {
 
 // TestEngine_HandleProxy_ClientIPIsCaptured verifies that the client's IP
 // (port-stripped) is captured in the inspect entry so the inspector
-// header can show who hit the gateway. The engine pulls from
-// r.RemoteAddr directly — no X-Forwarded-For trust.
+// header can show who hit the gateway. With no forwarded headers present,
+// the engine falls back to r.RemoteAddr.
 func TestEngine_HandleProxy_ClientIPIsCaptured(t *testing.T) {
 	s := newTestStore(t)
 	ts := newTestDownstream(t, 200, `{"choices":[{"message":{"content":"hi"}}]}`, nil)
@@ -519,6 +519,55 @@ func TestEngine_HandleProxy_ClientIP_IPv6(t *testing.T) {
 	}
 	if captured.ClientIP != "2001:db8::1" {
 		t.Fatalf("expected client ip '2001:db8::1', got %q", captured.ClientIP)
+	}
+}
+
+// TestEngine_HandleProxy_ClientIP_TrustsForwardedHeader covers the
+// reverse-proxy scenario: the gateway sits behind nginx, so the immediate
+// peer is loopback and the true client IP arrives in X-Real-IP /
+// X-Forwarded-For. The inspect entry must show the forwarded IP, not
+// 127.0.0.1. X-Real-IP wins when both are present (nginx sets it to
+// $remote_addr, which the client cannot spoof).
+func TestEngine_HandleProxy_ClientIP_TrustsForwardedHeader(t *testing.T) {
+	s := newTestStore(t)
+	ts := newTestDownstream(t, 200, `{"choices":[{"message":{"content":"hi"}}]}`, nil)
+	defer ts.Close()
+	addDownstream(t, s, "anthropic-prod", "Anthropic Production", ts.URL, "key-ds1")
+	addOutputModelIDs(t, s, "anthropic-prod", "gpt-4o")
+
+	eng := New(s)
+	store2 := inspect.New(10)
+	eng.SetPayloadStore(store2)
+
+	// Simulate nginx: peer is loopback, client IP forwarded via headers.
+	// Both X-Real-IP and X-Forwarded-For are present; X-Real-IP is the
+	// authoritative one ($remote_addr), so it must be reported.
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:52340"
+	req.Header.Set("X-Forwarded-For", "6.6.6.6, 203.0.113.50")
+	req.Header.Set("X-Real-IP", "203.0.113.50")
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Result().StatusCode)
+	}
+
+	var capturedID int
+	for i := 0; i < 100; i++ {
+		if _, ok := store2.Get(i); ok {
+			capturedID = i
+			break
+		}
+	}
+	captured, ok := store2.Get(capturedID)
+	if !ok {
+		t.Fatalf("no captured entry found")
+	}
+	if captured.ClientIP != "203.0.113.50" {
+		t.Fatalf("expected forwarded client ip '203.0.113.50', got %q", captured.ClientIP)
 	}
 }
 

@@ -363,12 +363,20 @@ func TestExtractClientIP_RemoteAddrNormalization(t *testing.T) {
 		t.Errorf("non-localhost: got %q, want %q", got, "10.0.0.1")
 	}
 
-	// Localhost with X-Forwarded-For: use first IP
+	// Localhost with X-Forwarded-For: use first IP (trimmed)
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set("X-Forwarded-For", "203.0.113.50, 70.1.2.3")
 	if got := ExtractClientIP(req); got != "203.0.113.50" {
 		t.Errorf("localhost XFF: got %q, want %q", got, "203.0.113.50")
+	}
+
+	// Localhost with whitespace around the X-Forwarded-For first element
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Forwarded-For", "  203.0.113.50  , 70.1.2.3")
+	if got := ExtractClientIP(req); got != "203.0.113.50" {
+		t.Errorf("localhost XFF trimmed: got %q, want %q", got, "203.0.113.50")
 	}
 
 	// Localhost with X-Real-IP
@@ -379,12 +387,32 @@ func TestExtractClientIP_RemoteAddrNormalization(t *testing.T) {
 		t.Errorf("localhost XRI: got %q, want %q", got, "203.0.113.50")
 	}
 
+	// Both headers present: X-Real-IP wins. nginx sets X-Real-IP to
+	// $remote_addr (unspoofable), while $proxy_add_x_forwarded_for appends
+	// the client's own X-Forwarded-For value, so its first element can be
+	// client-supplied. This mirrors the gateway's nginx reverse-proxy setup.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Forwarded-For", "6.6.6.6, 203.0.113.50")
+	req.Header.Set("X-Real-IP", "203.0.113.50")
+	if got := ExtractClientIP(req); got != "203.0.113.50" {
+		t.Errorf("localhost XFF+XRI: got %q, want X-Real-IP %q", got, "203.0.113.50")
+	}
+
 	// IPv6 localhost
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "[::1]:54321"
 	req.Header.Set("X-Forwarded-For", "203.0.113.50")
 	if got := ExtractClientIP(req); got != "203.0.113.50" {
 		t.Errorf("ipv6 localhost XFF: got %q, want %q", got, "203.0.113.50")
+	}
+
+	// IPv4-mapped IPv6 loopback is also a trusted reverse-proxy peer
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "[::ffff:127.0.0.1]:54321"
+	req.Header.Set("X-Real-IP", "203.0.113.50")
+	if got := ExtractClientIP(req); got != "203.0.113.50" {
+		t.Errorf("mapped localhost XRI: got %q, want %q", got, "203.0.113.50")
 	}
 
 	// No forwarded headers, non-localhost
