@@ -117,8 +117,13 @@ aliases:
 	if cfg.Rules[0].ID != "rule-1" {
 		t.Fatalf("expected rule id rule-1, got %q", cfg.Rules[0].ID)
 	}
-	if cfg.Rules[0].PatternModel != "gpt-4o" {
-		t.Fatalf("expected pattern_model gpt-4o, got %q", cfg.Rules[0].PatternModel)
+	// Legacy pattern_model is promoted to pattern_models during sanitization.
+	// After sanitization, pattern_model is cleared and pattern_models holds the value.
+	if len(cfg.Rules[0].PatternModels) != 1 || cfg.Rules[0].PatternModels[0] != "gpt-4o" {
+		t.Fatalf("expected pattern_models [gpt-4o], got %v", cfg.Rules[0].PatternModels)
+	}
+	if cfg.Rules[0].PatternModel != "" {
+		t.Fatalf("expected pattern_model to be cleared after sanitization, got %q", cfg.Rules[0].PatternModel)
 	}
 	if !cfg.Rules[0].IsEnabled {
 		t.Fatal("expected rule to be enabled")

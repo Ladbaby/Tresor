@@ -52,20 +52,18 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	// --- Rules ---
 	var rules []config.RuleCfg
 	rows, err = s.db.Query(
-		`SELECT id, name, pattern_path, COALESCE(pattern_model,''),
-			pipeline_config, is_enabled,
+		`SELECT id, name, pattern_path, pipeline_config, is_enabled,
 			COALESCE(match_format,'[]'), COALESCE(match_downstream_format,'[]'),
-			COALESCE(match_downstreams,'[]')
+			COALESCE(match_downstreams,'[]'), COALESCE(pattern_models,'[]')
 		 FROM rules ORDER BY created_at`)
 	if err != nil {
 		return fmt.Errorf("query rules: %w", err)
 	}
 	for rows.Next() {
 		var r config.RuleCfg
-		var pipelineJSON, mfJSON, mdfJSON, mdsJSON string
+		var pipelineJSON, mfJSON, mdfJSON, mdsJSON, pmJSON string
 		var enabled int
-		if err := rows.Scan(&r.ID, &r.Name, &r.PatternPath, &r.PatternModel,
-			&pipelineJSON, &enabled, &mfJSON, &mdfJSON, &mdsJSON); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.PatternPath, &pipelineJSON, &enabled, &mfJSON, &mdfJSON, &mdsJSON, &pmJSON); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan rule: %w", err)
 		}
@@ -83,8 +81,8 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 			r.PipelineConfig = []config.PipelineStep{}
 		}
 
-		// Parse format/downstream array fields
-		for _, col := range []string{mfJSON, mdfJSON, mdsJSON} {
+		// Parse format/downstream/pattern_models array fields
+		for _, col := range []string{mfJSON, mdfJSON, mdsJSON, pmJSON} {
 			if col == "" || col == "[]" {
 				continue
 			}
@@ -98,8 +96,10 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 				r.MatchFormat = arr
 			} else if col == mdfJSON {
 				r.MatchDownstreamFmt = arr
-			} else {
+			} else if col == mdsJSON {
 				r.MatchDownstreams = arr
+			} else {
+				r.PatternModels = arr
 			}
 		}
 		if r.MatchFormat == nil {
@@ -110,6 +110,9 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 		}
 		if r.MatchDownstreams == nil {
 			r.MatchDownstreams = []string{}
+		}
+		if r.PatternModels == nil {
+			r.PatternModels = []string{}
 		}
 
 		rules = append(rules, r)

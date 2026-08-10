@@ -31,13 +31,13 @@ type Store struct {
 
 // cachedRegexAlias holds a single cached active regex alias.
 type cachedRegexAlias struct {
-	ID             string
-	InputModelID   string
-	DownstreamID   string
-	OutputModelID  string
-	IsRegex        bool
-	GroupOrder     int
-	CreatedAt      time.Time
+	ID              string
+	InputModelID    string
+	DownstreamID    string
+	OutputModelID   string
+	IsRegex         bool
+	GroupOrder      int
+	CreatedAt       time.Time
 	CompiledPattern *regexp.Regexp
 	// AnnouncedNames are concrete model IDs announced by this regex group.
 	// These are surfaced in /v1/models listings and resolved as exact matches
@@ -125,15 +125,15 @@ func (s *Store) populateRegexCache() ([]cachedRegexAlias, error) {
 			}
 		}
 		entries = append(entries, cachedRegexAlias{
-			ID:             id,
-			InputModelID:   inputModelID,
-			DownstreamID:   downstreamID,
-			OutputModelID:  outputModelID,
-			IsRegex:        isRegex == 1,
-			GroupOrder:     groupOrder,
-			CreatedAt:      createdAt,
+			ID:              id,
+			InputModelID:    inputModelID,
+			DownstreamID:    downstreamID,
+			OutputModelID:   outputModelID,
+			IsRegex:         isRegex == 1,
+			GroupOrder:      groupOrder,
+			CreatedAt:       createdAt,
 			CompiledPattern: re,
-			AnnouncedNames: announcedNames,
+			AnnouncedNames:  announcedNames,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -165,14 +165,14 @@ func (s *Store) findActiveAliasRegexCached(model string) (*Alias, error) {
 	for _, e := range entries {
 		if e.CompiledPattern.MatchString(model) {
 			return &Alias{
-				ID:           e.ID,
-				InputModelID: e.InputModelID,
-				DownstreamID: e.DownstreamID,
-				OutputModelID: e.OutputModelID,
-				IsActive:     true,
-				IsRegex:      e.IsRegex,
-				GroupOrder:   e.GroupOrder,
-				CreatedAt:    e.CreatedAt,
+				ID:             e.ID,
+				InputModelID:   e.InputModelID,
+				DownstreamID:   e.DownstreamID,
+				OutputModelID:  e.OutputModelID,
+				IsActive:       true,
+				IsRegex:        e.IsRegex,
+				GroupOrder:     e.GroupOrder,
+				CreatedAt:      e.CreatedAt,
 				AnnouncedNames: e.AnnouncedNames,
 			}, nil
 		}
@@ -330,6 +330,62 @@ func (s *Store) migrate() error {
 	if !s.columnExists("rules", "match_downstreams") {
 		if _, err := s.db.Exec(`ALTER TABLE rules ADD COLUMN match_downstreams TEXT DEFAULT '[]'`); err != nil {
 			return fmt.Errorf("migrate add match_downstreams: %w", err)
+		}
+	}
+
+	// Add pattern_models column (multi-model matching: OR logic within models,
+	// AND logic with other fields). Stored as JSON array of strings.
+	if !s.columnExists("rules", "pattern_models") {
+		if _, err := s.db.Exec(`ALTER TABLE rules ADD COLUMN pattern_models TEXT DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("migrate add pattern_models: %w", err)
+		}
+	}
+
+	// Backfill: convert legacy single-value pattern_model to pattern_models JSON array
+	// for rules that have a non-empty pattern_model but an empty pattern_models.
+	if s.columnExists("rules", "pattern_model") && s.columnExists("rules", "pattern_models") {
+		rows, err := s.db.Query(`SELECT id, pattern_model FROM rules WHERE pattern_model != '' AND (pattern_models IS NULL OR pattern_models = '[]' OR pattern_models = '')`)
+		if err != nil {
+			return fmt.Errorf("query pattern_model for migration: %w", err)
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("begin migration tx: %w", err)
+		}
+		stmt, err := tx.Prepare(`UPDATE rules SET pattern_models = ? WHERE id = ?`)
+		if err != nil {
+			tx.Rollback()
+			rows.Close()
+			return fmt.Errorf("prepare migration stmt: %w", err)
+		}
+		defer stmt.Close()
+		for rows.Next() {
+			var id, pm string
+			if err := rows.Scan(&id, &pm); err != nil {
+				tx.Rollback()
+				rows.Close()
+				return fmt.Errorf("scan migration row: %w", err)
+			}
+			jsonBytes, err := json.Marshal([]string{pm})
+			if err != nil {
+				tx.Rollback()
+				rows.Close()
+				return fmt.Errorf("marshal pattern_models for %s: %w", id, err)
+			}
+			if _, err := stmt.Exec(string(jsonBytes), id); err != nil {
+				tx.Rollback()
+				rows.Close()
+				return fmt.Errorf("update pattern_models for %s: %w", id, err)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration row iteration: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration: %w", err)
 		}
 	}
 
@@ -517,8 +573,8 @@ func (s *Store) SeedDefaults() error {
 	// Seed sample alias groups
 	defaultAliases := []struct {
 		ID, InputModel, DownstreamID, OutputModel string
-		Active                                      int
-		GroupOrder                                  int
+		Active                                    int
+		GroupOrder                                int
 	}{
 		{"alias-gpt4o-openai", "gpt-4o", "openai-gpt4o", "gpt-4o", 1, 1},
 		{"alias-gpt4o-anthropic", "gpt-4o", "anthropic-sonnet", "claude-sonnet-4-20250514", 0, 1},
@@ -647,9 +703,14 @@ func (s *Store) migrateRemoveRulesUnique() error {
 	} else {
 		selectCols = append(selectCols, "'[]'")
 	}
+	if containsStr(cols, "pattern_models") {
+		selectCols = append(selectCols, "pattern_models")
+	} else {
+		selectCols = append(selectCols, "'[]'")
+	}
 
 	// Target column names for INSERT (all columns the new table has)
-	insertCols := []string{"id", "name", "pattern_path", "pattern_model", "active_downstream", "pipeline_config", "is_enabled", "created_at", "match_format", "match_downstream_format", "match_downstreams"}
+	insertCols := []string{"id", "name", "pattern_path", "pattern_model", "pattern_models", "active_downstream", "pipeline_config", "is_enabled", "created_at", "match_format", "match_downstream_format", "match_downstreams"}
 
 	selectQuery := "SELECT " + strings.Join(selectCols, ", ") + " FROM rules"
 
@@ -659,6 +720,7 @@ func (s *Store) migrateRemoveRulesUnique() error {
 		name              TEXT NOT NULL,
 		pattern_path      TEXT NOT NULL,
 		pattern_model     TEXT,
+		pattern_models    TEXT DEFAULT '[]',
 		active_downstream TEXT REFERENCES downstreams(id),
 		pipeline_config   TEXT NOT NULL DEFAULT '[]',
 		is_enabled        INTEGER DEFAULT 1,

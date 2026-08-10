@@ -456,7 +456,7 @@ func TestUpdateRule(t *testing.T) {
 	}
 
 	// Full update
-	updated := &Rule{ID: "rule-full-upd", Name: "New Name", PatternPath: "/new/path", PatternModel: "gpt-4o", MatchDownstreams: []string{"ds-test"}, PipelineConfig: "[\"x\"]", IsEnabled: false}
+	updated := &Rule{ID: "rule-full-upd", Name: "New Name", PatternPath: "/new/path", PatternModels: []string{"gpt-4o"}, MatchDownstreams: []string{"ds-test"}, PipelineConfig: "[\"x\"]", IsEnabled: false}
 	if err := s.UpdateRule(updated); err != nil {
 		t.Fatalf("update rule: %v", err)
 	}

@@ -41,9 +41,9 @@ type PluginRegistry interface {
 
 // PluginInfo describes a registered plugin.
 type PluginInfo struct {
-	ID           string        `json:"id"`
-	Description  string        `json:"description"`
-	ConfigSchema interface{}   `json:"config_schema,omitempty"`
+	ID           string      `json:"id"`
+	Description  string      `json:"description"`
+	ConfigSchema interface{} `json:"config_schema,omitempty"`
 }
 
 // Engine is the core proxy handler. It matches incoming requests against
@@ -104,9 +104,9 @@ func (e *Engine) SetRegistry(r PluginRegistry) {
 func (e *Engine) SetProxyMode(mode proxy.Mode) {
 	transport := &http.Transport{
 		Proxy:               proxy.ProxyFunc(mode),
-		IdleConnTimeout:     30 * time.Second,       // Close idle connections after 30s of inactivity
-		MaxIdleConns:        25,                      // Total idle connection pool
-		MaxIdleConnsPerHost: 5,                       // Per-downstream idle pool
+		IdleConnTimeout:     30 * time.Second, // Close idle connections after 30s of inactivity
+		MaxIdleConns:        25,               // Total idle connection pool
+		MaxIdleConnsPerHost: 5,                // Per-downstream idle pool
 		DisableCompression:  true,
 	}
 	e.client = &http.Client{
@@ -475,8 +475,8 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 // adds auto-translation transformers when input format differs from downstream format.
 // Returns the pipeline and the list of matching rules (for logging).
 func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store.Downstream, alias *store.Alias) (Pipeline, []store.Rule, *gatewayError) {
-	// Build the candidate model list for pattern_model matching.
-	// A rule's pattern_model matches if it equals ANY of these strings
+	// Build the candidate model list for pattern_models matching.
+	// A rule's pattern_models match if it equals ANY of these strings
 	// (exact match). This makes rules useful whether the user keys them
 	// on the raw incoming model, a downstream output_model_id, the alias
 	// input_model_id, the regex pattern of a regex alias, or one of the
@@ -526,7 +526,13 @@ func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store
 	}
 
 	if len(rules) > 0 {
-		e.logger.Debug("matched %d rule(s) for %s %s: %v", len(rules), path, model, func() []string { ids := make([]string, len(rules)); for i, r := range rules { ids[i] = r.ID }; return ids }())
+		e.logger.Debug("matched %d rule(s) for %s %s: %v", len(rules), path, model, func() []string {
+			ids := make([]string, len(rules))
+			for i, r := range rules {
+				ids[i] = r.ID
+			}
+			return ids
+		}())
 	} else {
 		e.logger.Debug("no rules matched for %s %s", path, model)
 	}
@@ -1743,8 +1749,6 @@ func geminiModelFromPath(path string) string {
 	return rest
 }
 
-
-
 // rewriteModelInBody replaces the "model" field in a JSON request body with
 // the given output model name. Returns the original body if parsing fails.
 func rewriteModelInBody(body []byte, outputModel string) []byte {
@@ -1921,12 +1925,12 @@ func (e *Engine) handleModels(w http.ResponseWriter) {
 // that Gemini-format clients (e.g. Cherry Studio) actually consume, namely
 // `name` (the model identifier, e.g. "models/gemini-2.5-pro") and `displayName`.
 type geminiModelRecord struct {
-	Name                     string   `json:"name"`
-	DisplayName              string   `json:"displayName,omitempty"`
-	Description              string   `json:"description,omitempty"`
-	Version                  string   `json:"version,omitempty"`
-	InputTokenLimit          int      `json:"inputTokenLimit,omitempty"`
-	OutputTokenLimit         int      `json:"outputTokenLimit,omitempty"`
+	Name                       string   `json:"name"`
+	DisplayName                string   `json:"displayName,omitempty"`
+	Description                string   `json:"description,omitempty"`
+	Version                    string   `json:"version,omitempty"`
+	InputTokenLimit            int      `json:"inputTokenLimit,omitempty"`
+	OutputTokenLimit           int      `json:"outputTokenLimit,omitempty"`
 	SupportedGenerationMethods []string `json:"supportedGenerationMethods,omitempty"`
 }
 
@@ -2007,9 +2011,9 @@ func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
 			}
 			seen[name] = struct{}{}
 			out = append(out, geminiModelRecord{
-				Name:                     name,
-				DisplayName:              m,
-				Description:              "via " + ds.Name,
+				Name:                       name,
+				DisplayName:                m,
+				Description:                "via " + ds.Name,
 				SupportedGenerationMethods: geminiMethods,
 			})
 		}
@@ -2032,9 +2036,9 @@ func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
 			if _, ok := seen[name]; !ok {
 				seen[name] = struct{}{}
 				out = append(out, geminiModelRecord{
-					Name:                     name,
-					DisplayName:              a.InputModelID,
-					Description:              "via " + dsName[ds.ID] + " (alias for " + a.OutputModelID + ")",
+					Name:                       name,
+					DisplayName:                a.InputModelID,
+					Description:                "via " + dsName[ds.ID] + " (alias for " + a.OutputModelID + ")",
 					SupportedGenerationMethods: geminiMethods,
 				})
 			}
@@ -2052,9 +2056,9 @@ func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
 			}
 			seen[name] = struct{}{}
 			out = append(out, geminiModelRecord{
-				Name:                     name,
-				DisplayName:              n,
-				Description:              "via " + dsName[ds.ID] + " (alias for " + a.OutputModelID + ")",
+				Name:                       name,
+				DisplayName:                n,
+				Description:                "via " + dsName[ds.ID] + " (alias for " + a.OutputModelID + ")",
 				SupportedGenerationMethods: geminiMethods,
 			})
 		}

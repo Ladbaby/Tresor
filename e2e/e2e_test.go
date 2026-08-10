@@ -118,7 +118,7 @@ aliases:
 		newRule := map[string]interface{}{
 			"name":              "test-chat",
 			"pattern_path":      "/v1/chat/completions",
-			"pattern_model":     "gpt-4o",
+			"pattern_models":    []string{"gpt-4o"},
 			"match_downstreams": []string{"openai-gpt4o"},
 			"pipeline_config":   `[{"plugin_id":"custom_header","config":{"headers":{"X-Test":"e2e"}}}]`,
 			"is_enabled":        true,
@@ -295,7 +295,10 @@ aliases:
 	if testing.Short() {
 		return
 	}
-	for _, tc := range []struct{ name, path string; wantBytes []byte }{
+	for _, tc := range []struct {
+		name, path string
+		wantBytes  []byte
+	}{
 		{"KnownModel", "/api/icons/gpt-4o", []byte("<?xml")},
 		{"FirstSegmentFallback", "/api/icons/MiniMax-M2.5", nil}, // 200 or 404 both OK
 	} {

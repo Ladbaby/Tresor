@@ -3,9 +3,11 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"tresor/internal/config"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -32,7 +34,7 @@ func TestWriteConfig_RoundTrip(t *testing.T) {
 		t.Fatalf("create downstream: %v", err)
 	}
 
-	rule := &Rule{ID: "rule-test", Name: "Test Rule", PatternPath: "/v1/chat/completions", MatchDownstreams: []string{"ds-test"}, PipelineConfig: "[{\"plugin_id\":\"custom_header\"}]", IsEnabled: true}
+	rule := &Rule{ID: "rule-test", Name: "Test Rule", PatternPath: "/v1/chat/completions", PatternModels: []string{"model-a", "model-b"}, MatchDownstreams: []string{"ds-test"}, PipelineConfig: "[{\"plugin_id\":\"custom_header\"}]", IsEnabled: true}
 	if err := s.CreateRule(rule); err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
@@ -74,6 +76,12 @@ func TestWriteConfig_RoundTrip(t *testing.T) {
 	}
 	if parsed.Rules[0].ID != "rule-test" {
 		t.Fatalf("expected rule id rule-test, got %q", parsed.Rules[0].ID)
+	}
+	if len(parsed.Rules[0].PatternModels) != 2 || parsed.Rules[0].PatternModels[0] != "model-a" {
+		t.Fatalf("expected plural pattern models, got %#v", parsed.Rules[0].PatternModels)
+	}
+	if strings.Contains(string(data), "pattern_model:") {
+		t.Fatalf("deprecated pattern_model was written:\n%s", data)
 	}
 
 	if len(parsed.Aliases) != 1 {

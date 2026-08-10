@@ -28,9 +28,9 @@ func (m *mockRegistryImpl) CreatePlugin(pluginID string, config map[string]inter
 	case "anthropic2openai":
 		return &mockAnthropic2OpenAI{}, nil
 	case "responses2openai":
-			return &mockResponses2OpenAI{}, nil
+		return &mockResponses2OpenAI{}, nil
 	case "responses2anthropic":
-			return &mockResponses2Anthropic{}, nil
+		return &mockResponses2Anthropic{}, nil
 	case "openai2responses":
 		return &mockOpenAI2Responses{}, nil
 	case "anthropic2responses":
@@ -46,7 +46,7 @@ func (m *mockRegistryImpl) CreatePlugin(pluginID string, config map[string]inter
 	case "gemini2responses":
 		return &mockGemini2Responses{}, nil
 	default:
-			return nil, fmt.Errorf("unknown plugin: %s", pluginID)
+		return nil, fmt.Errorf("unknown plugin: %s", pluginID)
 	}
 }
 
@@ -112,7 +112,6 @@ func (m *mockAnthropic2OpenAI) TransformResponse(resp *http.Response, body []byt
 func (m *mockAnthropic2OpenAI) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
 	return chunk, nil
 }
-
 
 // mockResponses2OpenAI marks the request body as translated.
 type mockResponses2OpenAI struct{}
@@ -309,8 +308,12 @@ func addRule(t *testing.T, s *store.Store, id, name, patternPath, patternModel, 
 	if downstream != "" {
 		md = []string{downstream}
 	}
+	models := []string{}
+	if patternModel != "" {
+		models = []string{patternModel}
+	}
 	if err := s.CreateRule(&store.Rule{
-		ID: id, Name: name, PatternPath: patternPath, PatternModel: patternModel,
+		ID: id, Name: name, PatternPath: patternPath, PatternModels: models,
 		MatchDownstreams: md, PipelineConfig: pipeline, IsEnabled: enabled,
 	}); err != nil {
 		t.Fatalf("create rule %s: %v", id, err)
@@ -1555,9 +1558,9 @@ func TestEngine_HandleProxy_GeminiModelsListing(t *testing.T) {
 
 	var payload struct {
 		Models []struct {
-			Name                     string   `json:"name"`
-			DisplayName              string   `json:"displayName"`
-			Description              string   `json:"description"`
+			Name                       string   `json:"name"`
+			DisplayName                string   `json:"displayName"`
+			Description                string   `json:"description"`
 			SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
 		} `json:"models"`
 	}

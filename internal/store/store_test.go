@@ -93,12 +93,12 @@ func TestStore_CRUD_Rules(t *testing.T) {
 
 	// Create
 	r := &Rule{
-		Name:               "test-rule",
-		PatternPath:        "/v1/chat/completions",
-		PatternModel:       "gpt-4o",
-		MatchDownstreams:   []string{ds.ID},
-		PipelineConfig:     `[{"plugin_id":"custom_header"}]`,
-		IsEnabled:          true,
+		Name:             "test-rule",
+		PatternPath:      "/v1/chat/completions",
+		PatternModels:    []string{"gpt-4o"},
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   `[{"plugin_id":"custom_header"}]`,
+		IsEnabled:        true,
 	}
 	if err := s.CreateRule(r); err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -157,9 +157,9 @@ func TestStore_CRUD_Downstreams(t *testing.T) {
 
 	// Create
 	d := &Downstream{
-		Name:     "Test Provider",
-		BaseURL:  "https://test.api.com/v1",
-		APIKey:   "sk-test123",
+		Name:    "Test Provider",
+		BaseURL: "https://test.api.com/v1",
+		APIKey:  "sk-test123",
 	}
 	if err := s.CreateDownstream(d); err != nil {
 		t.Fatalf("create downstream: %v", err)
@@ -280,12 +280,12 @@ func TestStore_FindMatchingRules_NoMatch(t *testing.T) {
 	}
 
 	r := &Rule{
-		Name:               "unrelated",
-		PatternPath:        "/v1/chat/completions",
-		PatternModel:       "gpt-4o",
-		MatchDownstreams:   []string{ds.ID},
-		PipelineConfig:     "[]",
-		IsEnabled:          true,
+		Name:             "unrelated",
+		PatternPath:      "/v1/chat/completions",
+		PatternModels:    []string{"gpt-4o"},
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
 	}
 	if err := s.CreateRule(r); err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -315,7 +315,7 @@ func TestStore_FindMatchingRules_WildcardPathRespectsModel(t *testing.T) {
 	r := &Rule{
 		Name:             "wildcard-with-model",
 		PatternPath:      "*",
-		PatternModel:     "claude-sonnet",
+		PatternModels:    []string{"claude-sonnet"},
 		MatchFormat:      []string{"anthropic"},
 		MatchDownstreams: []string{ds.ID},
 		PipelineConfig:   "[]",
@@ -373,20 +373,20 @@ func TestStore_FindMatchingRules_ModelPriority(t *testing.T) {
 	}
 
 	r1 := &Rule{
-		Name:               "path-only",
-		PatternPath:        "/v1/chat/completions",
-		PatternModel:       "",
-		MatchDownstreams:   []string{ds.ID},
-		PipelineConfig:     "[]",
-		IsEnabled:          true,
+		Name:             "path-only",
+		PatternPath:      "/v1/chat/completions",
+		PatternModels:    []string{},
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
 	}
 	r2 := &Rule{
-		Name:               "model-specific",
-		PatternPath:        "/v1/chat/completions",
-		PatternModel:       "gpt-4o",
-		MatchDownstreams:   []string{ds.ID},
-		PipelineConfig:     "[]",
-		IsEnabled:          true,
+		Name:             "model-specific",
+		PatternPath:      "/v1/chat/completions",
+		PatternModels:    []string{"gpt-4o"},
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
 	}
 	if err := s.CreateRule(r1); err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -421,12 +421,12 @@ func TestFindMatchingRules_FormatFilter(t *testing.T) {
 
 	// Rule that only matches anthropic format
 	r := &Rule{
-		Name:               "anthropic-only",
-		PatternPath:        "/v1/messages",
-		MatchFormat:        []string{"anthropic"},
-		MatchDownstreams:   []string{ds.ID},
-		PipelineConfig:     "[]",
-		IsEnabled:          true,
+		Name:             "anthropic-only",
+		PatternPath:      "/v1/messages",
+		MatchFormat:      []string{"anthropic"},
+		MatchDownstreams: []string{ds.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
 	}
 	if err := s.CreateRule(r); err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -465,11 +465,11 @@ func TestFindMatchingRules_DownstreamFilter(t *testing.T) {
 
 	// Rule that only matches ds1
 	r := &Rule{
-		Name:               "openai-only",
-		PatternPath:        "/v1/chat/completions",
-		MatchDownstreams:   []string{ds1.ID},
-		PipelineConfig:     "[]",
-		IsEnabled:          true,
+		Name:             "openai-only",
+		PatternPath:      "/v1/chat/completions",
+		MatchDownstreams: []string{ds1.ID},
+		PipelineConfig:   "[]",
+		IsEnabled:        true,
 	}
 	if err := s.CreateRule(r); err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -504,11 +504,11 @@ func TestFindMatchingRules_DownstreamFormatFilter(t *testing.T) {
 
 	// Rule that only matches anthropic downstream format
 	r := &Rule{
-		Name:                 "anthropic-format-only",
-		PatternPath:         "/v1/chat/completions",
-		MatchDownstreamFmt:  []string{"anthropic"},
-		PipelineConfig:      "[]",
-		IsEnabled:           true,
+		Name:               "anthropic-format-only",
+		PatternPath:        "/v1/chat/completions",
+		MatchDownstreamFmt: []string{"anthropic"},
+		PipelineConfig:     "[]",
+		IsEnabled:          true,
 	}
 	if err := s.CreateRule(r); err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -534,13 +534,13 @@ func TestFindMatchingRules_Combo(t *testing.T) {
 
 	// Rule with all three filters: match_format=[openai], match_downstream_format=[openai], match_downstreams=[ds.ID]
 	r := &Rule{
-		Name:                 "combo-rule",
-		PatternPath:         "/v1/chat/completions",
-		MatchFormat:         []string{"openai"},
-		MatchDownstreamFmt:  []string{"openai"},
-		MatchDownstreams:    []string{ds.ID},
-		PipelineConfig:      "[]",
-		IsEnabled:           true,
+		Name:               "combo-rule",
+		PatternPath:        "/v1/chat/completions",
+		MatchFormat:        []string{"openai"},
+		MatchDownstreamFmt: []string{"openai"},
+		MatchDownstreams:   []string{ds.ID},
+		PipelineConfig:     "[]",
+		IsEnabled:          true,
 	}
 	if err := s.CreateRule(r); err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -802,7 +802,7 @@ func TestStore_FindMatchingRulesWithCandidates_MatchesDownstreamOutputModel(t *t
 	r := &Rule{
 		Name:             "downstream-output-match",
 		PatternPath:      "/v1/chat/completions",
-		PatternModel:     "claude-3-5-sonnet-20241022",
+		PatternModels:    []string{"claude-3-5-sonnet-20241022"},
 		MatchDownstreams: []string{ds.ID},
 		PipelineConfig:   "[]",
 		IsEnabled:        true,
@@ -839,7 +839,7 @@ func TestStore_FindMatchingRulesWithCandidates_MatchesAliasOutputModel(t *testin
 	r := &Rule{
 		Name:             "alias-output-match",
 		PatternPath:      "/v1/chat/completions",
-		PatternModel:     "my-alias-output",
+		PatternModels:    []string{"my-alias-output"},
 		MatchDownstreams: []string{ds.ID},
 		PipelineConfig:   "[]",
 		IsEnabled:        true,
@@ -870,7 +870,7 @@ func TestStore_FindMatchingRulesWithCandidates_MatchesRegexPattern(t *testing.T)
 	r := &Rule{
 		Name:             "regex-pattern-match",
 		PatternPath:      "/v1/chat/completions",
-		PatternModel:     "gpt-.*",
+		PatternModels:    []string{"gpt-.*"},
 		MatchDownstreams: []string{ds.ID},
 		PipelineConfig:   "[]",
 		IsEnabled:        true,
@@ -912,7 +912,7 @@ func TestStore_FindMatchingRulesWithCandidates_MatchesAnnouncedName(t *testing.T
 	r := &Rule{
 		Name:             "announced-name-match",
 		PatternPath:      "/v1/chat/completions",
-		PatternModel:     "claude-haiku-4-5",
+		PatternModels:    []string{"claude-haiku-4-5"},
 		MatchDownstreams: []string{ds.ID},
 		PipelineConfig:   "[]",
 		IsEnabled:        true,
@@ -972,7 +972,7 @@ func TestStore_FindMatchingRulesWithCandidates_DedupCandidates(t *testing.T) {
 	r := &Rule{
 		Name:             "dedup-match",
 		PatternPath:      "/v1/chat/completions",
-		PatternModel:     "gpt-4o",
+		PatternModels:    []string{"gpt-4o"},
 		MatchDownstreams: []string{ds.ID},
 		PipelineConfig:   "[]",
 		IsEnabled:        true,
@@ -1003,8 +1003,8 @@ func TestStore_FindMatchingRulesWithCandidates_MultipleMatches(t *testing.T) {
 	// Two rules, both will fire — one keyed on the downstream output,
 	// one on a candidate input name.
 	rules := []*Rule{
-		{Name: "r-output", PatternPath: "/v1/chat/completions", PatternModel: "claude-3-5-sonnet-20241022", MatchDownstreams: []string{ds.ID}, PipelineConfig: "[]", IsEnabled: true},
-		{Name: "r-input", PatternPath: "/v1/chat/completions", PatternModel: "claude-3-5-sonnet", MatchDownstreams: []string{ds.ID}, PipelineConfig: "[]", IsEnabled: true},
+		{Name: "r-output", PatternPath: "/v1/chat/completions", PatternModels: []string{"claude-3-5-sonnet-20241022"}, MatchDownstreams: []string{ds.ID}, PipelineConfig: "[]", IsEnabled: true},
+		{Name: "r-input", PatternPath: "/v1/chat/completions", PatternModels: []string{"claude-3-5-sonnet"}, MatchDownstreams: []string{ds.ID}, PipelineConfig: "[]", IsEnabled: true},
 	}
 	for _, r := range rules {
 		if err := s.CreateRule(r); err != nil {
@@ -1038,7 +1038,7 @@ func TestStore_FindMatchingRulesWithCandidates_WildcardPathRespectsModel(t *test
 	r := &Rule{
 		Name:             "wildcard-with-model",
 		PatternPath:      "*",
-		PatternModel:     "claude-sonnet",
+		PatternModels:    []string{"claude-sonnet"},
 		MatchFormat:      []string{"anthropic"},
 		MatchDownstreams: []string{ds.ID},
 		PipelineConfig:   "[]",
@@ -1090,5 +1090,82 @@ func TestStore_FindMatchingRulesWithCandidates_WildcardPathRespectsModel(t *test
 	}
 	if len(matches) != 1 || matches[0].Name != "any-model-any-path" {
 		t.Errorf("expected any-model-any-path to match, got %+v", matches)
+	}
+}
+
+func TestStore_FindMatchingRules_MultiplePatternModelsORAndOtherFieldsAND(t *testing.T) {
+	s := newTestStore(t)
+	ds := &Downstream{ID: "multi-model-ds", Name: "Multi", BaseURL: "http://example.com", APIKey: "key", ApiFormats: []string{"anthropic"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatal(err)
+	}
+	r := &Rule{ID: "multi-model-rule", Name: "multi", PatternPath: "/v1/messages", PatternModels: []string{"model-a", "model-b"}, MatchFormat: []string{"anthropic"}, MatchDownstreamFmt: []string{"anthropic"}, MatchDownstreams: []string{ds.ID}, PipelineConfig: "[]", IsEnabled: true}
+	if err := s.CreateRule(r); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, model := range []string{"model-a", "model-b"} {
+		got, err := s.FindMatchingRulesWithCandidates("/v1/messages", []string{model}, "anthropic", ds.ID, []string{"anthropic"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].ID != r.ID {
+			t.Fatalf("model %q: got %#v", model, got)
+		}
+	}
+	for name, args := range map[string]struct {
+		candidates        []string
+		input, downstream string
+		formats           []string
+	}{
+		"unselected model":        {[]string{"model-c"}, "anthropic", ds.ID, []string{"anthropic"}},
+		"wrong input format":      {[]string{"model-a"}, "openai", ds.ID, []string{"anthropic"}},
+		"wrong downstream":        {[]string{"model-a"}, "anthropic", "other", []string{"anthropic"}},
+		"wrong downstream format": {[]string{"model-a"}, "anthropic", ds.ID, []string{"openai"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := s.FindMatchingRulesWithCandidates("/v1/messages", args.candidates, args.input, args.downstream, args.formats)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("expected no match, got %#v", got)
+			}
+		})
+	}
+
+	got, err := s.FindMatchingRules("/v1/messages", "model-b", "anthropic", ds.ID, []string{"anthropic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("single-model entry point got %#v", got)
+	}
+}
+
+func TestStore_MultiplePatternModelsPriority(t *testing.T) {
+	s := newTestStore(t)
+	for _, r := range []*Rule{
+		{ID: "any-exact", Name: "any exact", PatternPath: "/p", PipelineConfig: "[]", IsEnabled: true},
+		{ID: "model-wild", Name: "model wild", PatternPath: "*", PatternModels: []string{"a", "b"}, PipelineConfig: "[]", IsEnabled: true},
+		{ID: "model-exact", Name: "model exact", PatternPath: "/p", PatternModels: []string{"a", "b"}, PipelineConfig: "[]", IsEnabled: true},
+		{ID: "any-wild", Name: "any wild", PatternPath: "*", PipelineConfig: "[]", IsEnabled: true},
+	} {
+		if err := s.CreateRule(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.FindMatchingRulesWithCandidates("/p", []string{"b"}, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"model-exact", "model-wild", "any-exact", "any-wild"}
+	if len(got) != len(want) {
+		t.Fatalf("got %#v", got)
+	}
+	for i := range want {
+		if got[i].ID != want[i] {
+			t.Fatalf("priority[%d]=%q want %q", i, got[i].ID, want[i])
+		}
 	}
 }

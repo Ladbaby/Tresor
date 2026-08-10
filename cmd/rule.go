@@ -25,6 +25,7 @@ var (
 	matchFormat        string
 	matchDownstreamFmt string
 	matchDownstreams   string
+	matchModels        string
 )
 
 func newHTTPClient(cfg *config.AppConfig) *http.Client {
@@ -99,10 +100,10 @@ var ruleCreateCmd = &cobra.Command{
 		}
 
 		payload := map[string]interface{}{
-			"name":                    args[0],
-			"pattern_path":            args[1],
-			"pipeline_config":         "[]",
-			"is_enabled":              true,
+			"name":            args[0],
+			"pattern_path":    args[1],
+			"pipeline_config": "[]",
+			"is_enabled":      true,
 		}
 
 		if matchFormat != "" {
@@ -113,6 +114,9 @@ var ruleCreateCmd = &cobra.Command{
 		}
 		if matchDownstreams != "" {
 			payload["match_downstreams"] = splitComma(matchDownstreams)
+		}
+		if matchModels != "" {
+			payload["pattern_models"] = splitComma(matchModels)
 		}
 
 		data, _ := json.Marshal(payload)
@@ -235,6 +239,7 @@ func init() {
 	ruleCreateCmd.Flags().StringVar(&matchFormat, "match-format", "", "Match input format (comma-separated, e.g. openai,anthropic)")
 	ruleCreateCmd.Flags().StringVar(&matchDownstreamFmt, "match-downstream-format", "", "Match downstream format (comma-separated)")
 	ruleCreateCmd.Flags().StringVar(&matchDownstreams, "match-downstreams", "", "Match downstreams (comma-separated)")
+	ruleCreateCmd.Flags().StringVar(&matchModels, "pattern-models", "", "Match pattern models (comma-separated, OR logic)")
 	rootCmd.AddCommand(aliasCmd)
 	aliasCmd.AddCommand(aliasListCmd)
 	aliasCmd.AddCommand(aliasActivateCmd)

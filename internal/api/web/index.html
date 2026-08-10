@@ -146,7 +146,7 @@
                             <tr>
                                 <th>Name</th>
                                 <th>Pattern Path</th>
-                                <th>Pattern Model</th>
+                                <th>Pattern Models</th>
                                 <th>Match</th>
                                 <th>Pipeline</th>
                                 <th>Enabled</th>
@@ -177,8 +177,10 @@
                                 <input type="hidden" id="rule-id">
                                 <label>Name: <input type="text" id="rule-name" required></label>
                                 <label>Pattern Path:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="URL path that must match (e.g., /v1/chat/completions). Use * to match all paths.">?</span> <input type="text" id="rule-path" placeholder="/v1/chat/completions or *"></label>
-                                <label>Pattern Model:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Only apply this rule when the request targets this model. Matches the incoming model name, any downstream output_model_id, the active alias's output_model_id, the regex pattern of an active regex alias, or any announced name for an active regex alias. Leave empty to match any model.">?</span> <input type="text" id="rule-model" list="rule-model-options" placeholder="e.g. gpt-4o, claude-3-5-sonnet (optional)" autocomplete="off"></label>
-                                <datalist id="rule-model-options"></datalist>
+                                <label>Pattern Models:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Leave empty to match any model. Select one or more known model names that can trigger this rule (OR logic — any match fires the rule). Suggestions are drawn from downstream output model IDs, active alias input model IDs, regex alias patterns, and announced names.">?</span>
+                                    <div id="rule-match-models" class="model-multi-select rule-model-multi-select"></div>
+                                </label>
+                                <p class="text-muted">Leave empty to match any model.</p>
 
                                 <!-- Match Input Format -->
                                 <label>Match Input Format:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Only apply when the incoming client request uses this format. Leave empty to match any.">?</span></label>

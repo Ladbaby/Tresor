@@ -2674,6 +2674,11 @@ html[data-theme="light"] form select {
     overflow-y: auto;
 }
 
+.rule-model-multi-select {
+    max-height: 200px;
+    overflow-y: auto;
+}
+
 .model-tag-wrap {
     display: flex;
     flex-wrap: wrap;

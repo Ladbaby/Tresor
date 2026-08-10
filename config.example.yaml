@@ -90,9 +90,13 @@ downstreams:
 # request; their pipelines are concatenated in priority order.
 #
 # Matching criteria (all optional, OR logic):
+#   pattern_models: list of model IDs to match (OR within the list)
 #   match_format: input request formats (e.g. [openai, anthropic])
 #   match_downstream_format: downstream API formats
 #   match_downstreams: downstream IDs to match against
+#
+# pattern_model (single string) is still accepted for backward compatibility
+# but pattern_models (list) is the recommended format for multi-model rules.
 #
 # Priority: exact path+model > exact path > wildcard path (*)
 #

@@ -248,14 +248,15 @@ async function fetchDownstreams() {
     return cachedDownstreams;
 }
 
-// populateRuleModelOptions fills the <datalist> used by the Pattern
-// Model input in the rule editor with every string that could be
-// matched: downstream output_model_ids, active alias input_model_ids,
-// regex alias patterns, and announced names. The user can still type
-// any free-form string; this just offers autocomplete suggestions.
-async function populateRuleModelOptions() {
-    const datalist = document.getElementById('rule-model-options');
-    if (!datalist) return;
+// populateRuleMatchModels fills the Pattern Model multi-select in the rule
+// editor with clickable tags built from every string that could be matched:
+// downstream output_model_ids, active alias input_model_ids, regex alias
+// patterns, and announced names. The user can also type any free-form model
+// ID in the custom input below the tag list.
+async function populateRuleMatchModels(containerEl, selectedModels) {
+    containerEl.innerHTML = '';
+    const sel = selectedModels || [];
+    const selSet = new Set(sel);
 
     const suggestions = new Set();
 
@@ -266,7 +267,7 @@ async function populateRuleModelOptions() {
                 if (m) suggestions.add(m);
             }
         }
-    } catch { /* ignore — datalist stays empty */ }
+    } catch { /* ignore */ }
 
     try {
         const groups = await api('/aliases');
@@ -280,18 +281,81 @@ async function populateRuleModelOptions() {
         }
     } catch { /* ignore */ }
 
+    // Also add any user-selected models that aren't in the suggestion set
+    // (custom arbitrary model IDs typed by the user).
+    for (const s of sel) {
+        if (!suggestions.has(s)) suggestions.add(s);
+    }
+
     // Sort case-insensitively for stable order.
     const sorted = Array.from(suggestions).sort((a, b) =>
         a.toLowerCase().localeCompare(b.toLowerCase())
     );
 
-    // Rebuild <option> children.
-    while (datalist.firstChild) datalist.removeChild(datalist.firstChild);
-    for (const s of sorted) {
-        const opt = document.createElement('option');
-        opt.value = s;
-        datalist.appendChild(opt);
+    if (sorted.length === 0) {
+        containerEl.innerHTML = '<div class="model-multi-empty">No known models available</div>';
+        return;
     }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'model-tag-wrap';
+
+    sorted.forEach(m => {
+        const tag = document.createElement('span');
+        tag.className = 'model-tag';
+        tag.tabIndex = 0;
+        tag.setAttribute('role', 'checkbox');
+        tag.setAttribute('aria-checked', selSet.has(m) ? 'true' : 'false');
+        if (selSet.has(m)) tag.classList.add('selected');
+        tag.dataset.model = m;
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = m;
+        cb.style.display = 'none';
+        cb.checked = selSet.has(m);
+        tag.appendChild(cb);
+
+        const icon = document.createElement('span');
+        icon.className = 'model-tag-icon';
+        icon.textContent = cb.checked ? '☑' : '☐';
+        tag.appendChild(icon);
+
+        const name = document.createElement('span');
+        name.className = 'model-tag-name';
+        name.textContent = m;
+        tag.appendChild(name);
+
+        const toggle = () => {
+            cb.checked = !cb.checked;
+            tag.classList.toggle('selected', cb.checked);
+            tag.setAttribute('aria-checked', cb.checked ? 'true' : 'false');
+            icon.textContent = cb.checked ? '☑' : '☐';
+        };
+        tag.addEventListener('click', toggle);
+        tag.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                toggle();
+            }
+        });
+
+        wrap.appendChild(tag);
+    });
+
+    containerEl.appendChild(wrap);
+}
+
+/**
+ * Collect selected model IDs from the rule model multi-select + custom input.
+ * Returns deduplicated array.
+ */
+function getSelectedRuleModels(containerEl) {
+    const models = [];
+    containerEl.querySelectorAll('.model-tag.selected').forEach(tag => {
+        models.push(tag.dataset.model);
+    });
+    return models;
 }
 // ---- Rules ----
 async function loadRules() {
@@ -337,11 +401,20 @@ async function loadRules() {
                     ? badges.join(' ')
                     : '<span class="format-badge format-unknown">any</span>';
 
+                const models = r.pattern_models || [];
+                let modelDisplay = '<span style="color:var(--text-muted)">—</span>';
+                if (models.length > 0) {
+                    const fullList = models.join(', ');
+                    modelDisplay = models.length > 2
+                        ? `<span title="${esc(fullList)}"><code>${esc(models[0])}</code> <span aria-label="Additional pattern models omitted">...</span></span>`
+                        : models.map(m => '<code>' + esc(m) + '</code>').join(' ');
+                }
+
                 return `
                 <tr>
                     <td><strong>${esc(r.name)}</strong></td>
                     <td><code>${esc(r.pattern_path)}</code></td>
-                    <td><code>${esc(r.pattern_model) || '—'}</code></td>
+                    <td>${modelDisplay}</td>
                     <td>${matchCell}</td>
                     <td><span class="pipeline-steps">${esc(shortPipeline(r.pipeline_config))}</span></td>
                     <td><span class="status-badge ${r.is_enabled ? 'status-enabled' : 'status-disabled'}">${r.is_enabled ? 'ON' : 'OFF'}</span></td>
@@ -709,15 +782,17 @@ async function openRuleModal(rule) {
     document.getElementById('rule-id').value = rule ? rule.id : '';
     document.getElementById('rule-name').value = rule ? rule.name : '';
     document.getElementById('rule-path').value = rule ? rule.pattern_path : '*';
-    document.getElementById('rule-model').value = rule ? (rule.pattern_model || '') : '';
     document.getElementById('rule-enabled').checked = rule ? rule.is_enabled : true;
 
     // Ensure downstreams cache is loaded for the multi-select
     await fetchDownstreams();
 
-    // Populate the Pattern Model autocomplete datalist. Fire-and-forget
-    // — the user can still type a free-form value while it loads.
-    populateRuleModelOptions();
+    // API responses are canonical and expose only pattern_models.
+    const selectedModels = rule ? (rule.pattern_models || []) : [];
+    await populateRuleMatchModels(
+        document.getElementById('rule-match-models'),
+        selectedModels
+    );
 
     // Populate match input format checkboxes
     const inputFmtContainer = document.getElementById('rule-match-input-formats');
@@ -773,6 +848,8 @@ async function deleteRule(id) {
 document.getElementById('btn-new-rule').addEventListener('click', async () => {
     await fetchPlugins();
     await fetchDownstreams();
+    const mmContainer = document.getElementById('rule-match-models');
+    if (mmContainer) mmContainer.innerHTML = '';
     openRuleModal(null);
 });
 
@@ -787,11 +864,14 @@ document.getElementById('rule-form').addEventListener('submit', async (e) => {
     const matchFormat = getCheckedFormats(document.getElementById('rule-match-input-formats'));
     const matchDownstreamFormat = getCheckedFormats(document.getElementById('rule-match-downstream-formats'));
     const matchDownstreams = getSelectedMatchDownstreams(document.getElementById('rule-match-downstreams'));
+    const patternModels = getSelectedRuleModels(
+        document.getElementById('rule-match-models')
+    );
 
     const body = {
         name: document.getElementById('rule-name').value,
         pattern_path: document.getElementById('rule-path').value,
-        pattern_model: document.getElementById('rule-model').value,
+        pattern_models: patternModels,
         match_format: matchFormat,
         match_downstream_format: matchDownstreamFormat,
         match_downstreams: matchDownstreams,

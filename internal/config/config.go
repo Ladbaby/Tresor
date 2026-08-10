@@ -12,10 +12,10 @@ import (
 // It covers server settings and all routing data (downstreams, rules, aliases).
 type AppConfig struct {
 	// Server settings
-	BindAddr      string          `yaml:"bind_addr"`
-	SocketPath    string          `yaml:"socket_path,omitempty"`
-	DBPath        string          `yaml:"db_path"`
-	AdminPassword string          `yaml:"admin_password,omitempty"`
+	BindAddr      string `yaml:"bind_addr"`
+	SocketPath    string `yaml:"socket_path,omitempty"`
+	DBPath        string `yaml:"db_path"`
+	AdminPassword string `yaml:"admin_password,omitempty"`
 
 	// ProxyMode controls how outbound requests to downstreams are proxied.
 	// Values: "auto" (default, Windows registry > env vars), "env" (env vars only),
@@ -54,9 +54,9 @@ type AppConfig struct {
 	RetryOnEmpty bool `yaml:"retry_on_empty,omitempty"`
 
 	// Routing data (loaded into SQLite at startup via upsert)
-	Downstreams []DownstreamCfg   `yaml:"downstreams"`
-	Rules       []RuleCfg         `yaml:"rules"`
-	Aliases     []AliasGroupCfg   `yaml:"aliases"`
+	Downstreams []DownstreamCfg `yaml:"downstreams"`
+	Rules       []RuleCfg       `yaml:"rules"`
+	Aliases     []AliasGroupCfg `yaml:"aliases"`
 
 	// ConfigPath is the resolved file path of the YAML config.
 	// Not serialized to YAML; used for write-back on mutations.
@@ -79,15 +79,16 @@ type DownstreamCfg struct {
 
 // RuleCfg defines a conditional transform pipeline with matching criteria.
 type RuleCfg struct {
-	ID                  string         `yaml:"id"`
-	Name                string         `yaml:"name"`
-	PatternPath         string         `yaml:"pattern_path"`
-	PatternModel        string         `yaml:"pattern_model,omitempty"`
-	MatchFormat         []string       `yaml:"match_format,omitempty"`
-	MatchDownstreamFmt  []string       `yaml:"match_downstream_format,omitempty"`
-	MatchDownstreams    []string       `yaml:"match_downstreams,omitempty"`
-	PipelineConfig      []PipelineStep `yaml:"pipeline_config,omitempty"`
-	IsEnabled           bool           `yaml:"is_enabled"`
+	ID                 string         `yaml:"id"`
+	Name               string         `yaml:"name"`
+	PatternPath        string         `yaml:"pattern_path"`
+	PatternModel       string         `yaml:"pattern_model,omitempty"`
+	PatternModels      []string       `yaml:"pattern_models,omitempty"`
+	MatchFormat        []string       `yaml:"match_format,omitempty"`
+	MatchDownstreamFmt []string       `yaml:"match_downstream_format,omitempty"`
+	MatchDownstreams   []string       `yaml:"match_downstreams,omitempty"`
+	PipelineConfig     []PipelineStep `yaml:"pipeline_config,omitempty"`
+	IsEnabled          bool           `yaml:"is_enabled"`
 }
 
 // PipelineStep is one transformer in a rule's pipeline.
@@ -105,10 +106,10 @@ type PipelineStep struct {
 // downstream output_model_id, non-regex alias input_model_id, or another
 // regex group's input_model_id or announced_name.
 type AliasGroupCfg struct {
-	InputModelID   string             `yaml:"input_model_id"`
-	IsRegex        bool               `yaml:"is_regex,omitempty"`
-	Options        []AliasOptionCfg   `yaml:"options"`
-	AnnouncedNames []string           `yaml:"announced_names,omitempty"`
+	InputModelID   string           `yaml:"input_model_id"`
+	IsRegex        bool             `yaml:"is_regex,omitempty"`
+	Options        []AliasOptionCfg `yaml:"options"`
+	AnnouncedNames []string         `yaml:"announced_names,omitempty"`
 }
 
 // AliasOptionCfg defines a single output-model option within an alias group.
@@ -182,6 +183,17 @@ func Load(configPath string) (*AppConfig, error) {
 			cfg.Downstreams[i].ApiFormats = []string{cfg.Downstreams[i].ApiFormat}
 			cfg.Downstreams[i].ApiFormat = ""
 		}
+	}
+
+	// Sanitize legacy PatternModel -> PatternModels for backward compatibility.
+	// If a rule has a single pattern_model but no pattern_models list, promote
+	// the scalar to a one-element list. When both are present, pattern_models
+	// takes precedence (the user is already using the new format).
+	for i := range cfg.Rules {
+		if cfg.Rules[i].PatternModel != "" && len(cfg.Rules[i].PatternModels) == 0 {
+			cfg.Rules[i].PatternModels = []string{cfg.Rules[i].PatternModel}
+		}
+		cfg.Rules[i].PatternModel = ""
 	}
 
 	// Store the resolved config path for write-back

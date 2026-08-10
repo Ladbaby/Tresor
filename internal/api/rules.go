@@ -23,10 +23,32 @@ func (r *Router) handleRules(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, http.StatusOK, rules)
 
 	case http.MethodPost:
-		var rule store.Rule
-		if err := json.NewDecoder(req.Body).Decode(&rule); err != nil {
+		var payload struct {
+			ID                 string    `json:"id"`
+			Name               string    `json:"name"`
+			PatternPath        string    `json:"pattern_path"`
+			PatternModel       *string   `json:"pattern_model"`
+			PatternModels      *[]string `json:"pattern_models"`
+			MatchFormat        []string  `json:"match_format"`
+			MatchDownstreamFmt []string  `json:"match_downstream_format"`
+			MatchDownstreams   []string  `json:"match_downstreams"`
+			PipelineConfig     string    `json:"pipeline_config"`
+			IsEnabled          bool      `json:"is_enabled"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
+		}
+		rule := store.Rule{
+			ID: payload.ID, Name: payload.Name, PatternPath: payload.PatternPath,
+			MatchFormat: payload.MatchFormat, MatchDownstreamFmt: payload.MatchDownstreamFmt,
+			MatchDownstreams: payload.MatchDownstreams, PipelineConfig: payload.PipelineConfig,
+			IsEnabled: payload.IsEnabled,
+		}
+		if payload.PatternModels != nil {
+			rule.PatternModels = *payload.PatternModels
+		} else if payload.PatternModel != nil && *payload.PatternModel != "" {
+			rule.PatternModels = []string{*payload.PatternModel}
 		}
 		if rule.Name == "" || rule.PatternPath == "" {
 			writeError(w, http.StatusBadRequest, "name and pattern_path are required")
@@ -40,6 +62,19 @@ func (r *Router) handleRules(w http.ResponseWriter, req *http.Request) {
 					return
 				}
 			}
+		}
+		// Initialize nil slices to empty for storage
+		if rule.MatchFormat == nil {
+			rule.MatchFormat = []string{}
+		}
+		if rule.MatchDownstreamFmt == nil {
+			rule.MatchDownstreamFmt = []string{}
+		}
+		if rule.MatchDownstreams == nil {
+			rule.MatchDownstreams = []string{}
+		}
+		if rule.PatternModels == nil {
+			rule.PatternModels = []string{}
 		}
 		if err := r.store.CreateRule(&rule); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -74,14 +109,15 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 
 	case req.Method == http.MethodPut:
 		var update struct {
-			Name                  string   `json:"name"`
-			PatternPath           string   `json:"pattern_path"`
-			PatternModel          string   `json:"pattern_model"`
-			MatchFormat           []string `json:"match_format"`
-			MatchDownstreamFmt    []string `json:"match_downstream_format"`
-			MatchDownstreams      []string `json:"match_downstreams"`
-			PipelineConfig        string   `json:"pipeline_config"`
-			IsEnabled             *bool    `json:"is_enabled"`
+			Name               string    `json:"name"`
+			PatternPath        string    `json:"pattern_path"`
+			PatternModel       *string   `json:"pattern_model"`
+			PatternModels      *[]string `json:"pattern_models"`
+			MatchFormat        []string  `json:"match_format"`
+			MatchDownstreamFmt []string  `json:"match_downstream_format"`
+			MatchDownstreams   []string  `json:"match_downstreams"`
+			PipelineConfig     string    `json:"pipeline_config"`
+			IsEnabled          *bool     `json:"is_enabled"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&update); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -91,7 +127,8 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 		// Heuristic: if the payload supplies rule-content fields, do a full update;
 		// otherwise treat it as a backward-compatible enabled-only toggle.
 		if update.Name != "" || update.PatternPath != "" || update.PipelineConfig != "" ||
-			update.MatchFormat != nil || update.MatchDownstreamFmt != nil || update.MatchDownstreams != nil {
+			update.MatchFormat != nil || update.MatchDownstreamFmt != nil || update.MatchDownstreams != nil ||
+			update.PatternModels != nil || update.PatternModel != nil {
 			// Full rule update
 			existing, err := r.store.GetRule(id)
 			if err != nil {
@@ -105,7 +142,15 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 			if update.PatternPath != "" {
 				existing.PatternPath = update.PatternPath
 			}
-			existing.PatternModel = update.PatternModel // allow setting to ""
+			// Legacy pattern_model is accepted on input, but responses are canonical.
+			if update.PatternModels != nil {
+				existing.PatternModels = *update.PatternModels
+			} else if update.PatternModel != nil {
+				existing.PatternModels = []string{}
+				if *update.PatternModel != "" {
+					existing.PatternModels = []string{*update.PatternModel}
+				}
+			}
 			if update.MatchFormat != nil {
 				existing.MatchFormat = update.MatchFormat
 			}

@@ -375,3 +375,56 @@ func TestCreateRule_RejectsInvalidDownstream(t *testing.T) {
 	}
 }
 
+func TestRuleAPI_MultiplePatternModelsAndClear(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+	body := map[string]interface{}{"name": "multi", "pattern_path": "*", "pattern_models": []string{"a", "b"}, "pipeline_config": "[]", "is_enabled": true}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(data))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var created store.Rule
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if len(created.PatternModels) != 2 {
+		t.Fatalf("created %#v", created)
+	}
+
+	data = []byte(`{"pattern_models":[]}`)
+	req = httptest.NewRequest(http.MethodPut, "/api/rules/"+created.ID, bytes.NewReader(data))
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("clear: %d %s", w.Code, w.Body.String())
+	}
+	var cleared store.Rule
+	if err := json.NewDecoder(w.Body).Decode(&cleared); err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared.PatternModels) != 0 {
+		t.Fatalf("cleared %#v", cleared)
+	}
+}
+
+func TestRuleAPI_LegacyPatternModelCompatibility(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+	data := []byte(`{"name":"legacy","pattern_path":"*","pattern_model":"legacy-model","pipeline_config":"[]","is_enabled":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(data))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var created store.Rule
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if len(created.PatternModels) != 1 || created.PatternModels[0] != "legacy-model" {
+		t.Fatalf("created %#v", created)
+	}
+}
