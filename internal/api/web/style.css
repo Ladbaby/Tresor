@@ -2522,6 +2522,70 @@ html[data-theme="light"] form select {
     color: var(--accent);
 }
 
+/* Per-format URL inputs in the downstream detail pane */
+.detail-section-hint {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    margin-left: 0.4rem;
+}
+
+.detail-format-urls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.format-urls-empty {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 0.78rem;
+    padding: 0.3rem 0;
+}
+
+.format-url-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.format-url-row .format-icon {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+}
+
+.format-url-label {
+    min-width: 110px;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.format-url-input {
+    flex: 1;
+    padding: 0.4rem 0.6rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    transition: border-color 0.15s;
+}
+
+.format-url-input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+}
+
+.format-url-input::placeholder {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
 .format-checkbox input[type="checkbox"] {
     display: none;
 }

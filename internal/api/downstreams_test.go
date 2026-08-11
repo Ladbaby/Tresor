@@ -544,3 +544,87 @@ func TestUpdateDownstream_ExplicitEmptyModels_Clears(t *testing.T) {
 		t.Fatalf("base_url wiped: got %q", after.BaseURL)
 	}
 }
+
+// format_urls: validation rejects non-URL values on create.
+func TestCreateDownstream_InvalidFormatURL_Rejected(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	body := map[string]interface{}{
+		"name":        "bad-fu",
+		"base_url":    "https://api.test.com",
+		"format_urls": map[string]string{"openai": "not-a-url"},
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid format URL, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// format_urls: PUT replaces the whole map, so omitted keys are removed.
+func TestUpdateDownstream_FormatURLs_ReplaceWholeMap(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	body := map[string]interface{}{
+		"name":         "deepseek",
+		"base_url":     "https://api.deepseek.com",
+		"api_formats":  []string{"openai", "anthropic"},
+		"format_urls":  map[string]string{"anthropic": "https://api.deepseek.com/anthropic"},
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var ds store.Downstream
+	json.NewDecoder(w.Body).Decode(&ds)
+
+	// Patch: only openai override — anthropic key should be dropped.
+	if got := patchDownstream(handler, ds.ID, map[string]interface{}{
+		"format_urls": map[string]string{"openai": "https://api.deepseek.com/openai"},
+	}); got != http.StatusOK {
+		t.Fatalf("patch: expected 200, got %d", got)
+	}
+
+	after, err := getDownstreamFresh(handler, ds.ID)
+	if err != nil {
+		t.Fatalf("read after patch: %v", err)
+	}
+	if _, ok := after.FormatURLs["anthropic"]; ok {
+		t.Fatal("anthropic key should be removed by full-map replacement")
+	}
+	if after.FormatURLs["openai"] != "https://api.deepseek.com/openai" {
+		t.Fatalf("openai URL: got %q", after.FormatURLs["openai"])
+	}
+	// Other fields must survive.
+	if after.Name != "deepseek" {
+		t.Fatalf("name wiped: got %q", after.Name)
+	}
+	if after.BaseURL != "https://api.deepseek.com" {
+		t.Fatalf("base_url wiped: got %q", after.BaseURL)
+	}
+}
+
+// format_urls: validation rejects non-URL values on update.
+func TestUpdateDownstream_InvalidFormatURL_Rejected(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	seeded := seedDownstreamForPatch(t, handler, "fu-bad", "https://fb.test",
+		[]string{"openai"}, nil)
+
+	if got := patchDownstream(handler, seeded.ID, map[string]interface{}{
+		"format_urls": map[string]string{"openai": "ftp://bad"},
+	}); got != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", got)
+	}
+}

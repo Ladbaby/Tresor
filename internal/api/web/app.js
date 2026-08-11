@@ -16,6 +16,15 @@ const FORMAT_BADGE_CLASS = {
     gemini: 'format-gemini',
 };
 
+// Map an api_formats token to the icon-filename stem in icons/.
+// Mirrors the inline mapping used in the format-checkbox section so
+// per-format URL rows reuse the same icons.
+function formatIconStem(f) {
+    if (f === 'openai') return 'openai-completions';
+    if (f === 'openai_responses') return 'openai-responses';
+    return f;
+}
+
 // ---- Theme detection & toggle (session-only, no persistence) ----
 (function initTheme() {
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -977,6 +986,27 @@ function selectSidebarItem(id) {
     });
 }
 
+function renderFormatURLInputs(ds) {
+    const formats = ds.api_formats || [];
+    const urls = ds.format_urls || {};
+    if (formats.length === 0) {
+        return '<div class="format-urls-empty">Pick API formats above to configure per-format URLs.</div>';
+    }
+    return formats.map(f => {
+        const stem = formatIconStem(f);
+        const val = urls[f] || '';
+        return `
+            <div class="format-url-row">
+                <img class="format-icon icon-${esc(f)}" src="icons/${esc(stem)}.svg" alt="" aria-hidden="true">
+                <span class="format-url-label">${esc(FORMAT_LABELS[f] || f)}</span>
+                <input type="url" class="format-url-input" data-format="${esc(f)}"
+                       value="${esc(val)}"
+                       placeholder="${esc(ds.base_url || 'https://api.example.com')}"
+                       autocomplete="off">
+            </div>`;
+    }).join('');
+}
+
 function renderDownstreamDetail(ds) {
     const formats = ds.api_formats || [];
     const models = ds.output_model_ids || [];
@@ -1010,6 +1040,12 @@ function renderDownstreamDetail(ds) {
             <label>API Host</label>
             <div class="detail-row">
                 <input type="url" class="detail-edit-url" value="${esc(ds.base_url || '')}" placeholder="https://api.example.com" autocomplete="off">
+            </div>
+        </div>
+        <div class="detail-section">
+            <label>Per-format URLs <span class="detail-section-hint">— leave blank to fall back to the global base URL</span></label>
+            <div class="detail-format-urls">
+                ${renderFormatURLInputs(ds)}
             </div>
         </div>
         <div class="detail-section">
@@ -1074,6 +1110,25 @@ function refreshDownstreamDetail() {
                 if (err) { t.value = prev; return; }
                 _currentDownstream.base_url = newUrl;
             });
+        } else if (t.classList.contains('format-url-input')) {
+            const format = t.dataset.format;
+            const newURL = t.value.trim();
+            const currentURL = (_currentDownstream.format_urls || {})[format] || '';
+            if (newURL === currentURL) return;
+            const prev = currentURL;
+            // Build the complete map from all visible inputs so a single
+            // blur sends every format's current value (replacing the whole
+            // map server-side). Empty inputs are omitted, which the API
+            // treats as "remove the key" → engine falls back to base_url.
+            const urls = {};
+            root.querySelectorAll('.format-url-input').forEach(input => {
+                const v = input.value.trim();
+                if (v) urls[input.dataset.format] = v;
+            });
+            await autoSaveDownstreamField(_currentDownstream.id, { format_urls: urls }, (err) => {
+                if (err) { t.value = prev; return; }
+                _currentDownstream.format_urls = urls;
+            });
         } else if (t.classList.contains('detail-edit-key')) {
             // ponytail: empty → no-op. typing replaces the saved key on save.
             if (t.value === '') return;
@@ -1098,7 +1153,7 @@ function refreshDownstreamDetail() {
     root.addEventListener('keydown', (e) => {
         if (e.key !== 'Enter') return;
         const t = e.target;
-        if (t.matches('.detail-edit-name, .detail-edit-url, .detail-edit-key, .add-model-input')) {
+        if (t.matches('.detail-edit-name, .detail-edit-url, .detail-edit-key, .format-url-input, .add-model-input')) {
             e.preventDefault();
             t.blur();
         }
@@ -1117,6 +1172,11 @@ function refreshDownstreamDetail() {
                     root.querySelectorAll('.format-checkboxes input[type="checkbox"]').forEach(c => { c.checked = target.includes(c.value); });
                     return;
                 }
+                // Re-render the detail pane so the per-format URL rows
+                // appear/disappear in sync with the checked formats.
+                _currentDownstream.api_formats = checked;
+                refreshDownstreamDetail();
+                selectSidebarItem(_currentDownstream.id);
             });
         }
     });
@@ -1417,6 +1477,7 @@ async function createNewDownstream() {
                 api_key: '',
                 api_formats: [],
                 output_model_ids: [],
+                format_urls: {},
             }),
         });
         // Refresh the list and switch the selection to the new one.

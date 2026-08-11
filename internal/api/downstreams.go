@@ -49,6 +49,15 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid base_url: "+err.Error())
 			return
 		}
+		// Validate per-format URL overrides, if any
+		if ds.FormatURLs != nil {
+			for f, u := range ds.FormatURLs {
+				if err := proxy.ValidateOutboundURL(u); err != nil {
+					writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid format_urls[%s]: %v", f, err))
+					return
+				}
+			}
+		}
 		if err := r.store.CreateDownstream(&ds); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -137,11 +146,12 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 
 	case http.MethodPut:
 		var patch struct {
-			Name           *string   `json:"name"`
-			BaseURL        *string   `json:"base_url"`
-			APIKey         *string   `json:"api_key"`
-			ApiFormats     *[]string `json:"api_formats"`
-			OutputModelIDs *[]string `json:"output_model_ids"`
+			Name           *string            `json:"name"`
+			BaseURL        *string            `json:"base_url"`
+			APIKey         *string            `json:"api_key"`
+			ApiFormats     *[]string          `json:"api_formats"`
+			OutputModelIDs *[]string          `json:"output_model_ids"`
+			FormatURLs     *map[string]string `json:"format_urls"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -170,6 +180,19 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 		}
 		if patch.OutputModelIDs != nil {
 			existing.OutputModelIDs = append([]string(nil), *patch.OutputModelIDs...)
+		}
+		if patch.FormatURLs != nil {
+			// Validate every URL in the patch before committing; reject the
+			// whole request if any URL is invalid.
+			for f, u := range *patch.FormatURLs {
+				if err := proxy.ValidateOutboundURL(u); err != nil {
+					writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid format_urls[%s]: %v", f, err))
+					return
+				}
+			}
+			// Replace the whole map (not merge) so callers can clear keys by
+			// omitting them — the UI builds the complete map each save.
+			existing.FormatURLs = *patch.FormatURLs
 		}
 
 		if existing.BaseURL != "" {
@@ -275,7 +298,15 @@ func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Re
 // fetchModels calls the downstream provider's /models endpoint to discover available models.
 // It tries multiple URL patterns (/v1/models, /models) and returns specific error messages.
 func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
-	return fetchModelsByCreds(ds.BaseURL, ds.APIKey, ds.ApiFormats)
+	// Use the per-format URL for the primary format when configured, matching
+	// the engine's URL selection rule (format_urls[primary] if set, else base_url).
+	baseURL := ds.BaseURL
+	if ds.FormatURLs != nil && len(ds.ApiFormats) > 0 {
+		if u := ds.FormatURLs[ds.ApiFormats[0]]; u != "" {
+			baseURL = u
+		}
+	}
+	return fetchModelsByCreds(baseURL, ds.APIKey, ds.ApiFormats)
 }
 
 // fetchModelsByCreds fetches models given raw credentials (used for both existing

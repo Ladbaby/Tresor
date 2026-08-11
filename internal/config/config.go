@@ -72,6 +72,14 @@ type DownstreamCfg struct {
 	ApiFormats     []string `yaml:"api_formats,omitempty"`
 	OutputModelIDs []string `yaml:"output_model_ids,omitempty"`
 
+	// FormatURLs maps API format names (openai, openai_responses, anthropic, gemini)
+	// to per-format base URLs. When set, the engine uses the format-specific URL
+	// for requests in that format, falling back to BaseURL for formats without
+	// an override. Useful for providers that serve different API formats at
+	// different endpoints (e.g., DeepSeek serves Anthropic at /anthropic but
+	// OpenAI at the root URL).
+	FormatURLs map[string]string `yaml:"format_urls,omitempty"`
+
 	// ApiFormat is a legacy field accepted for backward-compatible YAML loading.
 	// It gets converted to ApiFormats during the sanitize step.
 	ApiFormat string `yaml:"api_format,omitempty"`

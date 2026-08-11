@@ -313,6 +313,14 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Add format_urls column (per-API-format base URL overrides). Default '{}'
+	// means every existing row falls back to BaseURL for all formats.
+	if !s.columnExists("downstreams", "format_urls") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN format_urls TEXT DEFAULT '{}'`); err != nil {
+			return fmt.Errorf("migrate add format_urls: %w", err)
+		}
+	}
+
 	// --- Rules: add format/downstream filter columns ---
 	// Add match_format column
 	if !s.columnExists("rules", "match_format") {
@@ -542,7 +550,7 @@ func (s *Store) SeedDefaults() error {
 	}
 	defer tx.Rollback()
 
-	stmtDS, err := tx.Prepare("INSERT INTO downstreams (id, name, base_url, api_key, api_formats) VALUES (?, ?, ?, ?, ?)")
+	stmtDS, err := tx.Prepare("INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls) VALUES (?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
@@ -560,7 +568,7 @@ func (s *Store) SeedDefaults() error {
 			formats = []string{}
 		}
 		formatsJSON, _ := json.Marshal(formats)
-		if _, err := stmtDS.Exec(d.ID, d.Name, d.BaseURL, d.APIKey, string(formatsJSON)); err != nil {
+		if _, err := stmtDS.Exec(d.ID, d.Name, d.BaseURL, d.APIKey, string(formatsJSON), "{}"); err != nil {
 			return fmt.Errorf("seed downstream %s: %w", d.ID, err)
 		}
 		for _, m := range d.Models {
@@ -796,6 +804,18 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 			return fmt.Errorf("marshal api_formats for %s: %w", d.ID, err)
 		}
 
+		// Marshal format_urls (per-API-format base URL overrides). An unset
+		// nil map marshals to "null"; normalize to "{}" so the JSON decode
+		// path always sees an object.
+		formatURLs := d.FormatURLs
+		if formatURLs == nil {
+			formatURLs = map[string]string{}
+		}
+		urlsJSON, err := json.Marshal(formatURLs)
+		if err != nil {
+			return fmt.Errorf("marshal format_urls for %s: %w", d.ID, err)
+		}
+
 		// Check if this downstream already exists
 		var exists bool
 		if err := tx.QueryRow("SELECT COUNT(*) > 0 FROM downstreams WHERE id = ?", d.ID).Scan(&exists); err != nil {
@@ -804,8 +824,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 
 		if exists {
 			if _, err := tx.Exec(
-				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ? WHERE id = ?",
-				d.Name, d.BaseURL, d.APIKey, string(formatsJSON), d.ID); err != nil {
+				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ? WHERE id = ?",
+				d.Name, d.BaseURL, d.APIKey, string(formatsJSON), string(urlsJSON), d.ID); err != nil {
 				return fmt.Errorf("update downstream %s: %w", d.ID, err)
 			}
 			// Replace output_model_ids from YAML
@@ -827,8 +847,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 			}
 		} else {
 			if _, err := tx.Exec(
-				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats) VALUES (?, ?, ?, ?, ?)",
-				d.ID, d.Name, d.BaseURL, d.APIKey, string(formatsJSON)); err != nil {
+				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls) VALUES (?, ?, ?, ?, ?, ?)",
+				d.ID, d.Name, d.BaseURL, d.APIKey, string(formatsJSON), string(urlsJSON)); err != nil {
 				return fmt.Errorf("insert downstream %s: %w", d.ID, err)
 			}
 			if len(d.OutputModelIDs) > 0 {

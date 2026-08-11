@@ -23,14 +23,14 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	// --- Downstreams with output_model_ids ---
 	var downstreams []config.DownstreamCfg
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_key, api_formats FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_key, api_formats, format_urls FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return fmt.Errorf("query downstreams: %w", err)
 	}
 	for rows.Next() {
 		var d config.DownstreamCfg
-		var formatsJSON string
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON); err != nil {
+		var formatsJSON, urlsJSON string
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &urlsJSON); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan downstream: %w", err)
 		}
@@ -39,6 +39,13 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 			if err := json.Unmarshal([]byte(formatsJSON), &d.ApiFormats); err != nil {
 				rows.Close()
 				return fmt.Errorf("parse api_formats for downstream %s: %w", d.ID, err)
+			}
+		}
+		d.FormatURLs = map[string]string{}
+		if urlsJSON != "" && urlsJSON != "{}" {
+			if err := json.Unmarshal([]byte(urlsJSON), &d.FormatURLs); err != nil {
+				rows.Close()
+				return fmt.Errorf("parse format_urls for downstream %s: %w", d.ID, err)
 			}
 		}
 		d.OutputModelIDs = s.listOutputModelIDs(d.ID)

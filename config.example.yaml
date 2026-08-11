@@ -83,6 +83,23 @@ downstreams:
       - gemini-3.5-flash
       - gemini-3.0-pro
 
+  # DeepSeek exposes different endpoints for different API formats:
+  # OpenAI Chat Completions + OpenAI Responses are served at the root URL,
+  # but Anthropic Messages is served at /anthropic. The optional
+  # `format_urls` map lets you specify per-format base URLs that override
+  # `base_url` for that format only. Formats without an entry fall back
+  # to `base_url`.
+  - id: deepseek
+    name: DeepSeek
+    api_formats: [openai, anthropic]
+    base_url: https://api.deepseek.com
+    format_urls:
+      anthropic: https://api.deepseek.com/anthropic
+    api_key: ""
+    output_model_ids:
+      - deepseek-v4-pro
+      - deepseek-v4-flash
+
 # Routing rules (OPTIONAL) — customize forwarding with transform pipelines.
 # Rules are NOT required for normal forwarding: model resolution uses aliases and
 # downstream output_model_ids automatically. Rules only add plugin pipelines;

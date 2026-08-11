@@ -1619,3 +1619,143 @@ func TestEngine_HandleProxy_GeminiModelsListing_PageSize(t *testing.T) {
 		t.Errorf("expected 2 models with pageSize=2, got %d", len(payload.Models))
 	}
 }
+
+// TestEngine_HandleProxy_FormatURL_SelectsByDownstreamFormat verifies that
+// when a downstream has per-format URL overrides, the engine routes the
+// request to the URL matching the format the downstream will receive
+// (no auto-translation path) and falls back to BaseURL when no override
+// is set for that format.
+func TestEngine_HandleProxy_FormatURL_SelectsByDownstreamFormat(t *testing.T) {
+	s := newTestStore(t)
+
+	var openaiHit, anthropicHit bool
+	openaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openaiHit = true
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"chatcmpl-openai"}`))
+	}))
+	defer openaiServer.Close()
+
+	anthropicServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		anthropicHit = true
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"msg-anthropic"}`))
+	}))
+	defer anthropicServer.Close()
+
+	// DeepSeek-style: base URL serves OpenAI, format_urls overrides for Anthropic.
+	// The downstream declares both formats so no auto-translation runs.
+	if err := s.CreateDownstream(&store.Downstream{
+		ID:         "deepseek",
+		Name:       "DeepSeek",
+		BaseURL:    openaiServer.URL,
+		APIKey:     "sk-test",
+		ApiFormats: []string{"openai", "anthropic"},
+		FormatURLs: map[string]string{
+			"anthropic": anthropicServer.URL,
+		},
+		OutputModelIDs: []string{"deepseek-chat"},
+	}); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	// --- Test 1: OpenAI-format request → base URL ---
+	openaiHit = false
+	anthropicHit = false
+	body := `{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+	resp := w.Result()
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("openai request: expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	if !openaiHit {
+		t.Fatal("OpenAI-format request should hit openaiServer (BaseURL)")
+	}
+	if anthropicHit {
+		t.Fatal("OpenAI-format request should NOT hit anthropicServer")
+	}
+
+	// --- Test 2: Anthropic-format request → format_urls.anthropic ---
+	openaiHit = false
+	anthropicHit = false
+	body = `{"model":"deepseek-chat","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w = httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+	resp = w.Result()
+	respBody, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("anthropic request: expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	if !anthropicHit {
+		t.Fatal("Anthropic-format request should hit anthropicServer (format_urls.anthropic)")
+	}
+	if openaiHit {
+		t.Fatal("Anthropic-format request should NOT hit openaiServer")
+	}
+}
+
+// TestEngine_HandleProxy_FormatURL_FallsBackToBaseURL ensures that formats
+// without a per-format override still use the downstream's BaseURL.
+func TestEngine_HandleProxy_FormatURL_FallsBackToBaseURL(t *testing.T) {
+	s := newTestStore(t)
+
+	var openaiHit, anthropicHit bool
+	openaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openaiHit = true
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"openai-only"}`))
+	}))
+	defer openaiServer.Close()
+
+	anthropicServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		anthropicHit = true
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"anthropic-only"}`))
+	}))
+	defer anthropicServer.Close()
+
+	// BaseURL serves OpenAI; no FormatURLs set → both formats route to openaiServer.
+	if err := s.CreateDownstream(&store.Downstream{
+		ID:         "openai-only",
+		Name:       "OpenAI",
+		BaseURL:    openaiServer.URL,
+		APIKey:     "sk-test",
+		ApiFormats: []string{"openai", "anthropic"},
+		OutputModelIDs: []string{"oai-chat"},
+	}); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	// Anthropic request to a downstream that supports both formats and has
+	// no per-format override → falls back to BaseURL (openaiServer).
+	openaiHit = false
+	anthropicHit = false
+	body := `{"model":"oai-chat","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+	resp := w.Result()
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	if !openaiHit {
+		t.Fatal("Anthropic request to downstream without override should fall back to BaseURL")
+	}
+	if anthropicHit {
+		t.Fatal("Anthropic request should NOT hit anthropicServer (no override for anthropic)")
+	}
+}

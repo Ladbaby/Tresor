@@ -8,16 +8,24 @@ import (
 
 // Downstream is a resolved target endpoint.
 type Downstream struct {
-ID         string
-Name       string
-BaseURL    string
-APIKey     string
-ApiFormats []string
+	ID         string
+	Name       string
+	BaseURL    string
+	APIKey     string
+	ApiFormats []string
+	// FormatURLs maps API format names to per-format base URLs.
+	// Empty/nil map means "use BaseURL for all formats".
+	FormatURLs map[string]string
 }
 
 // PipelineContext carries state through the transformation pipeline.
 type PipelineContext struct {
 	TargetDownstream *Downstream
+	// DownstreamFormat is the API format the downstream will actually receive
+	// (after any auto-translation). Used by forwardRequest to select the
+	// correct per-format URL from TargetDownstream.FormatURLs, and is also
+	// used for empty-response detection / stream format detection.
+	DownstreamFormat string
 	Variables        map[string]interface{}
 }
 

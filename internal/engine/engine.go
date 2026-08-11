@@ -690,11 +690,12 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	entry.DownstreamName = result.ds.Name
 	ctx := &PipelineContext{
 		TargetDownstream: &Downstream{
-			ID:         result.ds.ID,
-			Name:       result.ds.Name,
-			BaseURL:    result.ds.BaseURL,
-			APIKey:     result.ds.APIKey,
-			ApiFormats: result.ds.ApiFormats,
+			ID:           result.ds.ID,
+			Name:         result.ds.Name,
+			BaseURL:      result.ds.BaseURL,
+			APIKey:       result.ds.APIKey,
+			ApiFormats:   result.ds.ApiFormats,
+			FormatURLs:   result.ds.FormatURLs,
 		},
 		Variables: make(map[string]interface{}),
 	}
@@ -718,6 +719,8 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	} else if len(result.ds.ApiFormats) > 0 {
 		downstreamFormat = result.ds.ApiFormats[0]
 	}
+	// Stash on the context so forwardRequest can pick the right per-format URL.
+	ctx.DownstreamFormat = downstreamFormat
 
 	var cancelFn context.CancelFunc
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -1601,7 +1604,17 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 // SSRF validation is not applied here — downstreams are admin-configured via auth-protected API.
 // Returns the response and a cancel function; caller must call cancel after consuming resp.Body.
 func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *PipelineContext) (*http.Response, context.CancelFunc, error) {
-	baseURL := strings.TrimRight(ctx.TargetDownstream.BaseURL, "/")
+	// Pick the base URL: prefer a per-format override (e.g. DeepSeek serves
+	// Anthropic at /anthropic but OpenAI at the root URL), fall back to
+	// BaseURL when no override is configured for the downstream format.
+	baseURL := ""
+	if ctx.DownstreamFormat != "" && ctx.TargetDownstream.FormatURLs != nil {
+		baseURL = ctx.TargetDownstream.FormatURLs[ctx.DownstreamFormat]
+	}
+	if baseURL == "" {
+		baseURL = ctx.TargetDownstream.BaseURL
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
 
 	// Determine the path to append. If the base_url already contains the API
 	// version prefix (e.g., "/v1"), strip it from the request path to avoid

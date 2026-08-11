@@ -19,13 +19,16 @@ type Downstream struct {
 	APIKey         string    `json:"api_key,omitempty"`
 	ApiFormats     []string  `json:"api_formats"`
 	OutputModelIDs []string  `json:"output_model_ids,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	// FormatURLs maps API format names to per-format base URLs. Nil or empty
+	// map means "fall back to BaseURL for all formats".
+	FormatURLs map[string]string `json:"format_urls,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
 }
 
 // ListDownstreams returns all downstreams with their output model IDs.
 func (s *Store) ListDownstreams() ([]Downstream, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_key, api_formats, created_at FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_key, api_formats, format_urls, created_at FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list downstreams: %w", err)
 	}
@@ -34,14 +37,11 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 	var ds []Downstream
 	for rows.Next() {
 		var d Downstream
-		var formatsJSON string
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &d.CreatedAt); err != nil {
+		var formatsJSON, urlsJSON string
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &urlsJSON, &d.CreatedAt); err != nil {
 			return nil, err
 		}
-		d.ApiFormats = []string{}
-		if formatsJSON != "" && formatsJSON != "[]" {
-			json.Unmarshal([]byte(formatsJSON), &d.ApiFormats)
-		}
+		decodeDownstreamJSON(&d, formatsJSON, urlsJSON)
 		d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 		ds = append(ds, d)
 	}
@@ -51,19 +51,32 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 // GetDownstream returns a single downstream by ID with output model IDs.
 func (s *Store) GetDownstream(id string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON string
+	var formatsJSON, urlsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, base_url, api_key, api_formats, created_at FROM downstreams WHERE id = ?`, id).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &d.CreatedAt)
+		`SELECT id, name, base_url, api_key, api_formats, format_urls, created_at FROM downstreams WHERE id = ?`, id).
+		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &urlsJSON, &d.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get downstream %s: %w", id, err)
 	}
-	d.ApiFormats = []string{}
-	if formatsJSON != "" && formatsJSON != "[]" {
-		json.Unmarshal([]byte(formatsJSON), &d.ApiFormats)
-	}
+	decodeDownstreamJSON(&d, formatsJSON, urlsJSON)
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil
+}
+
+// decodeDownstreamJSON populates the JSON-encoded list/map fields on a
+// Downstream from their string representations. Treats both empty strings
+// and the JSON literal "[]" / "{}" as the corresponding zero value, and
+// guarantees the result is a non-nil slice/map (the JSON omitempty tag on
+// ApiFormats / FormatURLs would otherwise omit them from API responses).
+func decodeDownstreamJSON(d *Downstream, formatsJSON, urlsJSON string) {
+	d.ApiFormats = []string{}
+	if formatsJSON != "" && formatsJSON != "[]" {
+		_ = json.Unmarshal([]byte(formatsJSON), &d.ApiFormats)
+	}
+	d.FormatURLs = map[string]string{}
+	if urlsJSON != "" && urlsJSON != "{}" {
+		_ = json.Unmarshal([]byte(urlsJSON), &d.FormatURLs)
+	}
 }
 
 // CreateDownstream inserts a new downstream and its output model IDs.
@@ -83,9 +96,16 @@ func (s *Store) CreateDownstream(d *Downstream) error {
 		formats = []string{}
 	}
 	formatsJSON, _ := json.Marshal(formats)
+
+	formatURLs := d.FormatURLs
+	if formatURLs == nil {
+		formatURLs = map[string]string{}
+	}
+	urlsJSON, _ := json.Marshal(formatURLs)
+
 	_, err = tx.Exec(
-		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats) VALUES (?, ?, ?, ?, ?)`,
-		d.ID, d.Name, d.BaseURL, d.APIKey, string(formatsJSON))
+		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls) VALUES (?, ?, ?, ?, ?, ?)`,
+		d.ID, d.Name, d.BaseURL, d.APIKey, string(formatsJSON), string(urlsJSON))
 	if err != nil {
 		return fmt.Errorf("create downstream: %w", err)
 	}
@@ -119,9 +139,16 @@ func (s *Store) UpdateDownstream(d *Downstream) error {
 		formats = []string{}
 	}
 	formatsJSON, _ := json.Marshal(formats)
+
+	formatURLs := d.FormatURLs
+	if formatURLs == nil {
+		formatURLs = map[string]string{}
+	}
+	urlsJSON, _ := json.Marshal(formatURLs)
+
 	res, err := tx.Exec(
-		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ? WHERE id = ?`,
-		d.Name, d.BaseURL, d.APIKey, string(formatsJSON), d.ID)
+		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ? WHERE id = ?`,
+		d.Name, d.BaseURL, d.APIKey, string(formatsJSON), string(urlsJSON), d.ID)
 	if err != nil {
 		return fmt.Errorf("update downstream: %w", err)
 	}
@@ -248,25 +275,22 @@ func (s *Store) ListAllModels() ([]string, error) {
 // the same model, the one with the earliest created_at wins (deterministic).
 func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON string
+	var formatsJSON, urlsJSON string
 	err := s.db.QueryRow(
-		`SELECT d.id, d.name, d.base_url, d.api_key, d.api_formats, d.created_at
+		`SELECT d.id, d.name, d.base_url, d.api_key, d.api_formats, d.format_urls, d.created_at
 		 FROM downstreams d
 		 JOIN output_model_ids o ON o.downstream_id = d.id
 		 WHERE o.model_id = ?
 		 ORDER BY d.created_at ASC
 		 LIMIT 1`, model).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &d.CreatedAt)
+		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &urlsJSON, &d.CreatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("find downstream by output model %s: %w", model, err)
 	}
-	d.ApiFormats = []string{}
-	if formatsJSON != "" && formatsJSON != "[]" {
-		json.Unmarshal([]byte(formatsJSON), &d.ApiFormats)
-	}
+	decodeDownstreamJSON(&d, formatsJSON, urlsJSON)
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil
 }
