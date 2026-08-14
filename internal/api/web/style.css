@@ -3565,6 +3565,38 @@ html[data-theme="light"] form select {
     font-size: 1.15rem;
 }
 
+/* Top Provider / Top Model cards: icon-on-the-left, name on the right. */
+.summary-value-icon {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 1.15rem;
+    word-break: break-word;
+    min-height: 32px;
+}
+.summary-value-icon .model-icon {
+    width: 28px;
+    height: 28px;
+    margin-right: 0;
+    flex-shrink: 0;
+}
+.summary-value-icon.summary-na {
+    color: var(--text-muted);
+    font-weight: 400;
+    justify-content: flex-start;
+}
+
+/* Model cell — used inside tables; icon left of the code-styled name. */
+.model-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+.model-cell .model-icon {
+    margin-right: 0;
+    flex-shrink: 0;
+}
+
 .summary-sub {
     font-size: 0.75rem;
     color: var(--text-muted);

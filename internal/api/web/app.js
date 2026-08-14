@@ -238,6 +238,32 @@ function modelIconHTML(modelID) {
     return `<img class="model-icon" src="/api/icons/${encodeURIComponent(modelID)}" alt="" loading="lazy" onerror="this.style.display='none'">`;
 }
 
+// Provider icon helper. Same as modelIconHTML — kept as a separate name so
+// the call site ("this is a downstream, not a model") reads clearly. The
+// icon endpoint serves the same icon pool either way.
+//
+// IMPORTANT: pass the human-friendly Name (e.g. "Minimax", "Anthropic") here,
+// not the downstream_id. Auto-generated UUID ids like "23695a12" don't
+// pattern-match in the icon table, but their display names do via the
+// first-segment fallback. The Downstreams tab follows this same convention.
+function providerIconHTML(name) {
+    return modelIconHTML(name);
+}
+
+// Cache hit rate formatted string for a single row. `captureOn` controls the
+// "N/A" fallback when payload capture is disabled; `cached` is the cache_read
+// token count; `inTok` is the input token count for the same row.
+function formatCacheCell(captureOn, cached, inTok) {
+    if (!captureOn) {
+        return '<span class="summary-na">N/A</span>';
+    }
+    if (inTok + cached > 0 && cached > 0) {
+        const rate = (cached / (inTok + cached) * 100);
+        return rate.toFixed(1) + '%';
+    }
+    return '0.0%';
+}
+
 async function fetchPlugins() {
     // ponytail: derived state per render call. cachedPlugins below mirrors so
     // the pipeline editor can re-find metadata without refetch.
@@ -4460,9 +4486,10 @@ async function loadDashboard(range) {
 
     try {
         const data = await api(url);
-        renderDashboardSummary(data.total || {}, data.capture_payloads, data.models || []);
+        renderDashboardSummary(data.total || {}, data.capture_payloads, data.models || [], data.providers || []);
         renderDashboardSeries(data.series || []);
         renderDashboardModels(data.models || [], data.capture_payloads);
+        renderDashboardProviders(data.providers || [], data.capture_payloads);
     } catch (err) {
         renderDashboardError(err.message || String(err));
     }
@@ -4475,11 +4502,16 @@ function setDashboardLoading() {
     document.getElementById('dash-cache-rate').classList.add('summary-na');
     document.getElementById('dash-cache-rate-detail').textContent = '';
     document.getElementById('dash-requests').textContent = '—';
+    document.getElementById('dash-top-provider').textContent = '—';
+    document.getElementById('dash-top-provider').classList.add('summary-na');
+    document.getElementById('dash-top-provider-detail').textContent = '';
     document.getElementById('dash-top-model').textContent = '—';
     document.getElementById('dash-top-model').classList.add('summary-na');
     document.getElementById('dash-top-model-detail').textContent = '';
     document.getElementById('dash-token-chart').innerHTML = '<div class="chart-empty">Loading…</div>';
     document.getElementById('dash-models-body').innerHTML =
+        '<tr><td colspan="7" class="loading">Loading…</td></tr>';
+    document.getElementById('dash-providers-body').innerHTML =
         '<tr><td colspan="7" class="loading">Loading…</td></tr>';
 }
 
@@ -4487,14 +4519,17 @@ function renderDashboardError(msg) {
     document.getElementById('dash-total-tokens').textContent = '—';
     document.getElementById('dash-cache-rate').textContent = '—';
     document.getElementById('dash-requests').textContent = '—';
+    document.getElementById('dash-top-provider').textContent = '—';
     document.getElementById('dash-top-model').textContent = '—';
     document.getElementById('dash-token-chart').innerHTML =
         '<div class="chart-empty">Error: ' + esc(msg) + '</div>';
     document.getElementById('dash-models-body').innerHTML =
         '<tr><td colspan="7" class="loading">Error: ' + esc(msg) + '</td></tr>';
+    document.getElementById('dash-providers-body').innerHTML =
+        '<tr><td colspan="7" class="loading">Error: ' + esc(msg) + '</td></tr>';
 }
 
-function renderDashboardSummary(total, captureOn, models) {
+function renderDashboardSummary(total, captureOn, models, providers) {
     const totalIn = total.input_tokens || 0;
     const totalOut = total.output_tokens || 0;
     const totalTok = totalIn + totalOut;
@@ -4530,18 +4565,43 @@ function renderDashboardSummary(total, captureOn, models) {
     const reqEl = document.getElementById('dash-requests');
     reqEl.textContent = fmtNum(total.requests || 0);
 
+    // Top Provider card — mirror of Top Model: first row of the per-downstream
+    // aggregate. Icon resolves using the human-friendly Name (same convention
+    // as the Downstreams tab — auto-generated UUID ids like "23695a12" don't
+    // pattern-match in the icon table, but names like "Anthropic" or
+    // "Minimax" do via the first-segment fallback). Falls back to the ID
+    // only if the Name is empty.
+    const topProvEl = document.getElementById('dash-top-provider');
+    const topProvDetailEl = document.getElementById('dash-top-provider-detail');
+    topProvEl.classList.remove('summary-na', 'summary-long');
+    if (providers && providers.length > 0) {
+        const top = providers[0];
+        const provLabel = top.name || top.downstream_id || '—';
+        topProvEl.innerHTML = providerIconHTML(provLabel) +
+            '<span class="summary-icon-name">' + esc(provLabel) + '</span>';
+        const topTotal = (top.input_tokens || 0) + (top.output_tokens || 0);
+        topProvDetailEl.textContent = fmtNum(topTotal) + ' tokens · ' +
+            fmtNum(top.request_count || 0) + ' reqs';
+    } else {
+        topProvEl.innerHTML = '<span>—</span>';
+        topProvEl.classList.add('summary-na');
+        topProvDetailEl.textContent = '';
+    }
+
+    // Top Model card.
     const topEl = document.getElementById('dash-top-model');
     const topDetailEl = document.getElementById('dash-top-model-detail');
     topEl.classList.remove('summary-na', 'summary-long');
     if (models && models.length > 0) {
         const top = models[0];
         const topName = top.model || top.downstream_id || '—';
-        topEl.textContent = topName;
-        if (topName.length > 28) topEl.classList.add('summary-long');
+        topEl.innerHTML = providerIconHTML(topName) +
+            '<span class="summary-icon-name">' + esc(topName) + '</span>';
         const topTotal = (top.input_tokens || 0) + (top.output_tokens || 0);
-        topDetailEl.textContent = fmtNum(topTotal) + ' tokens · ' + fmtNum(top.request_count || 0) + ' reqs';
+        topDetailEl.textContent = fmtNum(topTotal) + ' tokens · ' +
+            fmtNum(top.request_count || 0) + ' reqs';
     } else {
-        topEl.textContent = '—';
+        topEl.innerHTML = '<span>—</span>';
         topEl.classList.add('summary-na');
         topDetailEl.textContent = '';
     }
@@ -4602,29 +4662,65 @@ function renderDashboardModels(models, captureOn) {
         const mTotal = inTok + outTok;
         const pct = grandTotal > 0 ? (mTotal / grandTotal * 100) : 0;
 
-        let cacheCell;
-        if (!captureOn) {
-            cacheCell = '<span class="summary-na">N/A</span>';
-        } else {
-            const cached = m.cache_read_tokens || 0;
-            const denom = inTok + cached;
-            if (denom > 0 && cached > 0) {
-                const rate = (cached / denom * 100);
-                cacheCell = rate.toFixed(1) + '%';
-            } else {
-                cacheCell = '0.0%';
-            }
-        }
+        const cacheCell = formatCacheCell(captureOn, m.cache_read_tokens || 0, inTok);
 
         const modelName = m.model || m.downstream_id || '—';
-        const modelClass = modelName.length > 28 ? 'class="num"' : '';
 
         html += '<tr>' +
-            '<td><code>' + esc(modelName) + '</code></td>' +
+            '<td><div class="model-cell">' + providerIconHTML(modelName) +
+                esc(modelName)
+            '</div></td>' +
             '<td class="num">' + esc(fmtNum(m.request_count || 0)) + '</td>' +
             '<td class="num">' + esc(fmtNum(inTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(mTotal)) + '</td>' +
+            '<td class="num">' + cacheCell + '</td>' +
+            '<td class="token-bar-cell">' +
+                '<div class="token-bar-track"><div class="token-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div>' +
+                '<span class="token-bar-pct">' + pct.toFixed(1) + '%</span>' +
+            '</td>' +
+            '</tr>';
+    }
+    tbody.innerHTML = html;
+}
+
+function renderDashboardProviders(providers, captureOn) {
+    const tbody = document.getElementById('dash-providers-body');
+    if (!providers || providers.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">No data for selected range</td></tr>';
+        return;
+    }
+
+    // Per-provider share of the total token volume for the selected range.
+    // Used to scale the distribution bars so the biggest provider fills
+    // the cell and smaller ones show as proportional slivers.
+    const grandTotal = providers.reduce((s, p) => s + (p.input_tokens || 0) + (p.output_tokens || 0), 0);
+
+    let html = '';
+    for (const p of providers) {
+        const inTok = p.input_tokens || 0;
+        const outTok = p.output_tokens || 0;
+        const pTotal = inTok + outTok;
+        const pct = grandTotal > 0 ? (pTotal / grandTotal * 100) : 0;
+
+        const cacheCell = formatCacheCell(captureOn, p.cache_read_tokens || 0, inTok);
+
+        // Display the human-friendly Name, falling back to downstream_id
+        // for orphaned rows (defensive only). Icon resolves via the Name
+        // — same convention as the Downstreams tab. Auto-generated UUID
+        // ids ("23695a12") don't pattern-match in the icon table, but
+        // names like "Anthropic" / "Minimax" do via the first-segment
+        // fallback in the icon resolver.
+        const provLabel = p.name || p.downstream_id || '—';
+
+        html += '<tr>' +
+            '<td><div class="model-cell">' + providerIconHTML(provLabel) +
+                esc(provLabel) +
+            '</div></td>' +
+            '<td class="num">' + esc(fmtNum(p.request_count || 0)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(inTok)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(pTotal)) + '</td>' +
             '<td class="num">' + cacheCell + '</td>' +
             '<td class="token-bar-cell">' +
                 '<div class="token-bar-track"><div class="token-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div>' +

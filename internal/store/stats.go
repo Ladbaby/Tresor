@@ -26,6 +26,26 @@ type TimeSeriesPoint struct {
 	RequestCount int64  `json:"request_count"`
 }
 
+// ProviderStatsRow is one row of the per-downstream aggregate used by the
+// "Top Providers" section of the Dashboard. One row per downstream (id is
+// the unique key from the downstreams table), totals summed across every
+// model routed through that downstream in the requested range.
+//
+// Name is the human-friendly display name from the downstreams table (e.g.
+// "Anthropic", "OpenAI Responses"). Falls back to DownstreamID when the
+// downstream has been deleted from the downstreams table — defensive only;
+// under normal operation the FK-on-delete cascade keeps these in sync.
+type ProviderStatsRow struct {
+	DownstreamID  string `json:"downstream_id"`
+	Name          string `json:"name"`
+	InputTokens   int64  `json:"input_tokens"`
+	OutputTokens  int64  `json:"output_tokens"`
+	CacheCreation int64  `json:"cache_creation_tokens"`
+	CacheRead     int64  `json:"cache_read_tokens"`
+	RequestCount  int64  `json:"request_count"`
+	CacheHitCount int64  `json:"cache_hit_count"`
+}
+
 // StatsQuery holds query parameters for the stats API.
 type StatsQuery struct {
 	From, To time.Time
@@ -190,6 +210,55 @@ func (s *Store) AggregateStats(q StatsQuery) ([]UsageStatsRow, error) {
 	for rows.Next() {
 		var r UsageStatsRow
 		if err := rows.Scan(&r.DownstreamID, &r.Model,
+			&r.InputTokens, &r.OutputTokens,
+			&r.CacheCreation, &r.CacheRead,
+			&r.RequestCount, &r.CacheHitCount); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// AggregateByProvider returns per-downstream aggregates for the given time
+// range, ordered by total tokens (input + output) descending. Unlike
+// AggregateStats, this collapses every model in a downstream into a single
+// row — it's the rollup used by the Dashboard's "Top Providers by Tokens"
+// section.
+//
+// The query LEFT JOINs against the downstreams table so each row carries
+// the human-friendly display name in addition to the unique id. Rows for
+// downstreams that no longer exist (the downstreams row was deleted after
+// the usage_stats row was written) fall back to DownstreamID for Name.
+func (s *Store) AggregateByProvider(q StatsQuery) ([]ProviderStatsRow, error) {
+	fromKey := bucketKey(q.From)
+	toKey := bucketKey(q.To)
+	rows, err := s.db.Query(`
+		SELECT u.downstream_id,
+		       COALESCE(d.name, u.downstream_id) AS display_name,
+		       COALESCE(SUM(u.input_tokens), 0),    COALESCE(SUM(u.output_tokens), 0),
+		       COALESCE(SUM(u.cache_creation), 0),
+		       COALESCE(SUM(u.cache_read), 0),
+		       COALESCE(SUM(u.request_count), 0),
+		       COALESCE(SUM(u.cache_hit_count), 0)
+		FROM usage_stats u
+		LEFT JOIN downstreams d ON d.id = u.downstream_id
+		WHERE u.bucket >= ? AND u.bucket <= ?
+		GROUP BY u.downstream_id
+		ORDER BY (SUM(u.input_tokens) + SUM(u.output_tokens)) DESC
+	`, fromKey, toKey)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate by provider: %w", err)
+	}
+	defer rows.Close()
+
+	result := []ProviderStatsRow{}
+	for rows.Next() {
+		var r ProviderStatsRow
+		if err := rows.Scan(&r.DownstreamID, &r.Name,
 			&r.InputTokens, &r.OutputTokens,
 			&r.CacheCreation, &r.CacheRead,
 			&r.RequestCount, &r.CacheHitCount); err != nil {

@@ -38,7 +38,7 @@
                 <button class="tab" data-tab="aliases">🔀 Aliases</button>
                 <button class="tab" data-tab="rules">📋 Rules</button>
                 <button class="tab" data-tab="settings">⚙️ Settings</button>
-                <button class="tab" data-tab="logs">📊 Logs</button>
+                <button class="tab" data-tab="logs">📜 Logs</button>
                 <button class="tab" data-tab="about">ℹ️ About</button>
             </nav>
 
@@ -92,8 +92,13 @@
                         <div class="summary-value" id="dash-requests">—</div>
                     </div>
                     <div class="summary-card">
+                        <div class="summary-label">Top Provider</div>
+                        <div class="summary-value summary-value-icon" id="dash-top-provider">—</div>
+                        <div class="summary-sub" id="dash-top-provider-detail"></div>
+                    </div>
+                    <div class="summary-card">
                         <div class="summary-label">Top Model</div>
-                        <div class="summary-value" id="dash-top-model">—</div>
+                        <div class="summary-value summary-value-icon" id="dash-top-model">—</div>
                         <div class="summary-sub" id="dash-top-model-detail"></div>
                     </div>
                 </div>
@@ -120,6 +125,26 @@
                             </tr>
                         </thead>
                         <tbody id="dash-models-body">
+                            <tr><td colspan="7" class="loading">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="dashboard-section">
+                    <h3>Top Providers by Tokens</h3>
+                    <table class="dash-models-table">
+                        <thead>
+                            <tr>
+                                <th>Provider</th>
+                                <th>Requests</th>
+                                <th>Input Tokens</th>
+                                <th>Output Tokens</th>
+                                <th>Total Tokens</th>
+                                <th>Cache Hit Rate</th>
+                                <th>Distribution</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dash-providers-body">
                             <tr><td colspan="7" class="loading">Loading…</td></tr>
                         </tbody>
                     </table>

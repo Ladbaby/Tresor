@@ -129,8 +129,9 @@ func (r *Router) handleStats(w http.ResponseWriter, req *http.Request) {
 				"requests":       int64(0),
 				"cache_hit_rate": nil,
 			},
-			"models": []interface{}{},
-			"series": []interface{}{},
+			"models":    []interface{}{},
+			"providers": []interface{}{},
+			"series":    []interface{}{},
 		})
 		return
 	}
@@ -144,6 +145,12 @@ func (r *Router) handleStats(w http.ResponseWriter, req *http.Request) {
 	models, err := r.store.AggregateStats(query)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load model stats: "+err.Error())
+		return
+	}
+
+	providers, err := r.store.AggregateByProvider(query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load provider stats: "+err.Error())
 		return
 	}
 
@@ -166,7 +173,8 @@ func (r *Router) handleStats(w http.ResponseWriter, req *http.Request) {
 			"requests":       totalReqs,
 			"cache_hit_rate": cacheHitRate, // nil when no cache data
 		},
-		"models": models,
-		"series": series,
+		"models":    models,
+		"providers": providers,
+		"series":    series,
 	})
 }

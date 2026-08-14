@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"tresor/internal/store"
 )
 
 func TestStats_EmptyResult(t *testing.T) {
@@ -57,6 +59,21 @@ func TestStats_WithData(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()
 
+	// Seed the downstreams table so the LEFT JOIN can resolve human-readable
+	// names for the providers section.
+	if err := router.store.CreateDownstream(&store.Downstream{
+		ID:   "anthropic",
+		Name: "Anthropic",
+	}); err != nil {
+		t.Fatalf("seed downstream anthropic: %v", err)
+	}
+	if err := router.store.CreateDownstream(&store.Downstream{
+		ID:   "openai",
+		Name: "OpenAI",
+	}); err != nil {
+		t.Fatalf("seed downstream openai: %v", err)
+	}
+
 	// Seed two requests for the same bucket.
 	if err := router.store.RecordUsageStats("2026-06-27T15:00:00Z", "anthropic", "claude-opus-4-7",
 		100, 50, 0, 30); err != nil {
@@ -91,6 +108,14 @@ func TestStats_WithData(t *testing.T) {
 			RequestCount int64  `json:"request_count"`
 			CacheRead    int64  `json:"cache_read_tokens"`
 		} `json:"models"`
+		Providers []struct {
+			DownstreamID string `json:"downstream_id"`
+			Name         string `json:"name"`
+			RequestCount int64  `json:"request_count"`
+			InputTokens  int64  `json:"input_tokens"`
+			OutputTokens int64  `json:"output_tokens"`
+			CacheRead    int64  `json:"cache_read_tokens"`
+		} `json:"providers"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -114,6 +139,66 @@ func TestStats_WithData(t *testing.T) {
 	// gpt-4o should be first
 	if resp.Models[0].Model != "gpt-4o" {
 		t.Errorf("first model: got %q, want %q", resp.Models[0].Model, "gpt-4o")
+	}
+
+	// Providers array must collapse the two seeded rows into one per
+	// downstream and surface it in token-descending order.
+	if len(resp.Providers) != 2 {
+		t.Fatalf("expected 2 provider rows, got %d", len(resp.Providers))
+	}
+	if resp.Providers[0].DownstreamID != "openai" {
+		t.Errorf("first provider: got %q, want %q (largest token total)",
+			resp.Providers[0].DownstreamID, "openai")
+	}
+	if resp.Providers[0].Name != "OpenAI" {
+		t.Errorf("first provider name: got %q, want %q", resp.Providers[0].Name, "OpenAI")
+	}
+	if resp.Providers[0].InputTokens != 200 || resp.Providers[0].OutputTokens != 75 {
+		t.Errorf("openai provider tokens: got in=%d out=%d, want in=200 out=75",
+			resp.Providers[0].InputTokens, resp.Providers[0].OutputTokens)
+	}
+	if resp.Providers[0].RequestCount != 1 {
+		t.Errorf("openai provider request_count: got %d, want 1", resp.Providers[0].RequestCount)
+	}
+	if resp.Providers[1].DownstreamID != "anthropic" {
+		t.Errorf("second provider: got %q, want %q", resp.Providers[1].DownstreamID, "anthropic")
+	}
+	if resp.Providers[1].Name != "Anthropic" {
+		t.Errorf("second provider name: got %q, want %q", resp.Providers[1].Name, "Anthropic")
+	}
+	if resp.Providers[1].RequestCount != 1 {
+		t.Errorf("anthropic provider request_count: got %d, want 1", resp.Providers[1].RequestCount)
+	}
+	if resp.Providers[1].CacheRead != 30 {
+		t.Errorf("anthropic provider cache_read: got %d, want 30", resp.Providers[1].CacheRead)
+	}
+}
+
+func TestStats_EmptyResult_IncludesProvidersArray(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?range=last_7_days", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Verify the providers array is present and empty (not missing/null)
+	// so the frontend can blindly iterate without a null check.
+	var resp struct {
+		Providers []map[string]interface{} `json:"providers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Providers == nil {
+		t.Errorf("providers array should be present (even when empty), got nil")
+	}
+	if len(resp.Providers) != 0 {
+		t.Errorf("expected empty providers, got %d entries", len(resp.Providers))
 	}
 }
 

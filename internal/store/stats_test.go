@@ -308,6 +308,150 @@ func TestBulkRecordUsageStats_LargeChunk(t *testing.T) {
 	}
 }
 
+func TestAggregateByProvider_GroupsByDownstream(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seed the downstreams table so the LEFT JOIN in AggregateByProvider
+	// can resolve human-readable names. Without these rows the test would
+	// only exercise the COALESCE fallback path.
+	if err := s.CreateDownstream(&Downstream{
+		ID:   "anthropic",
+		Name: "Anthropic",
+	}); err != nil {
+		t.Fatalf("seed downstream anthropic: %v", err)
+	}
+	if err := s.CreateDownstream(&Downstream{
+		ID:   "openai",
+		Name: "OpenAI",
+	}); err != nil {
+		t.Fatalf("seed downstream openai: %v", err)
+	}
+
+	// Three requests across two models under "anthropic", one under "openai".
+	// Per-downstream rollup should produce two rows; anthropic must aggregate
+	// across both its models.
+	if err := s.RecordUsageStats("2026-06-27T15:00:00Z", "anthropic", "claude-opus-4-7",
+		100, 50, 0, 0); err != nil {
+		t.Fatalf("seed 1: %v", err)
+	}
+	if err := s.RecordUsageStats("2026-06-27T15:00:00Z", "anthropic", "claude-sonnet-4",
+		200, 75, 0, 30); err != nil {
+		t.Fatalf("seed 2: %v", err)
+	}
+	if err := s.RecordUsageStats("2026-06-27T15:00:00Z", "openai", "gpt-4o",
+		50, 25, 0, 0); err != nil {
+		t.Fatalf("seed 3: %v", err)
+	}
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T23:59:59Z")
+	rows, err := s.AggregateByProvider(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate by provider: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 provider rows, got %d", len(rows))
+	}
+
+	// Sorted by total tokens desc: anthropic (300 + 125 = 425) > openai (50 + 25 = 75).
+	if rows[0].DownstreamID != "anthropic" {
+		t.Errorf("first row downstream: got %q, want %q", rows[0].DownstreamID, "anthropic")
+	}
+	if rows[0].Name != "Anthropic" {
+		t.Errorf("first row name: got %q, want %q", rows[0].Name, "Anthropic")
+	}
+	if rows[0].InputTokens != 300 || rows[0].OutputTokens != 125 {
+		t.Errorf("anthropic tokens: got in=%d out=%d, want in=300 out=125",
+			rows[0].InputTokens, rows[0].OutputTokens)
+	}
+	if rows[0].RequestCount != 2 {
+		t.Errorf("anthropic request_count: got %d, want 2", rows[0].RequestCount)
+	}
+	if rows[0].CacheRead != 30 {
+		t.Errorf("anthropic cache_read: got %d, want 30", rows[0].CacheRead)
+	}
+	if rows[0].CacheHitCount != 1 {
+		t.Errorf("anthropic cache_hit_count: got %d, want 1", rows[0].CacheHitCount)
+	}
+
+	if rows[1].DownstreamID != "openai" {
+		t.Errorf("second row downstream: got %q, want %q", rows[1].DownstreamID, "openai")
+	}
+	if rows[1].Name != "OpenAI" {
+		t.Errorf("second row name: got %q, want %q", rows[1].Name, "OpenAI")
+	}
+	if rows[1].InputTokens != 50 || rows[1].OutputTokens != 25 {
+		t.Errorf("openai tokens: got in=%d out=%d, want in=50 out=25",
+			rows[1].InputTokens, rows[1].OutputTokens)
+	}
+	if rows[1].RequestCount != 1 {
+		t.Errorf("openai request_count: got %d, want 1", rows[1].RequestCount)
+	}
+}
+
+func TestAggregateByProvider_FallsBackToIDWhenDownstreamMissing(t *testing.T) {
+	// Defensive case: if a downstream is deleted after usage_stats was
+	// written, the LEFT JOIN will produce a NULL name; COALESCE must
+	// fall back to the downstream_id so the dashboard still renders
+	// something instead of an empty cell.
+	s := newTestStore(t)
+
+	if err := s.RecordUsageStats("2026-06-27T15:00:00Z", "orphan-downstream", "some-model",
+		100, 50, 0, 0); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T23:59:59Z")
+	rows, err := s.AggregateByProvider(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate orphan: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0].DownstreamID != "orphan-downstream" {
+		t.Errorf("downstream_id: got %q, want %q", rows[0].DownstreamID, "orphan-downstream")
+	}
+	if rows[0].Name != "orphan-downstream" {
+		t.Errorf("name should fall back to downstream_id when missing, got %q", rows[0].Name)
+	}
+}
+
+func TestAggregateByProvider_Empty(t *testing.T) {
+	s := newTestStore(t)
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T23:59:59Z")
+	rows, err := s.AggregateByProvider(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate empty: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows, got %d", len(rows))
+	}
+}
+
+func TestAggregateByProvider_OutsideRange(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.RecordUsageStats("2026-06-27T15:00:00Z", "anthropic", "claude-opus-4-7",
+		100, 50, 0, 0); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Query a range that excludes the seeded bucket.
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2027-01-01T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2027-01-02T00:00:00Z")
+	rows, err := s.AggregateByProvider(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate outside range: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows outside range, got %d", len(rows))
+	}
+}
+
 func TestPurgeUsageStatsBefore(t *testing.T) {
 	s := newTestStore(t)
 
