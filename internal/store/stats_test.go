@@ -307,3 +307,89 @@ func TestBulkRecordUsageStats_LargeChunk(t *testing.T) {
 		t.Errorf("expected 1 row with %d requests, got %+v", N, rows)
 	}
 }
+
+func TestPurgeUsageStatsBefore(t *testing.T) {
+	s := newTestStore(t)
+
+	// Old rows (should be deleted): 2024-12 and earlier. Each gets a unique
+	// model so we can verify the purge by model instead of by time-window
+	// overlap (the boundary between old/recent queries could otherwise pick
+	// up a recent row).
+	oldRows := []struct {
+		bucket string
+		model  string
+	}{
+		{"2024-01-15T10:00:00Z", "old-a"},
+		{"2024-06-01T00:00:00Z", "old-b"},
+		{"2024-12-31T23:00:00Z", "old-c"},
+	}
+	for _, r := range oldRows {
+		if err := s.RecordUsageStats(r.bucket, "anthropic", r.model, 100, 50, 0, 0); err != nil {
+			t.Fatalf("seed old %s: %v", r.bucket, err)
+		}
+	}
+
+	// Recent rows (should be kept): 2025 and later.
+	recentRows := []struct {
+		bucket string
+		model  string
+	}{
+		{"2025-01-01T00:00:00Z", "new-a"},
+		{"2025-06-15T12:00:00Z", "new-b"},
+		{"2026-06-27T15:00:00Z", "new-c"},
+	}
+	for _, r := range recentRows {
+		if err := s.RecordUsageStats(r.bucket, "anthropic", r.model, 100, 50, 0, 0); err != nil {
+			t.Fatalf("seed recent %s: %v", r.bucket, err)
+		}
+	}
+
+	// Cutoff: 2025-01-01. Anything strictly less than this is purged.
+	cutoff := "2025-01-01T00:00:00Z"
+	n, err := s.PurgeUsageStatsBefore(cutoff)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if n != int64(len(oldRows)) {
+		t.Errorf("rows deleted: got %d, want %d", n, len(oldRows))
+	}
+
+	// Query a wide range covering everything; verify which model rows survive.
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2020-01-01T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2030-01-01T00:00:00Z")
+	rows, err := s.AggregateStats(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+
+	seen := make(map[string]bool)
+	for _, r := range rows {
+		seen[r.Model] = true
+	}
+	for _, r := range oldRows {
+		if seen[r.model] {
+			t.Errorf("old row %q still present after purge", r.model)
+		}
+	}
+	for _, r := range recentRows {
+		if !seen[r.model] {
+			t.Errorf("recent row %q missing after purge", r.model)
+		}
+	}
+	if len(rows) != len(recentRows) {
+		t.Errorf("expected %d rows total, got %d", len(recentRows), len(rows))
+	}
+}
+
+func TestPurgeUsageStatsBefore_NoMatchingRows(t *testing.T) {
+	s := newTestStore(t)
+
+	// No rows at all — purge should be a safe no-op.
+	n, err := s.PurgeUsageStatsBefore("2025-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("purge empty: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("rows deleted: got %d, want 0", n)
+	}
+}

@@ -281,3 +281,23 @@ func (s *Store) TotalStats(q StatsQuery) (input, output, requests int64, cacheHi
 	return input, output, requests, nil, nil
 }
 
+// PurgeUsageStatsBefore deletes every usage_stats row whose bucket key is
+// strictly less than the given cutoff. The bucket key uses the same ISO8601
+// hour format as the rest of the package, so callers should pass a value
+// from bucketKey(t). Returns the number of rows deleted.
+//
+// The DELETE uses the idx_usage_bucket index so it does not require a
+// full-table scan. Safe to run while the gateway is live — any concurrent
+// INSERT ... ON CONFLICT from the flusher for newer buckets is unaffected.
+func (s *Store) PurgeUsageStatsBefore(cutoff string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM usage_stats WHERE bucket < ?`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("purge usage stats before %q: %w", cutoff, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("purge usage stats rows affected: %w", err)
+	}
+	return n, nil
+}
+

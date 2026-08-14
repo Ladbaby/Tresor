@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"tresor/internal/api"
 	"tresor/internal/config"
@@ -65,6 +66,13 @@ func runDaemon(cfg *config.AppConfig) error {
 
 	// Build engine
 	eng := engine.New(s)
+
+	// Purge usage_stats rows older than the retention window. This runs once
+	// at startup to catch up on any backlog (e.g. after a long downtime) and
+	// bounds the size of the table on disk.
+	if err := purgeOldUsageStats(s); err != nil {
+		log.Printf("warning: usage_stats purge failed: %v", err)
+	}
 
 	// Initialize plugin registry and attach to engine
 	reg := plugins.NewRegistry()
@@ -183,5 +191,29 @@ func runDaemon(cfg *config.AppConfig) error {
 	// Flush any in-memory stats before the daemon exits so the last batch
 	// of usage data lands on disk.
 	eng.Stop()
+	return nil
+}
+
+// usageStatsRetentionMonths is the rolling window of history kept in the
+// usage_stats table. Rows older than (now − retention) are deleted on every
+// daemon startup. 12 months matches a year-on-year comparison horizon and
+// bounds the on-disk table size regardless of how long the daemon runs.
+const usageStatsRetentionMonths = 12
+
+// purgeOldUsageStats deletes usage_stats rows whose bucket is older than the
+// retention window. Runs once at daemon startup. Failures are non-fatal —
+// the dashboard will simply show older rows until the next startup.
+func purgeOldUsageStats(s *store.Store) error {
+	cutoff := time.Now().UTC().AddDate(0, -usageStatsRetentionMonths, 0)
+	cutoffKey := cutoff.Format("2006-01-02T15:00:00Z")
+	n, err := s.PurgeUsageStatsBefore(cutoffKey)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Printf("usage_stats janitor: deleted %d rows older than %s", n, cutoff.Format("2006-01-02"))
+	} else {
+		log.Printf("usage_stats janitor: no rows older than %s to delete", cutoff.Format("2006-01-02"))
+	}
 	return nil
 }
