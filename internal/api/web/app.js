@@ -4668,7 +4668,7 @@ function renderDashboardModels(models, captureOn) {
 
         html += '<tr>' +
             '<td><div class="model-cell">' + providerIconHTML(modelName) +
-                esc(modelName)
+                esc(modelName) + 
             '</div></td>' +
             '<td class="num">' + esc(fmtNum(m.request_count || 0)) + '</td>' +
             '<td class="num">' + esc(fmtNum(inTok)) + '</td>' +
