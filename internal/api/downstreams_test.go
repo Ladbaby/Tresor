@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -626,5 +627,160 @@ func TestUpdateDownstream_InvalidFormatURL_Rejected(t *testing.T) {
 		"format_urls": map[string]string{"openai": "ftp://bad"},
 	}); got != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", got)
+	}
+}
+
+// Regression for minimax-style downstream with api_formats: [openai, anthropic].
+// Previously the fetch-models probe always sent x-api-key when the list
+// contained "anthropic", so OpenAI-compatible endpoints like
+// api.minimaxi.com returned 401 ("check your api key"). The probe must
+// try each declared format's auth style and succeed on the first match.
+func TestFetchModelsByCreds_MultiFormat_OpenAIWinsOverAnthropic(t *testing.T) {
+	var bearerHits, xAPIKeyHits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Header.Get("Authorization") != "":
+			bearerHits++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"id":"MiniMax-M3"},{"id":"MiniMax-M2.5"}]}`)
+		case r.Header.Get("x-api-key") != "":
+			xAPIKeyHits++
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"message":"login fail: Please carry the API secret key in the 'Authorization' field of the request header (1004)"}}`)
+		default:
+			http.Error(w, "no auth", http.StatusUnauthorized)
+		}
+	}))
+	defer upstream.Close()
+
+	models, err := fetchModelsByCreds(upstream.URL, "sk-test", []string{"openai", "anthropic"})
+	if err != nil {
+		t.Fatalf("fetchModelsByCreds returned error: %v", err)
+	}
+	if len(models) != 2 || models[0] != "MiniMax-M3" || models[1] != "MiniMax-M2.5" {
+		t.Fatalf("unexpected models: %v", models)
+	}
+	if bearerHits == 0 {
+		t.Fatalf("expected at least one Bearer-auth probe, got 0 (x-api-key hits: %d)", xAPIKeyHits)
+	}
+}
+
+// Companion: when the Anthropic endpoint is the one that serves /models
+// and the downstream declares only [anthropic], x-api-key must still win
+// on the first try (no probe-time penalty for single-format configs).
+func TestFetchModelsByCreds_SingleFormat_Anthropic(t *testing.T) {
+	var bearerHits, xAPIKeyHits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Header.Get("x-api-key") != "":
+			xAPIKeyHits++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"id":"claude-sonnet-4-5"}]}`)
+		case r.Header.Get("Authorization") != "":
+			bearerHits++
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer upstream.Close()
+
+	models, err := fetchModelsByCreds(upstream.URL, "sk-ant-test", []string{"anthropic"})
+	if err != nil {
+		t.Fatalf("fetchModelsByCreds returned error: %v", err)
+	}
+	if len(models) != 1 || models[0] != "claude-sonnet-4-5" {
+		t.Fatalf("unexpected models: %v", models)
+	}
+	if bearerHits != 0 {
+		t.Fatalf("single-format anthropic probe should not waste a Bearer call, got %d", bearerHits)
+	}
+	if xAPIKeyHits == 0 {
+		t.Fatalf("expected at least one x-api-key probe, got 0")
+	}
+}
+
+// Empty api_formats still defaults to Bearer (preserves the pre-fix
+// behavior for legacy / generic providers that didn't declare formats).
+func TestFetchModelsByCreds_NoFormats_DefaultsToBearer(t *testing.T) {
+	var bearerHits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			bearerHits++
+			_, _ = io.WriteString(w, `{"data":[{"id":"m1"}]}`)
+			return
+		}
+		http.Error(w, "no auth", http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	models, err := fetchModelsByCreds(upstream.URL, "sk-test", nil)
+	if err != nil {
+		t.Fatalf("fetchModelsByCreds returned error: %v", err)
+	}
+	if len(models) != 1 || models[0] != "m1" {
+		t.Fatalf("unexpected models: %v", models)
+	}
+	if bearerHits == 0 {
+		t.Fatalf("expected at least one Bearer probe")
+	}
+}
+
+// End-to-end through the HTTP handler: POST /api/downstreams/{id}/fetch-models
+// must succeed for an api_formats: [openai, anthropic] downstream whose
+// upstream expects Bearer auth. This is the exact path the web UI's
+// "Fetch Models" button hits.
+func TestDownstreamFetchModels_MultiFormat_HTTP(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"id":"MiniMax-M3"}]}`)
+			return
+		}
+		if r.Header.Get("x-api-key") != "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"message":"1004"}}`)
+			return
+		}
+		http.Error(w, "no auth", http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	// Seed via the API.
+	createBody := map[string]interface{}{
+		"name":        "Multi",
+		"base_url":    upstream.URL,
+		"api_key":     "sk-test",
+		"api_formats": []string{"openai", "anthropic"},
+	}
+	data, _ := json.Marshal(createBody)
+	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create downstream: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var created store.Downstream
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	// Now hit fetch-models.
+	req = httptest.NewRequest(http.MethodPost, "/api/downstreams/"+created.ID+"/fetch-models", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("fetch-models: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		ModelIDs []string `json:"model_ids"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode fetch-models response: %v", err)
+	}
+	if len(resp.ModelIDs) != 1 || resp.ModelIDs[0] != "MiniMax-M3" {
+		t.Fatalf("unexpected model_ids: %v", resp.ModelIDs)
 	}
 }

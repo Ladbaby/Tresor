@@ -556,6 +556,92 @@ func TestEngine_HandleProxy_AuthHeaderConflict(t *testing.T) {
 	}
 }
 
+// Regression: when a downstream declares multiple api_formats
+// (e.g. [openai, anthropic]), an OpenAI client request must be forwarded
+// with Authorization: Bearer — not Anthropic-style x-api-key. Previously
+// the engine checked ApiFormats (the full list) instead of the actual
+// downstream format being used, so any list containing "anthropic"
+// caused 401s on OpenAI requests. See the Minimax upstream at
+// api.minimaxi.com which accepts both formats but rejects mismatched auth.
+func TestEngine_HandleProxy_MultiFormatDownstream_OpenAIRequestUsesBearer(t *testing.T) {
+	s := newTestStore(t)
+
+	var apiKeyHeader, authHeader string
+	ts := newTestDownstream(t, 200, `{"ok":true}`, func(t *testing.T, r *http.Request) {
+		apiKeyHeader = r.Header.Get("x-api-key")
+		authHeader = r.Header.Get("Authorization")
+	})
+	defer ts.Close()
+
+	addDownstream(t, s, "multi", "multi", ts.URL, "default-key", "openai", "anthropic")
+	addOutputModelIDs(t, s, "multi", "m1")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"m1","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	if authHeader != "Bearer default-key" {
+		t.Fatalf("OpenAI request to multi-format downstream: expected Authorization: Bearer default-key, got %q", authHeader)
+	}
+	if apiKeyHeader != "" {
+		t.Fatalf("OpenAI request to multi-format downstream: should NOT set x-api-key, got %q", apiKeyHeader)
+	}
+}
+
+// Companion check: an Anthropic client request to the SAME multi-format
+// downstream should still get x-api-key (and anthropic-version) — proving
+// the auth style is chosen per-request format, not statically.
+func TestEngine_HandleProxy_MultiFormatDownstream_AnthropicRequestUsesXAPIKey(t *testing.T) {
+	s := newTestStore(t)
+
+	var apiKeyHeader, authHeader, anthropicVersion string
+	ts := newTestDownstream(t, 200, `{"ok":true}`, func(t *testing.T, r *http.Request) {
+		apiKeyHeader = r.Header.Get("x-api-key")
+		authHeader = r.Header.Get("Authorization")
+		anthropicVersion = r.Header.Get("anthropic-version")
+	})
+	defer ts.Close()
+
+	addDownstream(t, s, "multi", "multi", ts.URL, "default-key", "openai", "anthropic")
+	addOutputModelIDs(t, s, "multi", "m1")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	if apiKeyHeader != "default-key" {
+		t.Fatalf("Anthropic request to multi-format downstream: expected x-api-key: default-key, got %q", apiKeyHeader)
+	}
+	if anthropicVersion == "" {
+		t.Fatal("Anthropic request to multi-format downstream: expected anthropic-version header to be set")
+	}
+	if authHeader != "" {
+		t.Fatalf("Anthropic request to multi-format downstream: should NOT set Authorization header, got %q", authHeader)
+	}
+}
+
 // addAlias creates a test alias record.
 func addAlias(t *testing.T, s *store.Store, inputModelID, downstreamID, outputModelID string, isActive bool) {
 	t.Helper()

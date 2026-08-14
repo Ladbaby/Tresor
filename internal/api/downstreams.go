@@ -377,64 +377,125 @@ func fetchModelsByCreds(baseURL, apiKey string, apiFormats []string) ([]string, 
 		baseURL + "/v1/models", // Some providers need explicit /v1 prefix
 	}
 
+	// Decide which auth styles to try. A downstream declaring multiple
+	// formats (e.g. minimax with [openai, anthropic]) may serve /models on
+	// EITHER scheme — probe each declared format with its matching auth
+	// header and succeed on the first one that returns a parseable body.
+	// When apiFormats is empty, fall back to Bearer (OpenAI-compatible).
+	authSchemes := buildAuthSchemeList(apiFormats)
+
 	var lastError string
 
 	for _, url := range endpoints {
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			continue
-		}
-		// Anthropic uses x-api-key, others use Bearer; pick based on declared format.
-		if slices.Contains(apiFormats, "anthropic") {
-			req.Header.Set("x-api-key", apiKey)
-			req.Header.Set("anthropic-version", "2023-06-01")
-		} else {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			lastError = "unable to connect to provider"
-			continue
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return nil, fmt.Errorf("authentication failed — check the API key")
-		}
-		if resp.StatusCode >= 400 {
-			lastError = "provider returned unexpected response"
-			continue
-		}
-
-		// Try to parse as OpenAI-style response: {"data": [{"id": "..."}]}
-		var openaiResp struct {
-			Data []struct {
-				ID string `json:"id"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(body, &openaiResp); err == nil && len(openaiResp.Data) > 0 {
-			models := make([]string, 0, len(openaiResp.Data))
-			for _, m := range openaiResp.Data {
-				models = append(models, m.ID)
+		for _, scheme := range authSchemes {
+			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+			if err != nil {
+				continue
 			}
-			return models, nil
+			scheme.apply(req, apiKey)
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				lastError = "unable to connect to provider"
+				continue
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+				// Wrong auth style for this endpoint — try the next scheme.
+				lastError = "authentication failed — check the API key"
+				continue
+			}
+			if resp.StatusCode >= 400 {
+				lastError = "provider returned unexpected response"
+				continue
+			}
+
+			// Try to parse as OpenAI-style response: {"data": [{"id": "..."}]}
+			var openaiResp struct {
+				Data []struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(body, &openaiResp); err == nil && len(openaiResp.Data) > 0 {
+				models := make([]string, 0, len(openaiResp.Data))
+				for _, m := range openaiResp.Data {
+					models = append(models, m.ID)
+				}
+				return models, nil
+			}
+
+			// Fallback: try raw array of strings
+			var strArr []string
+			if err := json.Unmarshal(body, &strArr); err == nil && len(strArr) > 0 {
+				return strArr, nil
+			}
+
+			lastError = "unrecognized response format"
+			// Body decoded but no models found — try the next URL or scheme.
+			break
 		}
-
-		// Try Anthropic-style: {"data": [{"id": "..."}]}
-		// (same structure, so already handled above)
-
-		// Fallback: try raw array of strings
-		var strArr []string
-		if err := json.Unmarshal(body, &strArr); err == nil && len(strArr) > 0 {
-			return strArr, nil
-		}
-
-		lastError = "unrecognized response format"
 	}
 
 	return nil, fmt.Errorf("%s. No working models endpoint found", lastError)
+}
+
+// authScheme describes how to attach credentials to a fetch-models probe
+// request. The fetch-models probe loops over declared formats, so an
+// api_formats: [openai, anthropic] downstream tries BOTH Bearer and
+// x-api-key rather than hardcoding whichever the list contains.
+type authScheme struct {
+	name  string
+	apply func(req *http.Request, apiKey string)
+}
+
+var (
+	bearerAuth = authScheme{
+		name: "bearer",
+		apply: func(req *http.Request, apiKey string) {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		},
+	}
+	anthropicAuth = authScheme{
+		name: "anthropic",
+		apply: func(req *http.Request, apiKey string) {
+			req.Header.Set("x-api-key", apiKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		},
+	}
+)
+
+// buildAuthSchemeList picks the auth styles to probe, in priority order,
+// based on the downstream's declared api_formats. When the list contains
+// only one format we only need to try that one; when it contains several
+// we try each so multi-format providers (minimax, llama-swap) don't lock
+// out the format that actually serves /models. An empty list falls back
+// to Bearer.
+func buildAuthSchemeList(apiFormats []string) []authScheme {
+	if len(apiFormats) == 0 {
+		return []authScheme{bearerAuth}
+	}
+	seen := map[string]bool{}
+	var out []authScheme
+	for _, f := range apiFormats {
+		switch f {
+		case "openai", "openai_responses":
+			if !seen["bearer"] {
+				out = append(out, bearerAuth)
+				seen["bearer"] = true
+			}
+		case "anthropic":
+			if !seen["anthropic"] {
+				out = append(out, anthropicAuth)
+				seen["anthropic"] = true
+			}
+		}
+	}
+	if len(out) == 0 {
+		return []authScheme{bearerAuth}
+	}
+	return out
 }
 
 // handleFetchModels handles POST /api/fetch-models.

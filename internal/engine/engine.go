@@ -1811,16 +1811,26 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 			forwardedReq.Header.Get("x-api-key") != "" ||
 			forwardedReq.Header.Get("x-goog-api-key") != ""
 		if !hasAuthHeader {
-			switch {
-			case slices.Contains(ctx.TargetDownstream.ApiFormats, "anthropic"):
+			// Pick the auth header style from the actual downstream format
+			// being used for THIS request, not the full list of formats the
+			// downstream declares. A downstream with api_formats: [openai,
+			// anthropic] forwards an OpenAI request as OpenAI (no auto-
+			// translation needed), so it expects Authorization: Bearer —
+			// not the Anthropic-style x-api-key. The previous check
+			// (slices.Contains(ApiFormats, "anthropic")) misfired here and
+			// caused 401s whenever the list contained "anthropic".
+			switch ctx.DownstreamFormat {
+			case "anthropic":
 				forwardedReq.Header.Set("x-api-key", ctx.TargetDownstream.APIKey)
 				forwardedReq.Header.Set("anthropic-version", "2023-06-01")
-			case slices.Contains(ctx.TargetDownstream.ApiFormats, "gemini"):
+			case "gemini":
 				// Google Gemini accepts the key either as the `x-goog-api-key` header
 				// or as a `?key=...` query param. Use the header to avoid leaking the
 				// key into proxy/access logs.
 				forwardedReq.Header.Set("x-goog-api-key", ctx.TargetDownstream.APIKey)
 			default:
+				// "openai", "openai_responses", or empty/unknown — assume the
+				// OpenAI-compatible Authorization: Bearer scheme.
 				forwardedReq.Header.Set("Authorization", "Bearer "+ctx.TargetDownstream.APIKey)
 			}
 		}
