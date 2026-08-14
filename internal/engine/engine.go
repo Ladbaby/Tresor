@@ -200,6 +200,36 @@ func (e *Engine) shouldRetry(resp *http.Response, body []byte, downstreamFormat 
 // the response shape.
 func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []byte, reqCT, respCT string, truncResp bool, requestFormat, downstreamFormat string) {
 	e.logger.Record(entry)
+
+	// Persist usage stats — only when payload capture is enabled and usage
+	// was parsed from the response. The store is populated incrementally by
+	// the request pipeline and streaming handler, so by the time this
+	// function is called entry.Usage already holds the merged totals.
+	if e.payloadStore != nil && entry.Usage != nil && e.store != nil {
+		bucket := entry.Timestamp.UTC().Format("2006-01-02T15:00:00Z")
+		var input, output, cacheCreation, cacheRead int64
+		if entry.Usage.InputTokens != nil {
+			input = *entry.Usage.InputTokens
+		}
+		if entry.Usage.OutputTokens != nil {
+			output = *entry.Usage.OutputTokens
+		}
+		if entry.Usage.CacheCreationTokens != nil {
+			cacheCreation = *entry.Usage.CacheCreationTokens
+		}
+		if entry.Usage.CacheReadTokens != nil {
+			cacheRead = *entry.Usage.CacheReadTokens
+		}
+		// OpenAI's cached_tokens is the equivalent of Anthropic's cache_read.
+		if entry.Usage.CachedTokens != nil {
+			cacheRead += *entry.Usage.CachedTokens
+		}
+		// Errors in stats persistence are non-fatal — they only affect the
+		// dashboard tab and must not break the request lifecycle.
+		_ = e.store.RecordUsageStats(bucket, entry.DownstreamID, entry.ResolvedModel,
+			input, output, cacheCreation, cacheRead)
+	}
+
 	if e.payloadStore == nil {
 		return
 	}

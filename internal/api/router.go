@@ -179,6 +179,8 @@ func (r *Router) Handler() http.Handler {
 			GetRecentLogs(r.logger)(w, req)
 		case strings.HasPrefix(path, "logs/") && strings.HasSuffix(path, "/inspect"):
 			r.handleLogInspect(w, req)
+		case path == "stats":
+			r.handleStats(w, req)
 		default:
 			http.NotFound(w, req)
 		}
@@ -198,6 +200,7 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/logs/stream", protected)
 	mux.Handle("/api/logs", protected)
 	mux.Handle("/api/logs/", protected)
+	mux.Handle("/api/stats", protected)
 
 	return mux
 }

@@ -68,6 +68,10 @@ function activateTab(tabId) {
         logActive = false;
         disconnectLogStream();
     }
+
+    if (tabId === 'dashboard') {
+        loadDashboard();
+    }
 }
 
 document.querySelectorAll('.tab').forEach(tab => {
@@ -132,6 +136,7 @@ function showDashboard() {
     loadSettings();
     initLogs();
     loadAbout();
+    initDashboard();
 }
 
 /**
@@ -4388,6 +4393,270 @@ function formatDuration(ms) {
     const mins = Math.floor(ms / 60000);
     const secs = ((ms % 60000) / 1000).toFixed(1);
     return mins + 'm' + secs + 's';
+}
+
+// ---- Dashboard ----
+let dashboardCurrentRange = 'last_7_days';
+let dashboardInitialized = false;
+
+function initDashboard() {
+    if (dashboardInitialized) return;
+    dashboardInitialized = true;
+
+    // Default the highlighted preset to "last_7_days" on first load.
+    document.querySelectorAll('#dashboard-range-selector .range-preset').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.range === dashboardCurrentRange);
+    });
+
+    // Range preset buttons (delegated so we don't re-bind after re-render).
+    document.getElementById('dashboard-range-selector').addEventListener('click', function (e) {
+        const btn = e.target.closest('.range-preset');
+        if (!btn) return;
+        document.querySelectorAll('#dashboard-range-selector .range-preset').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        dashboardCurrentRange = btn.dataset.range;
+        loadDashboard(dashboardCurrentRange);
+    });
+
+    // Custom date range apply button.
+    const apply = document.getElementById('range-apply');
+    if (apply) {
+        apply.addEventListener('click', function () {
+            const from = document.getElementById('range-from').value;
+            const to = document.getElementById('range-to').value;
+            if (!from || !to) {
+                showToast('Please select both From and To dates');
+                return;
+            }
+            if (from > to) {
+                showToast('From date must be before To date');
+                return;
+            }
+            // De-activate any preset; the active style signals "custom range".
+            document.querySelectorAll('#dashboard-range-selector .range-preset').forEach(b => b.classList.remove('active'));
+            dashboardCurrentRange = 'custom';
+            loadDashboard('custom');
+        });
+    }
+}
+
+async function loadDashboard(range) {
+    if (range) dashboardCurrentRange = range;
+    let url = '/stats';
+    if (dashboardCurrentRange === 'custom') {
+        const from = document.getElementById('range-from').value;
+        const to = document.getElementById('range-to').value;
+        if (!from || !to) {
+            showToast('Please select both From and To dates');
+            return;
+        }
+        url += '?range=custom&from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to);
+    } else {
+        url += '?range=' + encodeURIComponent(dashboardCurrentRange);
+    }
+
+    // Reset to a "loading" state before fetch so the user sees feedback.
+    setDashboardLoading();
+
+    try {
+        const data = await api(url);
+        renderDashboardSummary(data.total || {}, data.capture_payloads, data.models || []);
+        renderDashboardSeries(data.series || []);
+        renderDashboardModels(data.models || [], data.capture_payloads);
+    } catch (err) {
+        renderDashboardError(err.message || String(err));
+    }
+}
+
+function setDashboardLoading() {
+    document.getElementById('dash-total-tokens').textContent = '—';
+    document.getElementById('dash-total-tokens-detail').textContent = '';
+    document.getElementById('dash-cache-rate').textContent = 'N/A';
+    document.getElementById('dash-cache-rate').classList.add('summary-na');
+    document.getElementById('dash-cache-rate-detail').textContent = '';
+    document.getElementById('dash-requests').textContent = '—';
+    document.getElementById('dash-top-model').textContent = '—';
+    document.getElementById('dash-top-model').classList.add('summary-na');
+    document.getElementById('dash-top-model-detail').textContent = '';
+    document.getElementById('dash-token-chart').innerHTML = '<div class="chart-empty">Loading…</div>';
+    document.getElementById('dash-models-body').innerHTML =
+        '<tr><td colspan="7" class="loading">Loading…</td></tr>';
+}
+
+function renderDashboardError(msg) {
+    document.getElementById('dash-total-tokens').textContent = '—';
+    document.getElementById('dash-cache-rate').textContent = '—';
+    document.getElementById('dash-requests').textContent = '—';
+    document.getElementById('dash-top-model').textContent = '—';
+    document.getElementById('dash-token-chart').innerHTML =
+        '<div class="chart-empty">Error: ' + esc(msg) + '</div>';
+    document.getElementById('dash-models-body').innerHTML =
+        '<tr><td colspan="7" class="loading">Error: ' + esc(msg) + '</td></tr>';
+}
+
+function renderDashboardSummary(total, captureOn, models) {
+    const totalIn = total.input_tokens || 0;
+    const totalOut = total.output_tokens || 0;
+    const totalTok = totalIn + totalOut;
+
+    const totalEl = document.getElementById('dash-total-tokens');
+    totalEl.classList.remove('summary-na');
+    totalEl.textContent = fmtNum(totalTok);
+
+    const detailEl = document.getElementById('dash-total-tokens-detail');
+    if (totalTok > 0) {
+        detailEl.textContent = 'in: ' + fmtNum(totalIn) + '  ·  out: ' + fmtNum(totalOut);
+    } else {
+        detailEl.textContent = captureOn ? 'No data in this range' : 'Enable Capture Payloads in Settings';
+    }
+
+    const cacheEl = document.getElementById('dash-cache-rate');
+    const cacheDetailEl = document.getElementById('dash-cache-rate-detail');
+    cacheEl.classList.remove('summary-na');
+    if (!captureOn) {
+        cacheEl.textContent = 'N/A';
+        cacheEl.classList.add('summary-na');
+        cacheDetailEl.textContent = 'Enable Capture Payloads in Settings to track';
+    } else if (total.cache_hit_rate == null) {
+        cacheEl.textContent = '—';
+        cacheEl.classList.add('summary-na');
+        cacheDetailEl.textContent = 'No cache data in this range';
+    } else {
+        const pct = (total.cache_hit_rate * 100);
+        cacheEl.textContent = pct.toFixed(1) + '%';
+        cacheDetailEl.textContent = pct >= 50 ? 'Cache is helping' : 'Cache hits are low';
+    }
+
+    const reqEl = document.getElementById('dash-requests');
+    reqEl.textContent = fmtNum(total.requests || 0);
+
+    const topEl = document.getElementById('dash-top-model');
+    const topDetailEl = document.getElementById('dash-top-model-detail');
+    topEl.classList.remove('summary-na', 'summary-long');
+    if (models && models.length > 0) {
+        const top = models[0];
+        const topName = top.model || top.downstream_id || '—';
+        topEl.textContent = topName;
+        if (topName.length > 28) topEl.classList.add('summary-long');
+        const topTotal = (top.input_tokens || 0) + (top.output_tokens || 0);
+        topDetailEl.textContent = fmtNum(topTotal) + ' tokens · ' + fmtNum(top.request_count || 0) + ' reqs';
+    } else {
+        topEl.textContent = '—';
+        topEl.classList.add('summary-na');
+        topDetailEl.textContent = '';
+    }
+}
+
+function renderDashboardSeries(series) {
+    const container = document.getElementById('dash-token-chart');
+    if (!series || series.length === 0) {
+        container.innerHTML = '<div class="chart-empty">No data for selected range</div>';
+        return;
+    }
+
+    // Compute max so we can scale bars.
+    let maxTotal = 0;
+    for (const p of series) {
+        const t = (p.input_tokens || 0) + (p.output_tokens || 0);
+        if (t > maxTotal) maxTotal = t;
+    }
+    if (maxTotal === 0) {
+        container.innerHTML = '<div class="chart-empty">No token data in selected range</div>';
+        return;
+    }
+
+    // Thin out long ranges so we don't render too many bars.
+    let shown = series;
+    if (series.length > 30) {
+        const step = Math.ceil(series.length / 30);
+        shown = series.filter((_, i) => i % step === 0 || i === series.length - 1);
+    }
+
+    let html = '';
+    for (const p of shown) {
+        const total = (p.input_tokens || 0) + (p.output_tokens || 0);
+        const pct = Math.max((total / maxTotal) * 100, 0.5).toFixed(2);
+        const label = formatBucketLabel(p.bucket);
+        html += '<div class="chart-bar-row">' +
+            '<span class="chart-bar-label">' + esc(label) + '</span>' +
+            '<div class="chart-bar-track"><div class="chart-bar-fill" style="width:' + pct + '%"></div></div>' +
+            '<span class="chart-bar-value">' + esc(fmtNum(total)) + '</span>' +
+            '</div>';
+    }
+    container.innerHTML = html;
+}
+
+function renderDashboardModels(models, captureOn) {
+    const tbody = document.getElementById('dash-models-body');
+    if (!models || models.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">No data for selected range</td></tr>';
+        return;
+    }
+
+    const grandTotal = models.reduce((s, m) => s + (m.input_tokens || 0) + (m.output_tokens || 0), 0);
+
+    let html = '';
+    for (const m of models) {
+        const inTok = m.input_tokens || 0;
+        const outTok = m.output_tokens || 0;
+        const mTotal = inTok + outTok;
+        const pct = grandTotal > 0 ? (mTotal / grandTotal * 100) : 0;
+
+        let cacheCell;
+        if (!captureOn) {
+            cacheCell = '<span class="summary-na">N/A</span>';
+        } else {
+            const cached = m.cache_read_tokens || 0;
+            const denom = inTok + cached;
+            if (denom > 0 && cached > 0) {
+                const rate = (cached / denom * 100);
+                cacheCell = rate.toFixed(1) + '%';
+            } else {
+                cacheCell = '0.0%';
+            }
+        }
+
+        const modelName = m.model || m.downstream_id || '—';
+        const modelClass = modelName.length > 28 ? 'class="num"' : '';
+
+        html += '<tr>' +
+            '<td><code>' + esc(modelName) + '</code></td>' +
+            '<td class="num">' + esc(fmtNum(m.request_count || 0)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(inTok)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(mTotal)) + '</td>' +
+            '<td class="num">' + cacheCell + '</td>' +
+            '<td class="token-bar-cell">' +
+                '<div class="token-bar-track"><div class="token-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div>' +
+                '<span class="token-bar-pct">' + pct.toFixed(1) + '%</span>' +
+            '</td>' +
+            '</tr>';
+    }
+    tbody.innerHTML = html;
+}
+
+function formatBucketLabel(bucket) {
+    if (!bucket) return '';
+    // ISO8601 hour: "YYYY-MM-DDTHH:00:00Z" → "MM-DD HH:00"
+    if (bucket.length >= 16 && bucket[10] === 'T') {
+        return bucket.substring(5, 16).replace('T', ' ');
+    }
+    // Date: "YYYY-MM-DD" → "MM-DD"
+    if (bucket.length >= 10) {
+        return bucket.substring(5, 10);
+    }
+    return bucket;
+}
+
+function fmtNum(n) {
+    if (n == null) return '0';
+    n = Number(n);
+    if (!isFinite(n) || n === 0) return '0';
+    const abs = Math.abs(n);
+    if (abs >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+    if (abs >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (abs >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
 }
 
 // ---- About ----

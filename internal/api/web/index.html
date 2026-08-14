@@ -33,6 +33,7 @@
             </div>
 
             <nav class="sidebar-nav">
+                <button class="tab" data-tab="dashboard">📊 Dashboard</button>
                 <button class="tab" data-tab="downstreams">⚡ Downstreams</button>
                 <button class="tab" data-tab="aliases">🔀 Aliases</button>
                 <button class="tab" data-tab="rules">📋 Rules</button>
@@ -53,8 +54,80 @@
         <!-- Main content -->
         <div class="main-wrapper">
             <main>
-                <!-- Downstreams Tab -->
-                <section id="tab-downstreams" class="tab-content">
+            <!-- Dashboard Tab -->
+            <section id="tab-dashboard" class="tab-content">
+                <div class="header-actions">
+                    <h2>Dashboard<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Token usage statistics per model. Token counts and cache hit rate are only recorded when 'Capture Payloads' is enabled in Settings. Enable that to track token counts and cache hit rate; otherwise the dashboard shows N/A.">?</span></h2>
+                    <div class="dashboard-range-selector" id="dashboard-range-selector">
+                        <button class="range-preset" data-range="last_7_days">Last 7 Days</button>
+                        <button class="range-preset" data-range="last_14_days">Last 14 Days</button>
+                        <button class="range-preset" data-range="last_4_weeks">Last 4 Weeks</button>
+                        <button class="range-preset" data-range="this_month">This Month</button>
+                        <button class="range-preset" data-range="last_month">Last Month</button>
+                        <button class="range-preset" data-range="this_year">This Year</button>
+                        <button class="range-preset" data-range="today">Today</button>
+                        <button class="range-preset" data-range="yesterday">Yesterday</button>
+                        <button class="range-preset" data-range="last_year">Last Year</button>
+                        <span class="range-divider">|</span>
+                        <input type="date" id="range-from" class="range-date-input" aria-label="From date">
+                        <span class="range-sep">—</span>
+                        <input type="date" id="range-to" class="range-date-input" aria-label="To date">
+                        <button class="btn-small" id="range-apply">Apply</button>
+                    </div>
+                </div>
+
+                <div class="dashboard-summary">
+                    <div class="summary-card">
+                        <div class="summary-label">Total Tokens</div>
+                        <div class="summary-value" id="dash-total-tokens">—</div>
+                        <div class="summary-sub" id="dash-total-tokens-detail"></div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="summary-label">Cache Hit Rate</div>
+                        <div class="summary-value" id="dash-cache-rate">N/A</div>
+                        <div class="summary-sub" id="dash-cache-rate-detail"></div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="summary-label">Requests</div>
+                        <div class="summary-value" id="dash-requests">—</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="summary-label">Top Model</div>
+                        <div class="summary-value" id="dash-top-model">—</div>
+                        <div class="summary-sub" id="dash-top-model-detail"></div>
+                    </div>
+                </div>
+
+                <div class="dashboard-section">
+                    <h3>Token Usage Over Time</h3>
+                    <div class="chart-container" id="dash-token-chart">
+                        <div class="chart-empty">Loading…</div>
+                    </div>
+                </div>
+
+                <div class="dashboard-section">
+                    <h3>Top Models by Tokens / Cache Hit Rate</h3>
+                    <table class="dash-models-table">
+                        <thead>
+                            <tr>
+                                <th>Model</th>
+                                <th>Requests</th>
+                                <th>Input Tokens</th>
+                                <th>Output Tokens</th>
+                                <th>Total Tokens</th>
+                                <th>Cache Hit Rate</th>
+                                <th>Distribution</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dash-models-body">
+                            <tr><td colspan="7" class="loading">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Downstreams Tab -->
+            <section id="tab-downstreams" class="tab-content">
                     <div class="header-actions">
                         <h2>Downstream Providers<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Manage the LLM providers and your API keys here (e.g., OpenAI, Claude, Deepseek.).">?</span></h2>
                     </div>
@@ -327,6 +400,7 @@
                             <div class="settings-row">
                                 <label for="default-tab">Default Tab</label>
                                 <select id="default-tab">
+                                    <option value="dashboard">Dashboard</option>
                                     <option value="downstreams">Downstreams</option>
                                     <option value="aliases">Aliases</option>
                                     <option value="rules">Rules</option>

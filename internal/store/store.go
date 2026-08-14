@@ -227,6 +227,24 @@ func (s *Store) migrate() error {
 			token      TEXT PRIMARY KEY,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// usage_stats table: per-request token usage aggregated by hourly bucket.
+		// One row per (hour, downstream_id, model). Populated by the engine
+		// only when payload capture is enabled (capture_payloads: true),
+		// matching the existing behavior of the in-memory RequestLogEntry.
+		`CREATE TABLE IF NOT EXISTS usage_stats (
+			bucket           TEXT    NOT NULL,
+			downstream_id    TEXT    NOT NULL,
+			model            TEXT    NOT NULL,
+			input_tokens     INTEGER NOT NULL DEFAULT 0,
+			output_tokens    INTEGER NOT NULL DEFAULT 0,
+			cache_creation   INTEGER NOT NULL DEFAULT 0,
+			cache_read       INTEGER NOT NULL DEFAULT 0,
+			request_count    INTEGER NOT NULL DEFAULT 0,
+			cache_hit_count  INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (bucket, downstream_id, model)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_bucket ON usage_stats(bucket)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_model  ON usage_stats(model)`,
 	}
 
 	for _, q := range queries {
