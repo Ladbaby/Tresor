@@ -1109,6 +1109,13 @@ function refreshDownstreamDetail() {
             await autoSaveDownstreamField(_currentDownstream.id, { base_url: newUrl }, (err) => {
                 if (err) { t.value = prev; return; }
                 _currentDownstream.base_url = newUrl;
+                // Keep per-format URL placeholders in sync with the fallback URL,
+                // so the hint URL updates immediately when API HOST changes
+                // (without requiring a page refresh).
+                const fallback = newUrl || 'https://api.example.com';
+                root.querySelectorAll('input.format-url-input').forEach(inp => {
+                    inp.setAttribute('placeholder', fallback);
+                });
             });
         } else if (t.classList.contains('format-url-input')) {
             const format = t.dataset.format;
