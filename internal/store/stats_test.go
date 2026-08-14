@@ -216,3 +216,94 @@ func TestAggregateStats_OrderedByTotalTokens(t *testing.T) {
 		t.Errorf("second row model: got %q, want %q", rows[1].Model, "small")
 	}
 }
+
+func TestBulkRecordUsageStats_Aggregates(t *testing.T) {
+	s := newTestStore(t)
+
+	bucket := "2026-06-27T15:00:00Z"
+	entries := []StatsBatchEntry{
+		{Bucket: bucket, DownstreamID: "anthropic", Model: "claude-opus-4-7",
+			InputTokens: 100, OutputTokens: 50, CacheCreation: 10, CacheRead: 30},
+		{Bucket: bucket, DownstreamID: "anthropic", Model: "claude-opus-4-7",
+			InputTokens: 200, OutputTokens: 75, CacheCreation: 0, CacheRead: 0},
+		{Bucket: bucket, DownstreamID: "openai", Model: "gpt-4o",
+			InputTokens: 50, OutputTokens: 25, CacheCreation: 0, CacheRead: 0},
+	}
+	written, err := s.BulkRecordUsageStats(entries)
+	if err != nil {
+		t.Fatalf("bulk record: %v", err)
+	}
+	if written != 3 {
+		t.Errorf("written: got %d, want 3", written)
+	}
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T23:59:59Z")
+	rows, err := s.AggregateStats(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 model rows, got %d", len(rows))
+	}
+
+	// Sort is by total tokens desc; claude-opus-4-7 (300+125=425) > gpt-4o (50+25=75)
+	var opus, gpt UsageStatsRow
+	for _, r := range rows {
+		if r.Model == "claude-opus-4-7" {
+			opus = r
+		} else if r.Model == "gpt-4o" {
+			gpt = r
+		}
+	}
+	if opus.InputTokens != 300 || opus.OutputTokens != 125 || opus.RequestCount != 2 || opus.CacheHitCount != 1 {
+		t.Errorf("opus aggregation wrong: %+v", opus)
+	}
+	if gpt.RequestCount != 1 || gpt.CacheHitCount != 0 {
+		t.Errorf("gpt aggregation wrong: %+v", gpt)
+	}
+}
+
+func TestBulkRecordUsageStats_Empty(t *testing.T) {
+	s := newTestStore(t)
+	written, err := s.BulkRecordUsageStats(nil)
+	if err != nil {
+		t.Fatalf("empty bulk: %v", err)
+	}
+	if written != 0 {
+		t.Errorf("written: got %d, want 0", written)
+	}
+}
+
+func TestBulkRecordUsageStats_LargeChunk(t *testing.T) {
+	// Exercise the multi-statement chunking path (maxRowsPerStmt = 3000).
+	s := newTestStore(t)
+
+	const N = 5000
+	entries := make([]StatsBatchEntry, N)
+	for i := 0; i < N; i++ {
+		entries[i] = StatsBatchEntry{
+			Bucket:       "2026-06-27T15:00:00Z",
+			DownstreamID: "anthropic",
+			Model:        "claude-opus-4-7",
+			InputTokens:  1, OutputTokens: 1, CacheCreation: 0, CacheRead: 0,
+		}
+	}
+	written, err := s.BulkRecordUsageStats(entries)
+	if err != nil {
+		t.Fatalf("large bulk: %v", err)
+	}
+	if written != N {
+		t.Errorf("written: got %d, want %d", written, N)
+	}
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T23:59:59Z")
+	rows, err := s.AggregateStats(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if len(rows) != 1 || rows[0].RequestCount != N {
+		t.Errorf("expected 1 row with %d requests, got %+v", N, rows)
+	}
+}

@@ -175,9 +175,13 @@ func runDaemon(cfg *config.AppConfig) error {
 	case err := <-errCh:
 		log.Printf("Server error: %v", err)
 		adminRouter.Stop()
+		eng.Stop()
 		return err
 	}
 
 	adminRouter.Stop()
+	// Flush any in-memory stats before the daemon exits so the last batch
+	// of usage data lands on disk.
+	eng.Stop()
 	return nil
 }

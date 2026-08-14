@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -63,6 +64,104 @@ func (s *Store) RecordUsageStats(bucket, downstreamID, model string,
 		return fmt.Errorf("record usage stats: %w", err)
 	}
 	return nil
+}
+
+// StatsBatchEntry is one buffered record waiting to be flushed to disk.
+// The engine collects these in memory and writes them in bulk via
+// BulkRecordUsageStats every flush interval (default 60s).
+type StatsBatchEntry struct {
+	Bucket        string
+	DownstreamID  string
+	Model         string
+	InputTokens   int64
+	OutputTokens  int64
+	CacheCreation int64
+	CacheRead     int64
+}
+
+// BulkRecordUsageStats performs all upserts in a single transaction. This is
+// dramatically cheaper than per-request inserts: one fsync instead of N, and
+// one round-trip to SQLite instead of N. The engine calls this on a fixed
+// interval (default 60s) to amortise the disk I/O across many requests.
+//
+// Returns the number of rows written. On error, the transaction is rolled
+// back and no rows are persisted.
+func (s *Store) BulkRecordUsageStats(entries []StatsBatchEntry) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("bulk stats begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// SQLite's max variable count is 32766 (SQLITE_MAX_VARIABLE_NUMBER).
+	// Each row uses 9 bind vars, so we cap a single statement at ~3000 rows
+	// (9 * 3000 = 27000) to stay safely under the limit.
+	const maxRowsPerStmt = 3000
+
+	written := 0
+	for offset := 0; offset < len(entries); offset += maxRowsPerStmt {
+		end := offset + maxRowsPerStmt
+		if end > len(entries) {
+			end = len(entries)
+		}
+		chunk := entries[offset:end]
+
+		// Build "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ...), ..."
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO usage_stats
+			(bucket, downstream_id, model, input_tokens, output_tokens,
+			 cache_creation, cache_read, request_count, cache_hit_count)
+			VALUES `)
+		args := make([]interface{}, 0, len(chunk)*9)
+		for i, e := range chunk {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, 1, ?)")
+			bucket := e.Bucket
+			if bucket == "" {
+				bucket = bucketKey(time.Now())
+			}
+			cacheHitIncrement := int64(0)
+			if e.CacheRead > 0 {
+				cacheHitIncrement = 1
+			}
+			args = append(args,
+				bucket, e.DownstreamID, e.Model,
+				e.InputTokens, e.OutputTokens,
+				e.CacheCreation, e.CacheRead,
+				cacheHitIncrement)
+		}
+		sb.WriteString(`
+			ON CONFLICT(bucket, downstream_id, model) DO UPDATE SET
+				input_tokens    = input_tokens    + excluded.input_tokens,
+				output_tokens   = output_tokens   + excluded.output_tokens,
+				cache_creation  = cache_creation  + excluded.cache_creation,
+				cache_read      = cache_read      + excluded.cache_read,
+				request_count   = request_count   + 1,
+				cache_hit_count = cache_hit_count + excluded.cache_hit_count
+		`)
+
+		if _, err := tx.Exec(sb.String(), args...); err != nil {
+			return written, fmt.Errorf("bulk stats exec (chunk %d-%d): %w", offset, end, err)
+		}
+		written += len(chunk)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return written, fmt.Errorf("bulk stats commit: %w", err)
+	}
+	committed = true
+	return written, nil
 }
 
 // AggregateStats returns per-(downstream, model) aggregates for the given time range,
