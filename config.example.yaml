@@ -48,17 +48,8 @@ icon_cache_dir: "~/.config/tresor/tresor-icons/"
 
 # Downstream LLM providers
 downstreams:
-  - id: openai
-    name: OpenAI
-    api_formats: [openai]
-    base_url: https://api.openai.com
-    api_key: ""                          # Set your API key here, e.g. sk-...
-    output_model_ids:                    # Known output models for this provider
-      - gpt-4o
-      - gpt-4o-mini
-
   - id: openai-responses
-    name: OpenAI Responses
+    name: OpenAI
     api_formats: [openai_responses]
     base_url: https://api.openai.com
     api_key: ""                          # Set your API key here
@@ -80,8 +71,7 @@ downstreams:
     base_url: https://generativelanguage.googleapis.com
     api_key: ""                          # Set your API key here
     output_model_ids:                    # Known output models for this provider
-      - gemini-3.5-flash
-      - gemini-3.0-pro
+      - gemini-3.7-flash
 
   # DeepSeek exposes different endpoints for different API formats:
   # OpenAI Chat Completions + OpenAI Responses are served at the root URL,
