@@ -4675,10 +4675,7 @@ function renderDashboardModels(models, captureOn) {
             '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(mTotal)) + '</td>' +
             '<td class="num">' + cacheCell + '</td>' +
-            '<td class="token-bar-cell">' +
-                '<div class="token-bar-track"><div class="token-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div>' +
-                '<span class="token-bar-pct">' + pct.toFixed(1) + '%</span>' +
-            '</td>' +
+            '<td class="num">' + pct.toFixed(1) + '</td>' +
             '</tr>';
     }
     tbody.innerHTML = html;
@@ -4722,10 +4719,7 @@ function renderDashboardProviders(providers, captureOn) {
             '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(pTotal)) + '</td>' +
             '<td class="num">' + cacheCell + '</td>' +
-            '<td class="token-bar-cell">' +
-                '<div class="token-bar-track"><div class="token-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div>' +
-                '<span class="token-bar-pct">' + pct.toFixed(1) + '%</span>' +
-            '</td>' +
+            '<td class="num">' + pct.toFixed(1) + '</td>' +
             '</tr>';
     }
     tbody.innerHTML = html;
