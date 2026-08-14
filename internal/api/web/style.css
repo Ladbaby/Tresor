@@ -3646,7 +3646,7 @@ html[data-theme="light"] form select {
     width: 100%;
     border-collapse: collapse;
     background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    border: 0px solid var(--border-color);
     border-radius: 10px;
     overflow: hidden;
 }
