@@ -3265,6 +3265,16 @@ html[data-theme="light"] form select {
     100% { background: transparent; }
 }
 
+/* Highlight a dashboard summary card when its value changes on refresh. */
+.summary-card.flash .summary-value {
+    animation: summaryFlash 0.6s ease;
+}
+
+@keyframes summaryFlash {
+    0% { color: var(--accent); }
+    100% { color: inherit; }
+}
+
 /* Timestamp */
 .log-time {
     color: var(--text-muted);

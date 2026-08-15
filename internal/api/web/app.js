@@ -70,7 +70,18 @@ function activateTab(tabId) {
     }
 
     if (tabId === 'dashboard') {
-        loadDashboard();
+        if (!dashboardActive) {
+            dashboardActive = true;
+            loadDashboard();
+            dashboardRefreshTimer = setInterval(
+                () => loadDashboard(undefined, true), 60000);
+        }
+    } else {
+        if (dashboardActive) {
+            dashboardActive = false;
+            clearInterval(dashboardRefreshTimer);
+            dashboardRefreshTimer = null;
+        }
     }
 }
 
@@ -4424,6 +4435,8 @@ function formatDuration(ms) {
 // ---- Dashboard ----
 let dashboardCurrentRange = 'last_7_days';
 let dashboardInitialized = false;
+let dashboardActive = false;
+let dashboardRefreshTimer = null;
 
 function initDashboard() {
     if (dashboardInitialized) return;
@@ -4466,7 +4479,7 @@ function initDashboard() {
     }
 }
 
-async function loadDashboard(range) {
+async function loadDashboard(range, silent) {
     if (range) dashboardCurrentRange = range;
     let url = '/stats';
     if (dashboardCurrentRange === 'custom') {
@@ -4482,7 +4495,9 @@ async function loadDashboard(range) {
     }
 
     // Reset to a "loading" state before fetch so the user sees feedback.
-    setDashboardLoading();
+    // Silent (periodic) refreshes skip this so the numbers can animate in
+    // place instead of flashing to "—".
+    if (!silent) setDashboardLoading();
 
     try {
         const data = await api(url);
@@ -4545,7 +4560,7 @@ function renderDashboardSummary(total, captureOn, models, providers, ips) {
 
     const totalEl = document.getElementById('dash-total-tokens');
     totalEl.classList.remove('summary-na');
-    totalEl.textContent = fmtNum(totalTok);
+    tweenNumber(totalEl, totalTok, v => fmtNum(Math.round(v)));
 
     const detailEl = document.getElementById('dash-total-tokens-detail');
     if (totalTok > 0) {
@@ -4559,20 +4574,22 @@ function renderDashboardSummary(total, captureOn, models, providers, ips) {
     cacheEl.classList.remove('summary-na');
     if (!captureOn) {
         cacheEl.textContent = 'N/A';
+        cacheEl._prevNum = null;
         cacheEl.classList.add('summary-na');
         cacheDetailEl.textContent = 'Enable Capture Payloads in Settings to track';
     } else if (total.cache_hit_rate == null) {
         cacheEl.textContent = '—';
+        cacheEl._prevNum = null;
         cacheEl.classList.add('summary-na');
         cacheDetailEl.textContent = 'No cache data in this range';
     } else {
         const pct = (total.cache_hit_rate * 100);
-        cacheEl.textContent = pct.toFixed(1) + '%';
+        tweenNumber(cacheEl, pct, v => v.toFixed(1) + '%');
         cacheDetailEl.textContent = pct >= 50 ? 'Cache is helping' : 'Cache hits are low';
     }
 
     const reqEl = document.getElementById('dash-requests');
-    reqEl.textContent = fmtNum(total.requests || 0);
+    tweenNumber(reqEl, total.requests || 0, v => fmtNum(Math.round(v)));
 
     // Top Provider card — mirror of Top Model: first row of the per-downstream
     // aggregate. Icon resolves using the human-friendly Name (same convention
@@ -4591,6 +4608,7 @@ function renderDashboardSummary(total, captureOn, models, providers, ips) {
         const topTotal = (top.input_tokens || 0) + (top.output_tokens || 0);
         topProvDetailEl.textContent = fmtNum(topTotal) + ' tokens · ' +
             fmtNum(top.request_count || 0) + ' reqs';
+        flashCard(topProvEl, provLabel);
     } else {
         topProvEl.innerHTML = '<span>—</span>';
         topProvEl.classList.add('summary-na');
@@ -4609,6 +4627,7 @@ function renderDashboardSummary(total, captureOn, models, providers, ips) {
         const topTotal = (top.input_tokens || 0) + (top.output_tokens || 0);
         topDetailEl.textContent = fmtNum(topTotal) + ' tokens · ' +
             fmtNum(top.request_count || 0) + ' reqs';
+        flashCard(topEl, topName);
     } else {
         topEl.innerHTML = '<span>—</span>';
         topEl.classList.add('summary-na');
@@ -4630,6 +4649,7 @@ function renderDashboardSummary(total, captureOn, models, providers, ips) {
         const topIpTotal = (top.input_tokens || 0) + (top.output_tokens || 0);
         topIpDetailEl.textContent = fmtNum(topIpTotal) + ' tokens · ' +
             fmtNum(top.request_count || 0) + ' reqs';
+        flashCard(topIpEl, ipLabel);
     } else {
         topIpEl.textContent = '—';
         topIpEl.classList.add('summary-na');
@@ -4813,6 +4833,38 @@ function fmtNum(n) {
     if (abs >= 1e6) return (n / 1e6).toFixed(2) + 'M';
     if (abs >= 1e3) return (n / 1e3).toFixed(1) + 'K';
     return String(n);
+}
+
+// Tween the displayed number in `el` from its previous value to `to`.
+// `format` maps a raw number to its display string (reuse fmtNum / a pct fmt).
+// The previous value is persisted on the element (el._prevNum) across refreshes
+// so a periodic reload animates from the last shown value, not from 0.
+function tweenNumber(el, to, format) {
+    const from = (el._prevNum != null) ? el._prevNum : 0;
+    el._prevNum = to;
+    if (from === to) { el.textContent = format(to); return; }
+    const dur = 600; // matches logFlash 0.6s
+    const start = performance.now();
+    function step(now) {
+        const t = Math.min((now - start) / dur, 1);
+        const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+        el.textContent = format(from + (to - from) * eased);
+        if (t < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+}
+
+// Flash a summary card when its label changes between refreshes.
+function flashCard(el, label) {
+    if (el._prevLabel === label) return;
+    el._prevLabel = label;
+    const card = el.closest('.summary-card');
+    if (!card) return;
+    card.classList.remove('flash');
+    // Force reflow so re-adding the class restarts the animation.
+    void card.offsetWidth;
+    card.classList.add('flash');
+    setTimeout(() => card.classList.remove('flash'), 600);
 }
 
 // ---- About ----
