@@ -4675,7 +4675,7 @@ function renderDashboardModels(models, captureOn) {
             '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(mTotal)) + '</td>' +
             '<td class="num">' + cacheCell + '</td>' +
-            '<td class="num">' + pct.toFixed(1) + '</td>' +
+            '<td class="num">' + pct.toFixed(1) + '%' + '</td>' +
             '</tr>';
     }
     tbody.innerHTML = html;
@@ -4719,7 +4719,7 @@ function renderDashboardProviders(providers, captureOn) {
             '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(pTotal)) + '</td>' +
             '<td class="num">' + cacheCell + '</td>' +
-            '<td class="num">' + pct.toFixed(1) + '</td>' +
+            '<td class="num">' + pct.toFixed(1) + '%' + '</td>' +
             '</tr>';
     }
     tbody.innerHTML = html;
