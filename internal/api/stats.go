@@ -131,6 +131,7 @@ func (r *Router) handleStats(w http.ResponseWriter, req *http.Request) {
 			},
 			"models":    []interface{}{},
 			"providers": []interface{}{},
+			"ips":       []interface{}{},
 			"series":    []interface{}{},
 		})
 		return
@@ -151,6 +152,12 @@ func (r *Router) handleStats(w http.ResponseWriter, req *http.Request) {
 	providers, err := r.store.AggregateByProvider(query)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load provider stats: "+err.Error())
+		return
+	}
+
+	ips, err := r.store.AggregateByIP(query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load ip stats: "+err.Error())
 		return
 	}
 
@@ -175,6 +182,7 @@ func (r *Router) handleStats(w http.ResponseWriter, req *http.Request) {
 		},
 		"models":    models,
 		"providers": providers,
+		"ips":       ips,
 		"series":    series,
 	})
 }

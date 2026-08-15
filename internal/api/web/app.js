@@ -4486,10 +4486,11 @@ async function loadDashboard(range) {
 
     try {
         const data = await api(url);
-        renderDashboardSummary(data.total || {}, data.capture_payloads, data.models || [], data.providers || []);
+        renderDashboardSummary(data.total || {}, data.capture_payloads, data.models || [], data.providers || [], data.ips || []);
         renderDashboardSeries(data.series || []);
         renderDashboardModels(data.models || [], data.capture_payloads);
         renderDashboardProviders(data.providers || [], data.capture_payloads);
+        renderDashboardIPs(data.ips || [], data.capture_payloads);
     } catch (err) {
         renderDashboardError(err.message || String(err));
     }
@@ -4508,10 +4509,15 @@ function setDashboardLoading() {
     document.getElementById('dash-top-model').textContent = '—';
     document.getElementById('dash-top-model').classList.add('summary-na');
     document.getElementById('dash-top-model-detail').textContent = '';
+    document.getElementById('dash-top-ip').textContent = '—';
+    document.getElementById('dash-top-ip').classList.add('summary-na');
+    document.getElementById('dash-top-ip-detail').textContent = '';
     document.getElementById('dash-token-chart').innerHTML = '<div class="chart-empty">Loading…</div>';
     document.getElementById('dash-models-body').innerHTML =
         '<tr><td colspan="7" class="loading">Loading…</td></tr>';
     document.getElementById('dash-providers-body').innerHTML =
+        '<tr><td colspan="7" class="loading">Loading…</td></tr>';
+    document.getElementById('dash-ips-body').innerHTML =
         '<tr><td colspan="7" class="loading">Loading…</td></tr>';
 }
 
@@ -4521,15 +4527,18 @@ function renderDashboardError(msg) {
     document.getElementById('dash-requests').textContent = '—';
     document.getElementById('dash-top-provider').textContent = '—';
     document.getElementById('dash-top-model').textContent = '—';
+    document.getElementById('dash-top-ip').textContent = '—';
     document.getElementById('dash-token-chart').innerHTML =
         '<div class="chart-empty">Error: ' + esc(msg) + '</div>';
     document.getElementById('dash-models-body').innerHTML =
         '<tr><td colspan="7" class="loading">Error: ' + esc(msg) + '</td></tr>';
     document.getElementById('dash-providers-body').innerHTML =
         '<tr><td colspan="7" class="loading">Error: ' + esc(msg) + '</td></tr>';
+    document.getElementById('dash-ips-body').innerHTML =
+        '<tr><td colspan="7" class="loading">Error: ' + esc(msg) + '</td></tr>';
 }
 
-function renderDashboardSummary(total, captureOn, models, providers) {
+function renderDashboardSummary(total, captureOn, models, providers, ips) {
     const totalIn = total.input_tokens || 0;
     const totalOut = total.output_tokens || 0;
     const totalTok = totalIn + totalOut;
@@ -4604,6 +4613,27 @@ function renderDashboardSummary(total, captureOn, models, providers) {
         topEl.innerHTML = '<span>—</span>';
         topEl.classList.add('summary-na');
         topDetailEl.textContent = '';
+    }
+
+    // Top IP card — first row of the per-client-IP aggregate. No icon: an IP
+    // doesn't resolve to a provider/model name, so show the raw address.
+    const topIpEl = document.getElementById('dash-top-ip');
+    const topIpDetailEl = document.getElementById('dash-top-ip-detail');
+    topIpEl.classList.remove('summary-na');
+    if (ips && ips.length > 0) {
+        const top = ips[0];
+        const ipLabel = top.client_ip || '—';
+        topIpEl.textContent = ipLabel;
+        if (ipLabel.length > 15) {
+            topIpEl.classList.add('summary-long');
+        }
+        const topIpTotal = (top.input_tokens || 0) + (top.output_tokens || 0);
+        topIpDetailEl.textContent = fmtNum(topIpTotal) + ' tokens · ' +
+            fmtNum(top.request_count || 0) + ' reqs';
+    } else {
+        topIpEl.textContent = '—';
+        topIpEl.classList.add('summary-na');
+        topIpDetailEl.textContent = '';
     }
 }
 
@@ -4714,6 +4744,42 @@ function renderDashboardProviders(providers, captureOn) {
             '<td><div class="model-cell">' + providerIconHTML(provLabel) +
                 esc(provLabel) +
             '</div></td>' +
+            '<td class="num">' + esc(fmtNum(p.request_count || 0)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(inTok)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(pTotal)) + '</td>' +
+            '<td class="num">' + cacheCell + '</td>' +
+            '<td class="num">' + pct.toFixed(1) + '%' + '</td>' +
+            '</tr>';
+    }
+    tbody.innerHTML = html;
+}
+
+function renderDashboardIPs(ips, captureOn) {
+    const tbody = document.getElementById('dash-ips-body');
+    if (!ips || ips.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">No data for selected range</td></tr>';
+        return;
+    }
+
+    // Per-IP share of the total token volume for the selected range, used to
+    // scale the distribution bars. Mirrors renderDashboardProviders except
+    // the label cell is the raw client IP (no provider icon to resolve).
+    const grandTotal = ips.reduce((s, p) => s + (p.input_tokens || 0) + (p.output_tokens || 0), 0);
+
+    let html = '';
+    for (const p of ips) {
+        const inTok = p.input_tokens || 0;
+        const outTok = p.output_tokens || 0;
+        const pTotal = inTok + outTok;
+        const pct = grandTotal > 0 ? (pTotal / grandTotal * 100) : 0;
+
+        const cacheCell = formatCacheCell(captureOn, p.cache_read_tokens || 0, inTok);
+
+        const ipLabel = p.client_ip || '—';
+
+        html += '<tr>' +
+            '<td><div class="model-cell">' + esc(ipLabel) + '</div></td>' +
             '<td class="num">' + esc(fmtNum(p.request_count || 0)) + '</td>' +
             '<td class="num">' + esc(fmtNum(inTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +

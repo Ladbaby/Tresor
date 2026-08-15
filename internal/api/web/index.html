@@ -101,6 +101,11 @@
                         <div class="summary-value summary-value-icon" id="dash-top-model">—</div>
                         <div class="summary-sub" id="dash-top-model-detail"></div>
                     </div>
+                    <div class="summary-card">
+                        <div class="summary-label">Top IP</div>
+                        <div class="summary-value summary-value-icon" id="dash-top-ip">—</div>
+                        <div class="summary-sub" id="dash-top-ip-detail"></div>
+                    </div>
                 </div>
 
                 <div class="dashboard-section">
@@ -145,6 +150,26 @@
                             </tr>
                         </thead>
                         <tbody id="dash-providers-body">
+                            <tr><td colspan="7" class="loading">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="dashboard-section">
+                    <h3>Top IPs by Tokens</h3>
+                    <table class="dash-models-table">
+                        <thead>
+                            <tr>
+                                <th>IP</th>
+                                <th>Requests</th>
+                                <th>Input Tokens</th>
+                                <th>Output Tokens</th>
+                                <th>Total Tokens</th>
+                                <th>Cache Hit Rate</th>
+                                <th>Distribution</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dash-ips-body">
                             <tr><td colspan="7" class="loading">Loading…</td></tr>
                         </tbody>
                     </table>

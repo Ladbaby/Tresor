@@ -537,3 +537,195 @@ func TestPurgeUsageStatsBefore_NoMatchingRows(t *testing.T) {
 		t.Errorf("rows deleted: got %d, want 0", n)
 	}
 }
+
+func TestBulkRecordIPUsageStats_Aggregates(t *testing.T) {
+	s := newTestStore(t)
+
+	bucket := "2026-06-27T15:00:00Z"
+	entries := []StatsBatchEntry{
+		{Bucket: bucket, ClientIP: "203.0.113.10", Model: "m1",
+			InputTokens: 100, OutputTokens: 50, CacheCreation: 10, CacheRead: 30},
+		{Bucket: bucket, ClientIP: "203.0.113.10", Model: "m2",
+			InputTokens: 200, OutputTokens: 75, CacheCreation: 0, CacheRead: 0},
+		{Bucket: bucket, ClientIP: "198.51.100.4", Model: "m1",
+			InputTokens: 50, OutputTokens: 25, CacheCreation: 0, CacheRead: 0},
+	}
+	written, err := s.BulkRecordIPUsageStats(entries)
+	if err != nil {
+		t.Fatalf("bulk ip record: %v", err)
+	}
+	if written != 3 {
+		t.Errorf("written: got %d, want 3", written)
+	}
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T23:59:59Z")
+	rows, err := s.AggregateByIP(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate by ip: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 ip rows, got %d", len(rows))
+	}
+
+	// Sorted by total tokens desc: 203.0.113.10 (300+125=425) > 198.51.100.4 (75).
+	if rows[0].ClientIP != "203.0.113.10" {
+		t.Errorf("first row ip: got %q, want 203.0.113.10", rows[0].ClientIP)
+	}
+	if rows[0].InputTokens != 300 || rows[0].OutputTokens != 125 {
+		t.Errorf("ip0 tokens: got in=%d out=%d, want in=300 out=125",
+			rows[0].InputTokens, rows[0].OutputTokens)
+	}
+	if rows[0].CacheCreation != 10 || rows[0].CacheRead != 30 {
+		t.Errorf("ip0 cache: got cc=%d cr=%d, want cc=10 cr=30",
+			rows[0].CacheCreation, rows[0].CacheRead)
+	}
+	if rows[0].RequestCount != 2 {
+		t.Errorf("ip0 request_count: got %d, want 2", rows[0].RequestCount)
+	}
+	if rows[0].CacheHitCount != 1 {
+		t.Errorf("ip0 cache_hit_count: got %d, want 1", rows[0].CacheHitCount)
+	}
+
+	if rows[1].ClientIP != "198.51.100.4" {
+		t.Errorf("second row ip: got %q, want 198.51.100.4", rows[1].ClientIP)
+	}
+	if rows[1].InputTokens != 50 || rows[1].OutputTokens != 25 {
+		t.Errorf("ip1 tokens: got in=%d out=%d, want in=50 out=25",
+			rows[1].InputTokens, rows[1].OutputTokens)
+	}
+}
+
+func TestBulkRecordIPUsageStats_SkipsEmptyClientIP(t *testing.T) {
+	s := newTestStore(t)
+
+	entries := []StatsBatchEntry{
+		{Bucket: "2026-06-27T15:00:00Z", ClientIP: "", Model: "m1",
+			InputTokens: 100, OutputTokens: 50},
+		{Bucket: "2026-06-27T15:00:00Z", ClientIP: "203.0.113.10", Model: "m1",
+			InputTokens: 10, OutputTokens: 5},
+	}
+	written, err := s.BulkRecordIPUsageStats(entries)
+	if err != nil {
+		t.Fatalf("bulk ip record: %v", err)
+	}
+	if written != 1 {
+		t.Errorf("written: got %d, want 1 (empty IP skipped)", written)
+	}
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T23:59:59Z")
+	rows, err := s.AggregateByIP(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate by ip: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 ip row, got %d", len(rows))
+	}
+	if rows[0].ClientIP != "203.0.113.10" {
+		t.Errorf("ip: got %q, want 203.0.113.10", rows[0].ClientIP)
+	}
+}
+
+func TestBulkRecordIPUsageStats_Empty(t *testing.T) {
+	s := newTestStore(t)
+	written, err := s.BulkRecordIPUsageStats(nil)
+	if err != nil {
+		t.Fatalf("empty bulk ip: %v", err)
+	}
+	if written != 0 {
+		t.Errorf("written: got %d, want 0", written)
+	}
+}
+
+func TestAggregateByIP_GroupsByIP(t *testing.T) {
+	s := newTestStore(t)
+
+	// Multiple models/downstreams under the same IP must collapse into one row.
+	entries := []StatsBatchEntry{
+		{Bucket: "2026-06-27T15:00:00Z", ClientIP: "203.0.113.10", DownstreamID: "a", Model: "m1",
+			InputTokens: 100, OutputTokens: 50},
+		{Bucket: "2026-06-27T15:00:00Z", ClientIP: "203.0.113.10", DownstreamID: "b", Model: "m2",
+			InputTokens: 200, OutputTokens: 75},
+		{Bucket: "2026-06-27T16:00:00Z", ClientIP: "203.0.113.10", DownstreamID: "a", Model: "m1",
+			InputTokens: 50, OutputTokens: 25},
+	}
+	if _, err := s.BulkRecordIPUsageStats(entries); err != nil {
+		t.Fatalf("bulk ip record: %v", err)
+	}
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2026-06-27T23:59:59Z")
+	rows, err := s.AggregateByIP(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate by ip: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 ip row, got %d", len(rows))
+	}
+	if rows[0].InputTokens != 350 || rows[0].OutputTokens != 150 {
+		t.Errorf("grouped tokens: got in=%d out=%d, want in=350 out=150",
+			rows[0].InputTokens, rows[0].OutputTokens)
+	}
+	if rows[0].RequestCount != 3 {
+		t.Errorf("request_count: got %d, want 3", rows[0].RequestCount)
+	}
+}
+
+func TestAggregateByIP_OutsideRange(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.BulkRecordIPUsageStats([]StatsBatchEntry{
+		{Bucket: "2026-06-27T15:00:00Z", ClientIP: "203.0.113.10", Model: "m1",
+			InputTokens: 100, OutputTokens: 50},
+	}); err != nil {
+		t.Fatalf("bulk ip record: %v", err)
+	}
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2027-01-01T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2027-01-02T00:00:00Z")
+	rows, err := s.AggregateByIP(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate outside range: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows outside range, got %d", len(rows))
+	}
+}
+
+func TestPurgeUsageStatsBefore_IPTable(t *testing.T) {
+	s := newTestStore(t)
+
+	// Old IP rows (should be purged) and recent IP rows (should be kept).
+	ipEntries := []StatsBatchEntry{
+		{Bucket: "2024-06-01T00:00:00Z", ClientIP: "10.0.0.1", Model: "m", InputTokens: 1, OutputTokens: 1},
+		{Bucket: "2024-12-31T23:00:00Z", ClientIP: "10.0.0.2", Model: "m", InputTokens: 1, OutputTokens: 1},
+		{Bucket: "2026-06-27T15:00:00Z", ClientIP: "10.0.0.3", Model: "m", InputTokens: 1, OutputTokens: 1},
+	}
+	if _, err := s.BulkRecordIPUsageStats(ipEntries); err != nil {
+		t.Fatalf("seed ip: %v", err)
+	}
+
+	cutoff := "2025-01-01T00:00:00Z"
+	n, err := s.PurgeUsageStatsBefore(cutoff)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	// No usage_stats rows seeded, so the count is just the 2 old IP rows.
+	if n != 2 {
+		t.Errorf("rows deleted: got %d, want 2", n)
+	}
+
+	from, _ := time.Parse("2006-01-02T15:04:05Z", "2020-01-01T00:00:00Z")
+	to, _ := time.Parse("2006-01-02T15:04:05Z", "2030-01-01T00:00:00Z")
+	rows, err := s.AggregateByIP(StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 surviving ip row, got %d", len(rows))
+	}
+	if rows[0].ClientIP != "10.0.0.3" {
+		t.Errorf("surviving ip: got %q, want 10.0.0.3", rows[0].ClientIP)
+	}
+}

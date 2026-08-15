@@ -202,6 +202,34 @@ func TestStats_EmptyResult_IncludesProvidersArray(t *testing.T) {
 	}
 }
 
+func TestStats_EmptyResult_IncludesIPsArray(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?range=last_7_days", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// The ips array must be present and empty (not missing/null) so the
+	// frontend can blindly iterate without a null check.
+	var resp struct {
+		IPs []map[string]interface{} `json:"ips"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.IPs == nil {
+		t.Errorf("ips array should be present (even when empty), got nil")
+	}
+	if len(resp.IPs) != 0 {
+		t.Errorf("expected empty ips, got %d entries", len(resp.IPs))
+	}
+}
+
 func TestStats_BadRange(t *testing.T) {
 	router := newTestRouter(t)
 	handler := router.Handler()

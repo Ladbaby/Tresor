@@ -147,6 +147,15 @@ func (e *Engine) flushStatsNow() {
 	if written > 0 {
 		log.Printf("stats flush: wrote %d usage_stats rows", written)
 	}
+
+	// Per-client-IP rollup, best-effort like the main table above: a failed
+	// IP flush must not abort the daemon. Entries without a ClientIP are
+	// skipped inside the store call.
+	if ipWritten, ipErr := e.store.BulkRecordIPUsageStats(batch); ipErr != nil {
+		log.Printf("ip stats flush failed (%d entries dropped): %v", len(batch), ipErr)
+	} else if ipWritten > 0 {
+		log.Printf("stats flush: wrote %d ip_usage_stats rows", ipWritten)
+	}
 }
 
 // runStatsFlusher drains the in-memory stats buffer every statsFlushInterval
@@ -337,6 +346,7 @@ func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []by
 			Bucket:        entry.Timestamp.UTC().Format("2006-01-02T15:00:00Z"),
 			DownstreamID:  entry.DownstreamID,
 			Model:         entry.ResolvedModel,
+			ClientIP:      entry.ClientIP,
 			InputTokens:   input,
 			OutputTokens:  output,
 			CacheCreation: cacheCreation,

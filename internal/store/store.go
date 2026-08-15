@@ -245,6 +245,22 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_bucket ON usage_stats(bucket)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_model  ON usage_stats(model)`,
+		// ip_usage_stats table: per-client-IP token usage aggregated by hourly
+		// bucket. One row per (hour, client_ip). Populated by the engine only
+		// when payload capture is enabled (capture_payloads: true), mirroring
+		// usage_stats. Feeds the Dashboard's "Top IPs by Tokens" section.
+		`CREATE TABLE IF NOT EXISTS ip_usage_stats (
+			bucket           TEXT    NOT NULL,
+			client_ip        TEXT    NOT NULL,
+			input_tokens     INTEGER NOT NULL DEFAULT 0,
+			output_tokens    INTEGER NOT NULL DEFAULT 0,
+			cache_creation   INTEGER NOT NULL DEFAULT 0,
+			cache_read       INTEGER NOT NULL DEFAULT 0,
+			request_count    INTEGER NOT NULL DEFAULT 0,
+			cache_hit_count  INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (bucket, client_ip)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_ip_usage_bucket ON ip_usage_stats(bucket)`,
 	}
 
 	for _, q := range queries {

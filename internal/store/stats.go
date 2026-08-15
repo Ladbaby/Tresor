@@ -46,6 +46,19 @@ type ProviderStatsRow struct {
 	CacheHitCount int64  `json:"cache_hit_count"`
 }
 
+// IPStatsRow is one row of the per-client-IP aggregate used by the
+// "Top IPs by Tokens" section of the Dashboard. One row per client IP,
+// totals summed across every downstream/model for that IP in the range.
+type IPStatsRow struct {
+	ClientIP      string `json:"client_ip"`
+	InputTokens   int64  `json:"input_tokens"`
+	OutputTokens  int64  `json:"output_tokens"`
+	CacheCreation int64  `json:"cache_creation_tokens"`
+	CacheRead     int64  `json:"cache_read_tokens"`
+	RequestCount  int64  `json:"request_count"`
+	CacheHitCount int64  `json:"cache_hit_count"`
+}
+
 // StatsQuery holds query parameters for the stats API.
 type StatsQuery struct {
 	From, To time.Time
@@ -93,6 +106,7 @@ type StatsBatchEntry struct {
 	Bucket        string
 	DownstreamID  string
 	Model         string
+	ClientIP      string // "" means no client IP — skip the ip_usage_stats table
 	InputTokens   int64
 	OutputTokens  int64
 	CacheCreation int64
@@ -179,6 +193,94 @@ func (s *Store) BulkRecordUsageStats(entries []StatsBatchEntry) (int, error) {
 
 	if err := tx.Commit(); err != nil {
 		return written, fmt.Errorf("bulk stats commit: %w", err)
+	}
+	committed = true
+	return written, nil
+}
+
+// BulkRecordIPUsageStats performs the per-client-IP upserts in a single
+// transaction, mirroring BulkRecordUsageStats. Entries with an empty
+// ClientIP are skipped — unattributable traffic is not stored as a
+// catch-all "" row. Returns the number of rows written (skipped entries
+// are not counted).
+func (s *Store) BulkRecordIPUsageStats(entries []StatsBatchEntry) (int, error) {
+	filtered := make([]StatsBatchEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.ClientIP == "" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	if len(filtered) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("bulk ip stats begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Each row uses 8 bind vars, so the same 3000-row cap as
+	// BulkRecordUsageStats stays safely under SQLite's variable limit.
+	const maxRowsPerStmt = 3000
+
+	written := 0
+	for offset := 0; offset < len(filtered); offset += maxRowsPerStmt {
+		end := offset + maxRowsPerStmt
+		if end > len(filtered) {
+			end = len(filtered)
+		}
+		chunk := filtered[offset:end]
+
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO ip_usage_stats
+			(bucket, client_ip, input_tokens, output_tokens,
+			 cache_creation, cache_read, request_count, cache_hit_count)
+			VALUES `)
+		args := make([]interface{}, 0, len(chunk)*8)
+		for i, e := range chunk {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, 1, ?)")
+			bucket := e.Bucket
+			if bucket == "" {
+				bucket = bucketKey(time.Now())
+			}
+			cacheHitIncrement := int64(0)
+			if e.CacheRead > 0 {
+				cacheHitIncrement = 1
+			}
+			args = append(args,
+				bucket, e.ClientIP,
+				e.InputTokens, e.OutputTokens,
+				e.CacheCreation, e.CacheRead,
+				cacheHitIncrement)
+		}
+		sb.WriteString(`
+			ON CONFLICT(bucket, client_ip) DO UPDATE SET
+				input_tokens    = input_tokens    + excluded.input_tokens,
+				output_tokens   = output_tokens   + excluded.output_tokens,
+				cache_creation  = cache_creation  + excluded.cache_creation,
+				cache_read      = cache_read      + excluded.cache_read,
+				request_count   = request_count   + 1,
+				cache_hit_count = cache_hit_count + excluded.cache_hit_count
+		`)
+
+		if _, err := tx.Exec(sb.String(), args...); err != nil {
+			return written, fmt.Errorf("bulk ip stats exec (chunk %d-%d): %w", offset, end, err)
+		}
+		written += len(chunk)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return written, fmt.Errorf("bulk ip stats commit: %w", err)
 	}
 	committed = true
 	return written, nil
@@ -272,6 +374,46 @@ func (s *Store) AggregateByProvider(q StatsQuery) ([]ProviderStatsRow, error) {
 	return result, nil
 }
 
+// AggregateByIP returns per-client-IP aggregates for the given time range,
+// ordered by total tokens (input + output) descending. Unlike AggregateStats,
+// this collapses every downstream/model for a client IP into a single row —
+// it's the rollup used by the Dashboard's "Top IPs by Tokens" section.
+func (s *Store) AggregateByIP(q StatsQuery) ([]IPStatsRow, error) {
+	fromKey := bucketKey(q.From)
+	toKey := bucketKey(q.To)
+	rows, err := s.db.Query(`
+		SELECT client_ip,
+		       COALESCE(SUM(input_tokens), 0),    COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(cache_creation), 0),
+		       COALESCE(SUM(cache_read), 0),
+		       COALESCE(SUM(request_count), 0),
+		       COALESCE(SUM(cache_hit_count), 0)
+		FROM ip_usage_stats
+		WHERE bucket >= ? AND bucket <= ?
+		GROUP BY client_ip
+		ORDER BY (SUM(input_tokens) + SUM(output_tokens)) DESC
+	`, fromKey, toKey)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate by ip: %w", err)
+	}
+	defer rows.Close()
+
+	result := []IPStatsRow{}
+	for rows.Next() {
+		var r IPStatsRow
+		if err := rows.Scan(&r.ClientIP, &r.InputTokens, &r.OutputTokens,
+			&r.CacheCreation, &r.CacheRead,
+			&r.RequestCount, &r.CacheHitCount); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // TimeSeries returns bucketed totals for the given range.
 // bucketSize is "hour" or "day". For "day", the bucket label is "YYYY-MM-DD".
 // For "hour", the bucket label is the canonical ISO8601 hour key.
@@ -350,8 +492,8 @@ func (s *Store) TotalStats(q StatsQuery) (input, output, requests int64, cacheHi
 	return input, output, requests, nil, nil
 }
 
-// PurgeUsageStatsBefore deletes every usage_stats row whose bucket key is
-// strictly less than the given cutoff. The bucket key uses the same ISO8601
+// PurgeUsageStatsBefore deletes every usage_stats and ip_usage_stats row
+// whose bucket key is strictly less than the given cutoff. The bucket key uses the same ISO8601
 // hour format as the rest of the package, so callers should pass a value
 // from bucketKey(t). Returns the number of rows deleted.
 //
@@ -367,6 +509,16 @@ func (s *Store) PurgeUsageStatsBefore(cutoff string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("purge usage stats rows affected: %w", err)
 	}
-	return n, nil
+	// Purge the per-IP rollup under the same retention window so
+	// ip_usage_stats can never outlive usage_stats.
+	res2, err := s.db.Exec(`DELETE FROM ip_usage_stats WHERE bucket < ?`, cutoff)
+	if err != nil {
+		return n, fmt.Errorf("purge ip usage stats before %q: %w", cutoff, err)
+	}
+	n2, err := res2.RowsAffected()
+	if err != nil {
+		return n, fmt.Errorf("purge ip usage stats rows affected: %w", err)
+	}
+	return n + n2, nil
 }
 
