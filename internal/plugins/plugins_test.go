@@ -2198,8 +2198,8 @@ func TestOpenAI2Anthropic_TransformStreamChunk_ContentBlockStop(t *testing.T) {
 func TestRegistry_ListPlugins(t *testing.T) {
 	r := NewRegistry()
 	plugins := r.ListPlugins()
-	if len(plugins) != 15 {
-		t.Fatalf("expected 15 plugins, got %d", len(plugins))
+	if len(plugins) != 16 {
+		t.Fatalf("expected 16 plugins, got %d", len(plugins))
 	}
 
 	ids := make(map[string]bool)
@@ -2208,6 +2208,9 @@ func TestRegistry_ListPlugins(t *testing.T) {
 	}
 	if !ids["custom_header"] {
 		t.Fatal("expected custom_header plugin")
+	}
+	if !ids["break_repeat"] {
+		t.Fatal("expected break_repeat plugin")
 	}
 	if !ids["openai2anthropic"] {
 		t.Fatal("expected openai2anthropic plugin")

@@ -50,6 +50,17 @@ func NewRegistry() engine.PluginRegistry {
 		return &OpenAI2Anthropic{}, nil
 	})
 
+	r.register("break_repeat", engine.PluginInfo{
+		ID:          "break_repeat",
+		Description: "Inserts a user reminder when the last three assistant messages are identical, breaking repetition loops in small models",
+		ConfigSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return NewBreakRepeatPlugin(config)
+	})
+
 	r.register("fix_anthropic_images", engine.PluginInfo{
 		ID:          "fix_anthropic_images",
 		Description: "Fix the image reading capability for the Anthropic API of some providers (e.g., llama.cpp). Refer to https://github.com/ggml-org/llama.cpp/pull/22536",
