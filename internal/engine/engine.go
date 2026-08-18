@@ -1296,50 +1296,135 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	}
 	releaseHeld = func() { releasePending() }
 
-	// Passthrough mode: no transformers — write each line immediately with flush
+	// Passthrough mode: no transformers — accumulate each SSE event and write
+	// it through on its terminating blank line. Terminal events are held (as
+	// the full event, event: + data:) until end-of-stream so they are emitted
+	// exactly once and can be suppressed when the stream turns out to be empty
+	// and is retried. Line-by-line passthrough (with a data-line-only terminal
+	// buffer) used to re-emit the terminal's data line after the real
+	// message_stop had already been flushed inline, appending an orphan
+	// `data:` line; that orphan corrupted a chained downstream that also held
+	// its terminal, so the client saw no clean message_stop.
 	if !hasTransformers {
-		// SSE state trackers for usage extraction and error detection.
-		var sseEvent string
+		// Event being accumulated: raw lines (CR preserved, for verbatim
+		// re-emission), the event name, and the data payload lines.
+		var evRaw []string
+		var evName string
+		var evData []string
+		// sseEventName is the event name used for in-band error detection.
 		var sseEventName string
-		// hadData tracks whether the event currently being accumulated carried
-		// any event:/data: lines, distinguishing a real event from a bare
-		// keep-alive comment followed by its blank line.
-		var hadData bool
-		flushSSEEvent := func() {
-			if sseEvent != "" {
-				scrapeUsage([]byte(sseEvent))
-			}
-			sseEvent = ""
-			sseEventName = ""
-		}
-		// terminalBuf holds terminal events ([DONE] / message_stop /
-		// response.completed) until end-of-stream, so we can suppress
-		// them when the stream turned out to be empty (case a) or
-		// reasoning-only (case b) and the upstream is being retried.
-		// While held, the rest of the stream (reasoning + content) is
-		// forwarded to the client immediately and progressively.
+		// terminalBuf holds a complete terminal event ([DONE] / message_stop /
+		// response.completed) until end-of-stream, so we can suppress it when
+		// the stream turned out to be empty (or reasoning-only) and the
+		// upstream is being retried. While held, the rest of the stream
+		// (reasoning + content) is forwarded to the client immediately.
 		var terminalBuf bytes.Buffer
 		var terminalEventActive bool
-		var terminalDataLines []string
-		flushTerminal := func() {
+		flushTerminal := func() bool {
 			if !terminalEventActive {
-				return
+				return true
 			}
-			writeAndFlush(terminalBuf.Bytes())
+			ok := writeAndFlush(terminalBuf.Bytes())
 			terminalBuf.Reset()
 			terminalEventActive = false
-			terminalDataLines = nil
+			return ok
 		}
 		discardTerminal := func() {
 			terminalBuf.Reset()
 			terminalEventActive = false
-			terminalDataLines = nil
+		}
+
+		// writeEvent emits the accumulated event verbatim: each raw line, then
+		// its terminating blank line. Returns false when the client is gone.
+		writeEvent := func() bool {
+			for _, l := range evRaw {
+				if !writeLine(l) {
+					return false
+				}
+			}
+			return writeLine("")
+		}
+		resetEvent := func() {
+			evRaw = nil
+			evName = ""
+			evData = nil
+			sseEventName = ""
+		}
+		// closeEvent processes the currently-accumulated event once it is
+		// complete (terminated by a blank line, or at end-of-stream). Returns
+		// false when the reader should stop and finish (client gone or a fatal
+		// in-band error was hit); true when scanning may continue.
+		closeEvent := func() bool {
+			if evName == "" && len(evData) == 0 {
+				return true
+			}
+			payload := strings.Join(evData, "\n")
+			// Check first for a fatal in-band error event — the downstream said
+			// 200 but is reporting a failure.
+			if se, isErr := ParseStreamError(sseEventName, []byte(payload)); isErr {
+				streamErr = se
+				if w.IsFlushed() {
+					// Bytes already went out, so the 200 cannot be recalled.
+					// Pass the error event through so the client's SDK can
+					// surface it, then stop reading.
+					if !writeEvent() {
+						return false
+					}
+				} else {
+					// Nothing has reached the client yet: suppress the error
+					// event and the held keep-alives so HandleProxy can answer
+					// with the provider's real status instead.
+					discardPending()
+				}
+				resetEvent()
+				return false
+			}
+			if bufferForRetry {
+				if payload != "" && IsStreamContentLine("data: "+payload, streamFormat) {
+					contentProduced = true
+					// Real content detected — if we were holding a terminal
+					// event, flush it now (it was held because the prior
+					// reasoning-only events didn't count).
+					if !flushTerminal() {
+						return false
+					}
+				} else if isTerminalEvent(payload, streamFormat) {
+					// Terminal event ([DONE] / message_stop / etc.): hold the
+					// FULL event until end-of-stream so we can suppress it when
+					// the upstream needs to be retried. If a terminal is already
+					// held (e.g. Anthropic's message_delta followed by
+					// message_stop), flush it first so both are emitted exactly
+					// once.
+					if terminalEventActive && !flushTerminal() {
+						return false
+					}
+					terminalEventActive = true
+					terminalBuf.Reset()
+					for _, l := range evRaw {
+						terminalBuf.WriteString(l)
+						terminalBuf.WriteByte('\n')
+					}
+					terminalBuf.WriteByte('\n')
+					resetEvent()
+					return true
+				}
+			}
+			// Non-terminal event: emit it verbatim.
+			if !writeEvent() {
+				return false
+			}
+			// A substantive event completed without being an error, so the
+			// bytes held to keep the status replaceable can be released now.
+			if holding && !releasePending() {
+				return false
+			}
+			resetEvent()
+			return true
 		}
 
 		for scanner.Scan() {
 			select {
 			case <-clientCtx.Done():
-				flushSSEEvent()
 				record()
 				return finish()
 			default:
@@ -1348,125 +1433,89 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 			trimmed := strings.TrimRight(line, "\r")
 			teeLine(trimmed)
 
-			// Track simple event boundaries for the cache scraper.
-			// This block must run BEFORE the on-the-fly format detector
-			// below so that sseEventName holds the current event's
-			// name when the first data: line of that event is being
-			// classified.
 			if trimmed == "" {
-				// End of an SSE event. Check first for a fatal in-band error
-				// event — the downstream said 200 but is reporting a failure.
-				if se, isErr := ParseStreamError(sseEventName, []byte(sseEvent)); isErr {
-					streamErr = se
-					if w.IsFlushed() {
-						// Bytes already went out, so the 200 cannot be recalled.
-						// Pass the error event through so the client's SDK can
-						// surface it, then stop reading.
-						writeLine(line)
-					} else {
-						// Nothing has reached the client yet: suppress the error
-						// event and the held keep-alives so HandleProxy can
-						// answer with the provider's real status instead.
-						discardPending()
+				// End of an SSE event (or a bare keep-alive / blank gap).
+				if evName != "" || len(evData) > 0 {
+					if !closeEvent() {
+						record()
+						return finish()
 					}
-					flushSSEEvent()
-					record()
-					return finish()
-				}
-				// If buffering for retry is on, check whether this event carries
-				// real content (excludes reasoning/thinking). Reasoning events
-				// are still streamed to the client (preserved) but do not flip
-				// contentProduced.
-				if bufferForRetry {
-					if sseEvent != "" && IsStreamContentLine("data: "+sseEvent, streamFormat) {
-						contentProduced = true
-						// Real content detected — if we were holding a
-						// terminal event, flush it now (it was held because
-						// the prior reasoning-only events didn't count).
-						flushTerminal()
-					} else if isTerminalEvent(sseEvent, streamFormat) {
-						// Terminal event ([DONE] / message_stop / etc.):
-						// hold it until end-of-stream, so we can suppress
-						// it when the upstream needs to be retried.
-						// Reasoning tokens remain visible to the client;
-						// only the terminal marker is held.
-						terminalEventActive = true
-						terminalBuf.WriteString("data: ")
-						terminalBuf.WriteString(sseEvent)
-						terminalBuf.WriteString("\n\n")
-						terminalDataLines = []string{sseEvent}
+				} else {
+					// Bare blank (no event data, e.g. a keep-alive gap): pass
+					// it through but do not release the hold — that is what lets
+					// a provider's trailing `event: error` still become a real
+					// HTTP error.
+					if !writeLine("") {
+						record()
+						return finish()
 					}
 				}
-				flushSSEEvent()
-			} else if strings.HasPrefix(trimmed, "event: ") {
-				sseEventName = strings.TrimPrefix(trimmed, "event: ")
-				hadData = true
+				continue
+			}
 
-				// Detect the downstream's actual stream format from the
-				// event name as soon as we see it. The seed is only a
-				// hint — a multi-format downstream (e.g. llama-swap
-				// with [openai, anthropic]) may speak a different format
-				// than ApiFormats[0] suggested, in which case the seed
-				// would mislabel the stream and break empty-response
-				// detection. OpenAI streams have no event names and are
-				// detected via the "choices" payload marker on the first
-				// data: line.
+			if strings.HasPrefix(trimmed, "event: ") {
+				sseEventName = strings.TrimPrefix(trimmed, "event: ")
+				evName = sseEventName
+				evRaw = append(evRaw, line)
+
+				// Detect the downstream's actual stream format from the event
+				// name as soon as we see it. The seed is only a hint — a
+				// multi-format downstream (e.g. llama-swap with
+				// [openai, anthropic]) may speak a different format than
+				// ApiFormats[0] suggested, in which case the seed would
+				// mislabel the stream and break empty-response detection.
+				// OpenAI streams have no event names and are detected via the
+				// "choices" payload marker on the first data: line.
 				if bufferForRetry {
 					if f := DetectStreamFormat(SSEChunk{EventType: sseEventName}); f != "" {
 						streamFormat = f
 					}
 				}
-			} else if strings.HasPrefix(trimmed, "data: ") {
-				if sseEvent != "" {
-					sseEvent += "\n"
-				}
-				sseEvent += strings.TrimPrefix(trimmed, "data: ")
-				hadData = true
+				continue
+			}
 
-				// On the first data: line of a stream, the payload may
-				// carry the format marker that the event name doesn't
-				// (e.g. OpenAI's "choices"). Override the seed when this
-				// is the case.
+			if strings.HasPrefix(trimmed, "data: ") {
+				data := strings.TrimPrefix(trimmed, "data: ")
+				evData = append(evData, data)
+				evRaw = append(evRaw, line)
+
+				// On the first data: line of a stream, the payload may carry
+				// the format marker that the event name doesn't (e.g. OpenAI's
+				// "choices"). Override the seed when this is the case.
 				if bufferForRetry {
 					if f := DetectStreamFormat(SSEChunk{
 						EventType: sseEventName,
-						Data:      []byte(strings.TrimPrefix(trimmed, "data: ")),
+						Data:      []byte(data),
 					}); f != "" {
 						streamFormat = f
 					}
 				}
-			}
-
-			// Write the line. While we're holding a terminal event,
-			// suppress the terminal's bytes (they're already in
-			// terminalBuf). Everything else flows through to the
-			// client immediately and progressively.
-			if terminalEventActive && bufferForRetry && isDataLineInTerminal(terminalDataLines, line) {
 				continue
 			}
+
+			// Unknown line type (including ":" keep-alive comments) — write
+			// through immediately, held while the status is still open. It is
+			// not part of any data event, so it does not end the hold.
 			if !writeLine(line) {
-				flushSSEEvent()
 				record()
 				return finish()
-			}
-			// A substantive event completed without being an error, so the bytes
-			// held to keep the status replaceable can be released now. Keep-alive
-			// comments carry no data and do not end the hold — that is what lets
-			// a provider's trailing `event: error` still become a real HTTP error.
-			if trimmed == "" && hadData && holding && !releasePending() {
-				record()
-				return finish()
-			}
-			if trimmed == "" {
-				hadData = false
 			}
 		}
-		// End of stream. If a terminal event is still held and no
-		// real content was produced, discard it and let the engine
-		// retry the upstream. Otherwise flush it to the client.
+
+		// Close any trailing event that was not terminated by a blank line
+		// before the stream ended, so its content (or held terminal) is not
+		// lost.
+		if evName != "" || len(evData) > 0 {
+			if !closeEvent() {
+				record()
+				return finish()
+			}
+		}
+		// End of stream. If a terminal event is still held and no real content
+		// was produced, discard it and let the engine retry the upstream.
+		// Otherwise flush it to the client.
 		if bufferForRetry && terminalEventActive && !contentProduced {
 			discardTerminal()
-			flushSSEEvent()
 			if err := scanner.Err(); err != nil {
 				log.Printf("Stream ended: %v", err)
 			}
@@ -1476,7 +1525,6 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 			return finish()
 		}
 		flushTerminal()
-		flushSSEEvent()
 		if err := scanner.Err(); err != nil {
 			log.Printf("Stream ended: %v", err)
 		}

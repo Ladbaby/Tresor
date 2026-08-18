@@ -1895,3 +1895,170 @@ func TestEngine_HandleProxy_RetryOnEmpty_Streaming_AnthropicOnOpenAISeededDownst
 		t.Errorf("expected client body to contain retry's text, got %q", w.Body.String())
 	}
 }
+
+// ---- regression: chained instances both with retry_on_empty ----
+
+// engineGatewayServer wraps an Engine in an httptest.Server that routes every
+// request to eng.HandleProxy, so it can be used as the downstream of another
+// engine (a chained-gateway scenario).
+func engineGatewayServer(t *testing.T, eng *Engine) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		eng.HandleProxy(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestEngine_RetryOnEmpty_Streaming_SingleCleanTerminal is the regression
+// guard for the trailing-orphan bug: with retry_on_empty on and a normal
+// non-empty Anthropic stream, the client must receive exactly one
+// `event: message_stop` and one `data: {"type":"message_stop"}`. Before the
+// passthrough branch was made event-buffered, the terminal's data line was
+// re-emitted after the real message_stop had already been flushed, appending
+// a duplicate.
+func TestEngine_RetryOnEmpty_Streaming_SingleCleanTerminal(t *testing.T) {
+	s := newTestStore(t)
+
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"mock","usage":{"input_tokens":10,"output_tokens":0}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	var attempts int
+	ts := anthropicSSEdownstream(t, &attempts, []string{body})
+	defer ts.Close()
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1", "anthropic")
+	addOutputModelIDs(t, s, "ds1", "mock-model")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetRetryOnEmpty(true)
+
+	reqBody := `{"model":"mock-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(reqBody)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if attempts != 1 {
+		t.Fatalf("expected exactly 1 downstream call (non-empty, no retry), got %d", attempts)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	out := w.Body.String()
+	if n := strings.Count(out, `event: message_stop`); n != 1 {
+		t.Errorf("expected exactly one 'event: message_stop', got %d (body=%q)", n, out)
+	}
+	if n := strings.Count(out, `data: {"type":"message_stop"}`); n != 1 {
+		t.Errorf("expected exactly one 'data: {\"type\":\"message_stop\"}', got %d (body=%q)", n, out)
+	}
+	if !strings.Contains(out, `"text":"hello"`) {
+		t.Errorf("expected content in body, got %q", out)
+	}
+}
+
+// TestEngine_RetryOnEmpty_ChainedInstancesBothOn is the regression test for
+// the user-reported bug: two chained gateway instances, both with
+// retry_on_empty enabled, serving a non-empty Anthropic stream. The outer
+// gateway's client must receive a well-formed stream ending in exactly one
+// `event: message_stop` immediately followed by its single
+// `data: {"type":"message_stop"}` — no orphan terminal appended by either
+// tier. Before the fix, each tier re-emitted its held terminal's data line
+// after the real message_stop, and the outer tier re-read the inner tier's
+// orphan as a fresh event and compounded it, so the Anthropic SDK reported
+// "stream ended before message_stop".
+func TestEngine_RetryOnEmpty_ChainedInstancesBothOn(t *testing.T) {
+	// Real Anthropic-format downstream.
+	realBody := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_r","type":"message","role":"assistant","content":[],"model":"mock","usage":{"input_tokens":10,"output_tokens":0}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"inner answer"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	var realAttempts int
+	realTS := anthropicSSEdownstream(t, &realAttempts, []string{realBody})
+	defer realTS.Close()
+
+	// Inner gateway: downstream is the real Anthropic server.
+	innerStore := newTestStore(t)
+	addDownstream(t, innerStore, "ds-inner", "inner", realTS.URL, "key-inner", "anthropic")
+	addOutputModelIDs(t, innerStore, "ds-inner", "mock-model")
+	innerEng := New(innerStore)
+	innerEng.SetRegistry(&mockRegistryImpl{})
+	innerEng.SetRetryOnEmpty(true) // both tiers on
+	innerSrv := engineGatewayServer(t, innerEng)
+
+	// Outer gateway: downstream is the inner gateway.
+	outerStore := newTestStore(t)
+	addDownstream(t, outerStore, "ds-outer", "outer", innerSrv.URL, "key-outer", "anthropic")
+	addOutputModelIDs(t, outerStore, "ds-outer", "mock-model")
+	outerEng := New(outerStore)
+	outerEng.SetRegistry(&mockRegistryImpl{})
+	outerEng.SetRetryOnEmpty(true) // both tiers on
+
+	reqBody := `{"model":"mock-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(reqBody)))
+	w := httptest.NewRecorder()
+	outerEng.HandleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	out := w.Body.String()
+	if !strings.Contains(out, `"text":"inner answer"`) {
+		t.Fatalf("expected inner content in body, got %q", out)
+	}
+	if n := strings.Count(out, `event: message_stop`); n != 1 {
+		t.Errorf("expected exactly one 'event: message_stop' from the outer gateway, got %d (body=%q)", n, out)
+	}
+	if n := strings.Count(out, `data: {"type":"message_stop"}`); n != 1 {
+		t.Errorf("expected exactly one 'data: {\"type\":\"message_stop\"}' from the outer gateway, got %d (body=%q)", n, out)
+	}
+	// The message_stop event must be intact and terminal: the event line
+	// directly precedes its data line, and nothing follows after the event's
+	// terminating blank line.
+	idx := strings.Index(out, `event: message_stop`)
+	if idx == -1 {
+		t.Fatalf("missing 'event: message_stop' in body: %q", out)
+	}
+	tail := out[idx:]
+	want := `event: message_stop
+data: {"type":"message_stop"}
+
+`
+	if !strings.HasPrefix(tail, want) {
+		t.Errorf("message_stop event not well-formed / not at end of stream.\n tail=%q\n want prefix=%q", tail, want)
+	}
+}

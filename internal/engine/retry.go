@@ -633,21 +633,3 @@ func isTerminalEvent(data string, format string) bool {
 		return false
 	}
 }
-
-// isDataLineInTerminal reports whether the given line (a raw SSE line
-// from the scanner) corresponds to a data line that has already been
-// captured in the held terminal event. Used by the streaming handler to
-// avoid writing the held terminal's bytes to the client twice (once from
-// the scanner, once when the terminal is flushed).
-func isDataLineInTerminal(terminalDataLines []string, line string) bool {
-	if !strings.HasPrefix(line, "data: ") {
-		return false
-	}
-	payload := strings.TrimPrefix(line, "data: ")
-	for _, held := range terminalDataLines {
-		if held == payload {
-			return true
-		}
-	}
-	return false
-}
