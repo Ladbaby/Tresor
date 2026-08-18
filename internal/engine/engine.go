@@ -765,7 +765,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.HasPrefix(r.URL.Path, "/api/") || isLLMPath(r.URL.Path) == false {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, fmt.Sprintf("%s path not found", r.URL.Path), http.StatusNotFound)
 		return
 	}
 
