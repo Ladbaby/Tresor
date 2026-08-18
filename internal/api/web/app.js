@@ -1191,6 +1191,9 @@ function refreshDownstreamDetail() {
                 _currentDownstream.api_key = newKey;
                 t.value = '';
                 t.type = 'password';
+                // Update the placeholder immediately (was only refreshed on
+                // full re-render, which made a just-saved key look unsaved).
+                t.placeholder = '•••••••••••••••• (saved — type to replace)';
                 const eye = root.querySelector('[data-action="toggle-key"]');
                 if (eye) { eye.classList.remove('shown'); eye.textContent = '👁'; }
                 _keyRevealed = false;

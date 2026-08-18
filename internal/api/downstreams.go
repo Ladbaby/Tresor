@@ -63,7 +63,9 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		r.requestConfigWrite()
-		ds.APIKey = "***"
+		if ds.APIKey != "" {
+			ds.APIKey = "***"
+		}
 		writeJSONWithWarning(w, http.StatusCreated, ds, proxy.IsBareIP(ds.BaseURL))
 
 	default:
