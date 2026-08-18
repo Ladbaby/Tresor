@@ -87,6 +87,10 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 
 		// Check if admin_password was explicitly provided in the request.
 		passwordProvided := raw["admin_password"] != nil
+		// Check if proxy_api_keys / proxy_mode / default_tab were explicitly provided.
+		proxyKeysProvided := raw["proxy_api_keys"] != nil
+		proxyModeProvided := raw["proxy_mode"] != nil
+		defaultTabProvided := raw["default_tab"] != nil
 
 		var incoming RuntimeConfig
 		if err := json.Unmarshal(bodyBytes, &incoming); err != nil {
@@ -163,10 +167,24 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			r.authMW.SetPassword(incoming.AdminPassword)
 		}
 
-		// Persist admin_password, capture_payloads, retry_on_empty, and log_level
-		// to YAML config (so they survive restart).
+		// Persist changed settings to YAML config (so they survive restart).
 		if passwordProvided {
 			r.cfg.AdminPassword = incoming.AdminPassword
+			r.requestConfigWrite()
+		}
+		if proxyKeysProvided && !stringSlicesEqual(r.cfg.ProxyAPIKeys, incoming.ProxyAPIKeys) {
+			if incoming.ProxyAPIKeys == nil {
+				incoming.ProxyAPIKeys = []string{}
+			}
+			r.cfg.ProxyAPIKeys = incoming.ProxyAPIKeys
+			r.requestConfigWrite()
+		}
+		if proxyModeProvided && r.cfg.ProxyMode != incoming.ProxyMode {
+			r.cfg.ProxyMode = incoming.ProxyMode
+			r.requestConfigWrite()
+		}
+		if defaultTabProvided && r.cfg.DefaultTab != incoming.DefaultTab {
+			r.cfg.DefaultTab = incoming.DefaultTab
 			r.requestConfigWrite()
 		}
 		if r.cfg.CapturePayloads != incoming.CapturePayloads {
@@ -195,4 +213,18 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// stringSlicesEqual reports whether two string slices have identical elements
+// in identical order (nil and empty slices are considered equal).
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
