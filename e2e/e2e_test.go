@@ -281,14 +281,15 @@ aliases:
 		}
 	})
 
-	t.Run("IconEndpoint_UnknownModel404", func(t *testing.T) {
+	t.Run("IconEndpoint_UnknownModelFallback", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/icons/totally-unknown-model-xyz-12345")
 		if err != nil {
 			t.Fatalf("icon: %v", err)
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != 404 {
-			t.Fatalf("expected 404 for unknown model, got %d", resp.StatusCode)
+		// Unknown models fall back to the generic dummy icon (200), never 404.
+		if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/svg+xml" {
+			t.Fatalf("expected 200 svg fallback for unknown model, got %d (%s)", resp.StatusCode, resp.Header.Get("Content-Type"))
 		}
 	})
 
