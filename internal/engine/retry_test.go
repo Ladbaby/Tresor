@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"tresor/internal/inspect"
 )
 
 // TestCalculateBackoff verifies the exponential backoff curve, the max-delay
@@ -2060,5 +2062,99 @@ data: {"type":"message_stop"}
 `
 	if !strings.HasPrefix(tail, want) {
 		t.Errorf("message_stop event not well-formed / not at end of stream.\n tail=%q\n want prefix=%q", tail, want)
+	}
+}
+
+// TestEngine_HandleProxy_Passthrough_UsageScraped is the regression test for
+// the user-reported bug where the Logs tab showed cache hit rate as N/A even
+// though the Inspect view (raw + parsed) clearly carried cache_read_input_tokens.
+//
+// Trigger: an Anthropic-format SSE stream served by a downstream whose
+// api_formats already includes anthropic (and no rule contributes a stream
+// transformer) — the engine takes the *passthrough* streaming path, which
+// historically forwarded each SSE event without scraping usage, so entry.Usage
+// stayed nil and the web UI rendered it as N/A.
+//
+// The transform path always called scrapeUsage per event; the passthrough path
+// now does the same, so this test must see the accumulated usage and a
+// non-nil cache hit rate.
+func TestEngine_HandleProxy_Passthrough_UsageScraped(t *testing.T) {
+	s := newTestStore(t)
+
+	// Multi-format downstream like llama-swap: client speaks anthropic so the
+	// engine must NOT auto-translate and must take the passthrough path.
+	var attempts int
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_u1","type":"message","role":"assistant","content":[],"model":"mock-model","stop_reason":null,"stop_sequence":null,"usage":{"cache_read_input_tokens":42691,"input_tokens":366,"output_tokens":0}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":260}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	ts := anthropicSSEdownstream(t, &attempts, []string{body})
+	defer ts.Close()
+
+	// Multi-format downstream (openai, anthropic); anthropic request => no
+	// auto-translation => hasTransformers == false => passthrough branch.
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1", "openai", "anthropic")
+	addOutputModelIDs(t, s, "ds1", "mock-model")
+
+	eng := New(s)
+	defer eng.Stop()
+	eng.SetRegistry(&mockRegistryImpl{})
+	// Enable capture so scrapeUsage is active (mirrors capture_payloads: true).
+	eng.SetPayloadStore(inspect.New(10))
+
+	reqBody := `{"model":"mock-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(reqBody)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	if attempts != 1 {
+		t.Fatalf("expected exactly one downstream attempt, got %d", attempts)
+	}
+
+	entries := eng.GetLogger().RecentEntries(1)
+	if len(entries) != 1 {
+		t.Fatalf("expected one log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+	if entry.Usage == nil {
+		t.Fatalf("expected entry.Usage to be populated on a passthrough Anthropic SSE stream; got nil (this is the N/A bug)")
+	}
+	if entry.Usage.InputTokens == nil || *entry.Usage.InputTokens != 366 {
+		t.Errorf("expected input_tokens=366, got %v", entry.Usage.InputTokens)
+	}
+	if entry.Usage.CacheReadTokens == nil || *entry.Usage.CacheReadTokens != 42691 {
+		t.Errorf("expected cache_read_input_tokens=42691, got %v", entry.Usage.CacheReadTokens)
+	}
+	if entry.Usage.OutputTokens == nil || *entry.Usage.OutputTokens != 260 {
+		t.Errorf("expected output_tokens=260, got %v", entry.Usage.OutputTokens)
+	}
+	rate, ok := entry.Usage.CacheHitRate()
+	if !ok || rate == nil {
+		t.Fatalf("expected CacheHitRate() to be present (ok=true), got ok=%v rate=%v", ok, rate)
+	}
+	// Expected rate = 42691 / (42691 + 366) ≈ 0.99151… → rounded to 4 decimals: 0.9915.
+	const want = 0.9915
+	if diff := *rate - want; diff < -1e-6 || diff > 1e-6 {
+		t.Errorf("expected cache hit rate ≈ %.4f, got %f", want, *rate)
 	}
 }

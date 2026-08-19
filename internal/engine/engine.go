@@ -1379,6 +1379,13 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 				resetEvent()
 				return false
 			}
+			// Look for a usage block on the raw upstream event. Passthrough keeps
+			// the raw payload, so this is the pre-"transform" upstream data —
+			// exactly what the transform path scrapes. Without this, a stream
+			// served without any stream transformer (input format already matches
+			// the downstream) never accumulates usage and the Logs tab shows
+			// cache hit rate as N/A even though the raw inspect view has it.
+			scrapeUsage([]byte(payload))
 			if bufferForRetry {
 				if payload != "" && IsStreamContentLine("data: "+payload, streamFormat) {
 					contentProduced = true
