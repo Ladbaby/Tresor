@@ -25,14 +25,17 @@ var versionSuffix = regexp.MustCompile(`[0-9]+(?:[\.-][0-9]+)*$`)
 //
 // Slugs target @lobehub/icons-static-svg on jsDelivr.
 var modelPatterns = []Pattern{
-	// GPT / o-series / embeddings / audio
-	{regexp.MustCompile(`(?i)gpt-|o1-|o3-|o4-|chatgpt|dall-e|whisper|tts-|text-embedding-`), "openai"},
+	// GPT / o-series / embeddings / audio / the bare "openai" brand (a
+	// downstream named "OpenAI API" must resolve to the openai icon).
+	{regexp.MustCompile(`(?i)gpt-|o1-|o3-|o4-|chatgpt|dall-e|whisper|tts-|text-embedding-|openai`), "openai"},
 	// Claude / Anthropic
 	{regexp.MustCompile(`(?i)claude|anthropic`), "claude-color"},
 	// Google — Gemini family + Veo + Imagen
 	{regexp.MustCompile(`(?i)gemini|veo|imagen`), "gemini-color"},
 	// DeepSeek (lobehub ships its own deepseek icon)
 	{regexp.MustCompile(`(?i)deepseek`), "deepseek-color"},
+	// MiniMax (Chinese lab) — CDN ships a color variant, prefer it
+	{regexp.MustCompile(`(?i)minimax`), "minimax-color"},
 	// Meta — Llama has no dedicated slug, fall back to the meta provider icon
 	{regexp.MustCompile(`(?i)llama`), "meta-color"},
 	// Mistral family (incl. mixtral, pixtral, codestral, ministral, magistral)
@@ -76,8 +79,9 @@ func Resolve(modelID string) string {
 }
 
 // firstSegmentFallback extracts the substring of modelID up to (but not
-// including) the first "-" or ":" delimiter. If no delimiter is present,
-// the whole string (trimmed of leading/trailing whitespace) is used.
+// including) the first "-", ":", or whitespace character. If no delimiter
+// is present, the whole string (trimmed of leading/trailing whitespace) is
+// used.
 //
 // Then any trailing ASCII digits are stripped from that first segment so
 // versioned vendor names ("gemma4", "qwen3.5", "claude3", "llama3") collapse
@@ -137,10 +141,13 @@ func firstSegmentFallback(modelID string) string {
 	return s
 }
 
-// firstSegmentCut returns the byte index of the first "-" or ":" in s, or
-// -1 if neither is present.
+// firstSegmentCut returns the byte index of the first "-", ":", or
+// whitespace character in s, or -1 if none is present. Whitespace is
+// included so provider display names like "OpenAI API" or "Minimax API"
+// collapse to their leading word ("openai", "minimax") instead of the
+// two-word string "openai api", which is not a valid CDN slug.
 func firstSegmentCut(s string) int {
-	i := strings.IndexAny(s, "-:")
+	i := strings.IndexAny(s, "-: \t")
 	if i < 0 {
 		return -1
 	}

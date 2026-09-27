@@ -37,6 +37,9 @@ func TestResolve(t *testing.T) {
 		{"deepseek-chat", "deepseek-color"},
 		{"deepseek-reasoner", "deepseek-color"},
 		{"DeepSeek-V3", "deepseek-color"},
+		// MiniMax → color twin
+		{"MiniMax-M2.5", "minimax-color"},
+		{"minimax-m2.5", "minimax-color"},
 		// Llama → meta-color
 		{"llama-3.1-70b", "meta-color"},
 		{"Llama-3.3-70B-Instruct", "meta-color"},
@@ -117,6 +120,14 @@ func TestFirstSegmentFallback(t *testing.T) {
 		{"qwen3:8b", "qwen"},
 		{":tag-only", ""},
 		{":::---", ""},
+		// Whitespace is a delimiter too, so multi-word provider display names
+		// (which flow through the same resolution path as model IDs) collapse
+		// to their leading word instead of a two-word string that 404s.
+		{"OpenAI API", "openai"},
+		{"Minimax API", "minimax"},
+		{"Anthropic API", "anthropic"},
+		{"Gemini  API", "gemini"}, // multiple spaces
+		{"grok\ttab", "grok"},
 		// Plain (no delimiter) versioned names also collapse to the bare
 		// vendor.
 		{"gemma4", "gemma"},
@@ -165,8 +176,10 @@ func TestCandidateSlugs(t *testing.T) {
 		// then "moonshot" is appended.
 		{"moonshot-v1-128k", []string{"kimi", "moonshot-color", "moonshot"}, "primary=kimi, fb=moonshot"},
 		// Pure fallback path: no hard-coded primary, so "<seg>-color" first.
-		{"MiniMax-M2.5", []string{"minimax-color", "minimax"}, "no primary → just fallback (color first)"},
 		{"BrandNewLab-XYZ-PRO", []string{"brandnewlab-color", "brandnewlab"}, "no primary → just fallback"},
+		// MiniMax resolves to the color twin; first segment "minimax" is its
+		// color twin, so the fallback is suppressed (user already chose color).
+		{"MiniMax-M2.5", []string{"minimax-color"}, "primary=minimax-color is color twin of fb=minimax"},
 		// Empty input → no candidates.
 		{"", nil, "empty input"},
 		// No "-" delimiter, primary empty → single segment as fallback (with color variant).
@@ -178,6 +191,10 @@ func TestCandidateSlugs(t *testing.T) {
 		// A non-versioned colon name with no primary still passes the letter
 		// check and degrades to the bare vendor + the -color twin.
 		{"some:future:model-xyz", []string{"some-color", "some"}, "no primary; fb='some'"},
+		// Multi-word provider display names: the leading word is both the
+		// pattern match and the first-segment fallback, so only one slug.
+		{"OpenAI API", []string{"openai"}, "primary=openai equals fb=openai"},
+		{"Minimax API", []string{"minimax-color"}, "primary=minimax-color is color twin of fb=minimax"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {

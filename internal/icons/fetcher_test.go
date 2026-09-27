@@ -172,7 +172,7 @@ func TestFetcher_FallbackHit(t *testing.T) {
 	defer cdn.Close()
 
 	f := newTestFetcher(t, cdn)
-	data, ct, err := f.Icon("MiniMax-M2.5")
+	data, ct, err := f.Icon("adobe-X")
 	if err != nil {
 		t.Fatalf("Icon: %v", err)
 	}
@@ -182,16 +182,16 @@ func TestFetcher_FallbackHit(t *testing.T) {
 	if got := atomic.LoadInt32(&hits); got != 1 {
 		t.Fatalf("expected exactly 1 CDN hit, got %d (paths=%v)", got, seenPaths)
 	}
-	// The fallback URL must end with /minimax-color.svg (color twin of
-	// first segment "minimax") — the color variant is preferred.
+	// The fallback URL must end with /adobe-color.svg (color twin of
+	// first segment "adobe") — the color variant is preferred.
 	foundColor := false
 	for _, p := range seenPaths {
-		if p == "/icons/minimax-color.svg" {
+		if p == "/icons/adobe-color.svg" {
 			foundColor = true
 		}
 	}
 	if !foundColor {
-		t.Errorf("expected fallback to fetch /icons/minimax-color.svg first, got paths=%v", seenPaths)
+		t.Errorf("expected fallback to fetch /icons/adobe-color.svg first, got paths=%v", seenPaths)
 	}
 }
 
@@ -286,16 +286,16 @@ func TestFetcher_ColorPreferredOverFlat(t *testing.T) {
 	defer cdn.Close()
 
 	f := newTestFetcher(t, cdn)
-	// "MiniMax-M2.5" → no hard-coded primary, fb = "minimax".
-	// We expect /icons/minimax-color.svg FIRST, the flat variant only on miss.
-	if _, _, err := f.Icon("MiniMax-M2.5"); err != nil {
+	// "adobe-X" → no hard-coded primary, fb = "adobe".
+	// We expect /icons/adobe-color.svg FIRST, the flat variant only on miss.
+	if _, _, err := f.Icon("adobe-X"); err != nil {
 		t.Fatalf("Icon: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 1 {
 		t.Fatalf("expected 1 CDN hit (color won on first try), got %d (paths=%v)", got, seenPaths)
 	}
-	if len(seenPaths) != 1 || seenPaths[0] != "/icons/minimax-color.svg" {
-		t.Errorf("/icons/minimax-color.svg should be the only request, got %v", seenPaths)
+	if len(seenPaths) != 1 || seenPaths[0] != "/icons/adobe-color.svg" {
+		t.Errorf("/icons/adobe-color.svg should be the only request, got %v", seenPaths)
 	}
 }
 
@@ -307,7 +307,7 @@ func TestFetcher_ColorFallthroughToFlat(t *testing.T) {
 	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		seenPaths = append(seenPaths, r.URL.Path)
-		if r.URL.Path == "/icons/minimax-color.svg" {
+		if r.URL.Path == "/icons/adobe-color.svg" {
 			// Simulate the real CDN: this vendor doesn't ship a color
 			// variant for this slug.
 			w.WriteHeader(http.StatusNotFound)
@@ -319,7 +319,7 @@ func TestFetcher_ColorFallthroughToFlat(t *testing.T) {
 	defer cdn.Close()
 
 	f := newTestFetcher(t, cdn)
-	data, ct, err := f.Icon("MiniMax-M2.5")
+	data, ct, err := f.Icon("adobe-X")
 	if err != nil {
 		t.Fatalf("Icon: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestFetcher_ColorFallthroughToFlat(t *testing.T) {
 	if got := atomic.LoadInt32(&hits); got != 2 {
 		t.Fatalf("expected 2 CDN hits (color miss + flat hit), got %d (paths=%v)", got, seenPaths)
 	}
-	want := []string{"/icons/minimax-color.svg", "/icons/minimax.svg"}
+	want := []string{"/icons/adobe-color.svg", "/icons/adobe.svg"}
 	if len(seenPaths) != len(want) {
 		t.Fatalf("expected paths %v, got %v", want, seenPaths)
 	}
