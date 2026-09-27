@@ -214,7 +214,13 @@ func (m *Manager) pollOnce(p *Provider, pl *pendingLogin) bool {
 	}
 	if pendingCode {
 		// ChatGPT flow: the poll response carries an authorization_code and
-		// code_verifier; exchange them at the token URL.
+		// code_verifier; exchange them at the token URL. The exchange endpoint
+		// is distinct from the polling endpoint, so token_url must be set even
+		// though the device flow's other endpoints are all device_* fields.
+		if p.TokenURL == "" {
+			m.failPending(pl, "device flow returned an authorization_code but no token_url is configured — add token_url to the downstream's auth block (ChatGPT uses https://auth.openai.com/oauth/token; it is distinct from device_token_url)")
+			return false
+		}
 		form := deviceExchangeForm(p, pl, tr)
 		tr, err = m.postToken(p, form)
 		if err != nil {

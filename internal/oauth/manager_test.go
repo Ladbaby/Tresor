@@ -538,6 +538,74 @@ func TestDeviceFlow_StringIntervalRegression(t *testing.T) {
 	}
 }
 
+// TestDeviceFlow_MissingTokenURLRegression guards the real-world case where a
+// ChatGPT device flow is configured without token_url: the poll returns an
+// authorization code, but the code exchange has no endpoint to hit. Instead of
+// failing with a cryptic `Post "": unsupported protocol scheme ""`, the login
+// must report a clear, actionable message.
+func TestDeviceFlow_MissingTokenURLRegression(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+
+	mu := sync.Mutex{}
+	pollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		pollCount++
+		isPoll := pollCount >= 2
+		mu.Unlock()
+		if !isPoll {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"device_auth_id": "da-1",
+				"user_code":      "ABCD-EFGH",
+				"interval":       "1",
+			})
+			return
+		}
+		// Authorization granted: ChatGPT returns a code to exchange.
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"authorization_code": "authz-code",
+			"code_verifier":      "verifier",
+		})
+	}))
+	defer server.Close()
+
+	// No TokenURL set — the exchange has nowhere to go.
+	bindOAuth(t, s, ds, &config.DownstreamAuthCfg{
+		Type:            "oauth",
+		Flow:            FlowDevice,
+		ClientID:        "app_test",
+		DeviceAuthURL:   server.URL + "/auth",
+		DeviceTokenURL:  server.URL + "/poll",
+		DeviceVerifyURL: "https://auth.openai.com/codex/device",
+	})
+
+	if _, err := m.StartLogin(ds.ID); err != nil {
+		t.Fatalf("start device login: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, _ := m.Status(ds.ID)
+		if st.Status == "failed" {
+			if !strings.Contains(st.Error, "token_url") {
+				t.Fatalf("expected a token_url error, got %q", st.Error)
+			}
+			if strings.Contains(st.Error, "unsupported protocol scheme") {
+				t.Fatalf("error leaked the cryptic scheme error: %q", st.Error)
+			}
+			return
+		}
+		if st.Connected {
+			t.Fatal("login should have failed, not succeeded")
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for device login to fail")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // TestDeviceFlow_OpenAIPendingShapeRegression mirrors the real OpenAI/Codex
 // device flow as implemented by the known-good reference client: early polls
 // return HTTP 403 with a namespaced object error
