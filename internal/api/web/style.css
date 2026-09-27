@@ -2013,6 +2013,12 @@ html[data-theme="light"] form select {
     font-weight: 700;
     letter-spacing: 0.04em;
 }
+.downstreams-list .ds-on-pill.off {
+    border-color: var(--text-secondary);
+    color: var(--text-secondary);
+    background: transparent;
+    opacity: 0.75;
+}
 .downstreams-list li.selected .ds-on-pill {
     background: rgba(255, 255, 255, 0.2);
     color: #fff;
@@ -2321,6 +2327,47 @@ html[data-theme="light"] form select {
     color: #fff;
 }
 
+/* ON/OFF switch in the downstream detail header (left of the delete button). */
+.ds-toggle {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.ds-toggle input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.ds-toggle-track {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: var(--border-color);
+    transition: background 0.15s;
+}
+.ds-toggle-track::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.15s;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.ds-toggle input:checked + .ds-toggle-track {
+    background: var(--success-text);
+}
+.ds-toggle input:checked + .ds-toggle-track::after {
+    transform: translateX(20px);
+}
+
 .toast {
     position: fixed;
     bottom: 1.5rem;
@@ -2522,15 +2569,6 @@ html[data-theme="light"] form select {
 }
 
 /* Per-format URL inputs in the downstream detail pane */
-.detail-section-hint {
-    text-transform: none;
-    letter-spacing: 0;
-    font-weight: 400;
-    color: var(--text-muted);
-    font-size: 0.7rem;
-    margin-left: 0.4rem;
-}
-
 .detail-format-urls {
     display: flex;
     flex-direction: column;
@@ -2563,7 +2601,8 @@ html[data-theme="light"] form select {
     font-weight: 500;
 }
 
-.format-url-input {
+.format-url-input,
+.format-path-input {
     flex: 1;
     padding: 0.4rem 0.6rem;
     background: var(--bg-tertiary);
@@ -2575,12 +2614,14 @@ html[data-theme="light"] form select {
     transition: border-color 0.15s;
 }
 
-.format-url-input:focus {
+.format-url-input:focus,
+.format-path-input:focus {
     outline: none;
     border-color: var(--accent-color);
 }
 
-.format-url-input::placeholder {
+.format-url-input::placeholder,
+.format-path-input::placeholder {
     color: var(--text-muted);
     font-style: italic;
 }

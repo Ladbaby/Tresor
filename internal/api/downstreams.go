@@ -249,6 +249,7 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			OutputModelIDs *[]string          `json:"output_model_ids"`
 			FormatURLs     *map[string]string `json:"format_urls"`
 			FormatPaths    *map[string]string `json:"format_paths"`
+			IsEnabled      *bool              `json:"is_enabled"`
 			Auth           *config.DownstreamAuthCfg `json:"auth"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
@@ -269,6 +270,9 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 		}
 		if patch.BaseURL != nil {
 			existing.BaseURL = *patch.BaseURL
+		}
+		if patch.IsEnabled != nil {
+			existing.IsEnabled = *patch.IsEnabled
 		}
 		if patch.ApiFormats != nil {
 			existing.ApiFormats = *patch.ApiFormats

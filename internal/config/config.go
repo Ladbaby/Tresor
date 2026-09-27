@@ -77,6 +77,12 @@ type DownstreamCfg struct {
 	ApiFormats     []string `yaml:"api_formats,omitempty"`
 	OutputModelIDs []string `yaml:"output_model_ids,omitempty"`
 
+	// IsEnabled controls whether this downstream is available. When false the
+	// downstream and its models behave "as if deleted". A pointer so that an
+	// absent field in existing YAML loads as nil (= enabled) rather than
+	// silently disabling every provider; only an explicit false disables.
+	IsEnabled *bool `yaml:"is_enabled,omitempty"`
+
 	// Auth holds the per-downstream authentication configuration (API key or
 	// OAuth). See DownstreamAuthCfg. When omitted in YAML, Load synthesizes
 	// an api_key auth from the legacy top-level api_key field.

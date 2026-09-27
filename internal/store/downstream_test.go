@@ -250,3 +250,142 @@ func TestDownstream_FormatPaths_RoundTrip(t *testing.T) {
 		t.Fatalf("openai_responses path after update: got %q", got2.FormatPaths["openai_responses"])
 	}
 }
+
+func TestDownstream_CreateDefaultsEnabled(t *testing.T) {
+	s := newTestStore(t)
+	ds := &Downstream{Name: "P", BaseURL: "https://p.example"}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := s.GetDownstream(ds.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.IsEnabled {
+		t.Fatal("newly created downstream should default to enabled")
+	}
+}
+
+func TestDownstream_UpdateFlipsEnabled(t *testing.T) {
+	s := newTestStore(t)
+	ds := &Downstream{Name: "P", BaseURL: "https://p.example", OutputModelIDs: []string{"m1"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	ds.IsEnabled = false
+	if err := s.UpdateDownstream(ds); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, err := s.GetDownstream(ds.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.IsEnabled {
+		t.Fatal("expected disabled after update, got enabled")
+	}
+}
+
+// A disabled downstream must be hidden from direct model resolution.
+func TestFindDownstreamByOutputModel_SkipsDisabled(t *testing.T) {
+	s := newTestStore(t)
+	ds := &Downstream{Name: "P", BaseURL: "https://p.example", OutputModelIDs: []string{"m1"}}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if d, _ := s.FindDownstreamByOutputModel("m1"); d == nil {
+		t.Fatal("expected to find m1 while enabled")
+	}
+	ds.IsEnabled = false
+	if err := s.UpdateDownstream(ds); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if d, _ := s.FindDownstreamByOutputModel("m1"); d != nil {
+		t.Fatal("m1 should not resolve while its downstream is disabled")
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// A YAML downstream without an explicit is_enabled field must load as enabled,
+// not disabled — this guards against silently disabling every provider on startup.
+func TestUpsertDownstreams_OmittedEnabledDefaultsOn(t *testing.T) {
+	s := newTestStore(t)
+	downstreams := []config.DownstreamCfg{
+		{ID: "ds-no-enable", Name: "No Enable", BaseURL: "https://x.example"},
+	}
+	if err := s.upsertDownstreams(downstreams); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := s.GetDownstream("ds-no-enable")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.IsEnabled {
+		t.Fatal("downstream without explicit is_enabled must default to enabled")
+	}
+}
+
+// An explicit is_enabled:false in YAML must take effect on insert, and a
+// subsequent upsert that omits the field must preserve the DB value.
+func TestUpsertDownstreams_ExplicitEnabledPreserved(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.upsertDownstreams([]config.DownstreamCfg{
+		{ID: "ds-off", Name: "Off", BaseURL: "https://x.example", IsEnabled: boolPtr(false)},
+	}); err != nil {
+		t.Fatalf("upsert off: %v", err)
+	}
+	if got, _ := s.GetDownstream("ds-off"); got == nil || got.IsEnabled {
+		t.Fatal("explicit is_enabled:false must be disabled on insert")
+	}
+	// Upsert again without the field — DB value must be preserved.
+	if err := s.upsertDownstreams([]config.DownstreamCfg{
+		{ID: "ds-off", Name: "Off renamed", BaseURL: "https://x.example"},
+	}); err != nil {
+		t.Fatalf("upsert again: %v", err)
+	}
+	got, _ := s.GetDownstream("ds-off")
+	if got.IsEnabled {
+		t.Fatal("omitting is_enabled on re-upsert must preserve the disabled state")
+	}
+	if got.Name != "Off renamed" {
+		t.Fatalf("expected name 'Off renamed', got %q", got.Name)
+	}
+}
+
+// WriteConfig must round-trip the enabled state into the YAML.
+func TestWriteConfig_PersistsIsEnabled(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.upsertDownstreams([]config.DownstreamCfg{
+		{ID: "ds-on", Name: "On", BaseURL: "https://on.example"},
+		{ID: "ds-off", Name: "Off", BaseURL: "https://off.example", IsEnabled: boolPtr(false)},
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := &config.AppConfig{ConfigPath: cfgPath}
+	cfg.Downstreams = []config.DownstreamCfg{}
+	cfg.Rules = []config.RuleCfg{}
+	cfg.Aliases = []config.AliasGroupCfg{}
+	if err := s.WriteConfig(cfg); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var round config.AppConfig
+	if err := yaml.Unmarshal(data, &round); err != nil {
+		t.Fatalf("unmarshal written config: %v", err)
+	}
+	want := map[string]bool{}
+	for _, d := range round.Downstreams {
+		want[d.ID] = d.IsEnabled == nil || *d.IsEnabled // nil means enabled
+	}
+	if !want["ds-on"] {
+		t.Fatal("ds-on should round-trip as enabled")
+	}
+	if on, ok := want["ds-off"]; !ok || on {
+		t.Fatalf("ds-off should round-trip as disabled, got present=%v enabled=%v", ok, on)
+	}
+}

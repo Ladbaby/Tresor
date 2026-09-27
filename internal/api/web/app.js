@@ -1008,7 +1008,7 @@ function renderDownstreamSidebar(list) {
         <li data-id="${esc(d.id)}" class="${d.id === _currentDownstreamId ? 'selected' : ''}">
             ${modelIconHTML(d.name)}
             <span class="ds-name">${esc(d.name)}</span>
-            <span class="ds-on-pill">ON</span>
+            <span class="ds-on-pill${d.is_enabled === false ? ' off' : ''}">${d.is_enabled === false ? 'OFF' : 'ON'}</span>
         </li>`).join('');
     ul.querySelectorAll('li[data-id]').forEach(li => {
         li.onclick = () => {
@@ -1203,12 +1203,17 @@ function renderDownstreamDetail(ds) {
     const hasKey = !!(auth.api_key && auth.api_key.length > 0);
     const isOAuth = auth.type === 'oauth';
     const oauthState = (window.__oauthStatusCache || {})[ds.id] || null;
+    const enabled = ds.is_enabled !== false; // treat a missing field as ON
 
     document.getElementById('downstreams-detail').innerHTML = `
         <div class="detail-header">
             ${modelIconHTML(ds.name)}
             <input type="text" class="detail-edit-name" value="${esc(ds.name)}" placeholder="(unnamed provider)" autocomplete="off">
             <div class="header-actions">
+                <label class="ds-toggle" title="${enabled ? 'Provider is ON — click to disable' : 'Provider is OFF — click to enable'}">
+                    <input type="checkbox" data-action="toggle-enabled"${enabled ? ' checked' : ''}>
+                    <span class="ds-toggle-track"></span>
+                </label>
                 <button class="detail-header-delete" data-action="delete" title="Delete this downstream">🗑</button>
             </div>
         </div>
@@ -1251,13 +1256,13 @@ function renderDownstreamDetail(ds) {
             </div>
         </div>
         <div class="detail-section">
-            <label>Per-format URLs <span class="detail-section-hint">— leave blank to fall back to the global base URL</span></label>
+            <label>Per-format URLs<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Per-format base URL overrides. Leave blank to fall back to the global base URL.">?</span></label>
             <div class="detail-format-urls">
                 ${renderFormatURLInputs(ds)}
             </div>
         </div>
         <div class="detail-section">
-            <label>Per-format request paths <span class="detail-section-hint">— override the path sent to this host (base URL + this). Leave blank to forward the client's own path</span></label>
+            <label>Per-format request paths<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Per-format request path override (base URL + this path). Leave blank to forward the client's own path.">?</span></label>
             <div class="detail-format-urls">
                 ${renderFormatPathInputs(ds)}
             </div>
@@ -1568,6 +1573,14 @@ function refreshDownstreamDetail() {
         const id = _currentDownstream.id;
 
         if (action === 'delete') { deleteDownstream(id); return; }
+        if (action === 'toggle-enabled') {
+            // The native checkbox already flipped its own checked state;
+            // `next` mirrors what the user selected.
+            const next = btn.checked;
+            _currentDownstream.is_enabled = next;
+            autoSaveDownstreamField(id, { is_enabled: next }, () => loadDownstreams());
+            return;
+        }
         if (action === 'auth-method') {
             const method = btn.dataset.method;
             const currentType = (_currentDownstream.auth && _currentDownstream.auth.type) || 'api_key';

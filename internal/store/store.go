@@ -377,6 +377,14 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Add is_enabled column (ON/OFF toggle). OFF makes the downstream and its
+	// models unavailable "as if deleted". Default 1 so existing rows stay enabled.
+	if !s.columnExists("downstreams", "is_enabled") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN is_enabled INTEGER DEFAULT 1`); err != nil {
+			return fmt.Errorf("migrate add is_enabled: %w", err)
+		}
+	}
+
 	// Add OAuth auth-method columns. auth_method is "api_key" (default) or
 	// "oauth"; oauth_provider names an entry in the YAML oauth_providers list.
 	// Runtime-only: never round-tripped through the YAML config.
@@ -1058,7 +1066,20 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 		}
 
 		if exists {
-			if _, err := tx.Exec(
+			// Only touch is_enabled when the YAML explicitly specified it, so an
+			// enabled state edited in the UI (and absent from the YAML) is
+			// preserved on re-upsert.
+			if d.IsEnabled != nil {
+				enabled := 0
+				if *d.IsEnabled {
+					enabled = 1
+				}
+				if _, err := tx.Exec(
+					"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ? WHERE id = ?",
+					d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, d.ID); err != nil {
+					return fmt.Errorf("update downstream %s: %w", d.ID, err)
+				}
+			} else if _, err := tx.Exec(
 				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, auth = ? WHERE id = ?",
 				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, d.ID); err != nil {
 				return fmt.Errorf("update downstream %s: %w", d.ID, err)
@@ -1081,9 +1102,13 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 				stmt.Close()
 			}
 		} else {
+			enabled := 1
+			if d.IsEnabled != nil && !*d.IsEnabled {
+				enabled = 0
+			}
 			if _, err := tx.Exec(
-				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, auth) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON); err != nil {
+				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON); err != nil {
 				return fmt.Errorf("insert downstream %s: %w", d.ID, err)
 			}
 			if len(d.OutputModelIDs) > 0 {

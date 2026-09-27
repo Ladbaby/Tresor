@@ -621,17 +621,30 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up alias for model %s", model), "internal error", "alias lookup error", err}
 	}
 
+	aliasDS := (*store.Downstream)(nil)
 	if alias != nil {
 		ds, err := e.store.GetDownstream(alias.DownstreamID)
 		if err != nil {
 			return &modelResult{model: model, body: body}, &gatewayError{http.StatusBadGateway, fmt.Sprintf("error getting downstream %s for alias %s", alias.DownstreamID, alias.ID),
 				fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), "alias downstream missing", err}
 		}
-		e.logger.Debug("alias match: model %q → alias %q → downstream %q (%s)", model, alias.ID, ds.ID, alias.OutputModelID)
-		return &modelResult{ds: ds, alias: alias, model: model, resolvedModel: alias.OutputModelID, body: rewriteModelInBody(body, alias.OutputModelID)}, nil
+		// A disabled downstream behaves "as if deleted": ignore the alias and
+		// fall through to direct resolution (which also skips disabled rows, so
+		// the request ultimately 404s if only a disabled downstream claims it).
+		if !ds.IsEnabled {
+			e.logger.Debug("alias match skipped: downstream %q is disabled", ds.ID)
+			alias = nil
+		} else {
+			aliasDS = ds
+		}
 	}
 
-	// Step 2: No alias — try direct downstream by output_model_ids
+	if alias != nil {
+		e.logger.Debug("alias match: model %q → alias %q → downstream %q (%s)", model, alias.ID, aliasDS.ID, alias.OutputModelID)
+		return &modelResult{ds: aliasDS, alias: alias, model: model, resolvedModel: alias.OutputModelID, body: rewriteModelInBody(body, alias.OutputModelID)}, nil
+	}
+
+	// Step 2: no usable alias — try direct downstream by output_model_ids
 	ds, err := e.store.FindDownstreamByOutputModel(model)
 	if err != nil {
 		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up downstream for model %s", model), "internal error", "downstream lookup error", err}
@@ -2163,7 +2176,18 @@ func (e *Engine) handleModels(w http.ResponseWriter) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// Disabled downstreams behave "as if deleted": hide their models and any
+	// alias that routes to them.
+	disabled := make(map[string]struct{}, len(downstreams))
 	for _, ds := range downstreams {
+		if !ds.IsEnabled {
+			disabled[ds.ID] = struct{}{}
+		}
+	}
+	for _, ds := range downstreams {
+		if !ds.IsEnabled {
+			continue
+		}
 		for _, m := range ds.OutputModelIDs {
 			data = append(data, newRecord(m, ds.Name, ds.ID, "downstream"))
 		}
@@ -2183,6 +2207,9 @@ func (e *Engine) handleModels(w http.ResponseWriter) {
 	}
 
 	for _, a := range aliases {
+		if _, off := disabled[a.DownstreamID]; off {
+			continue
+		}
 		// Skip regex aliases for input_model_id (they represent patterns, not model IDs)
 		if !a.IsRegex {
 			data = append(data, newRecord(a.InputModelID, dsName[a.DownstreamID], a.DownstreamID, "alias"))
@@ -2279,8 +2306,12 @@ func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
 	// Build a downstream-id -> name map so we can attribute models to their
 	// upstream in the description field.
 	dsName := make(map[string]string, len(downstreams))
+	disabled := make(map[string]struct{}, len(downstreams))
 	for _, ds := range downstreams {
 		dsName[ds.ID] = ds.Name
+		if !ds.IsEnabled {
+			disabled[ds.ID] = struct{}{}
+		}
 	}
 
 	geminiMethods := []string{"generateContent", "streamGenerateContent", "countTokens"}
@@ -2298,6 +2329,9 @@ func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
 	// — because the engine can auto-translate Gemini->OpenAI/Anthropic/
 	// OpenAI Responses. See the function-level comment for the rationale.
 	for _, ds := range downstreams {
+		if !ds.IsEnabled {
+			continue
+		}
 		for _, m := range ds.OutputModelIDs {
 			name := m
 			if !strings.HasPrefix(name, "models/") {
@@ -2321,6 +2355,9 @@ func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
 	// aliases regardless of the downstream's api_formats for the same reason
 	// as above (auto-translation makes any of them reachable).
 	for _, a := range aliases {
+		if _, off := disabled[a.DownstreamID]; off {
+			continue
+		}
 		if a.IsRegex {
 			// Skip the regex pattern itself — it's not a concrete model ID.
 			// Announced names (if any) are surfaced below.

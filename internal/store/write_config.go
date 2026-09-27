@@ -23,17 +23,22 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	// --- Downstreams with output_model_ids ---
 	var downstreams []config.DownstreamCfg
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_formats, format_urls, format_paths, auth FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return fmt.Errorf("query downstreams: %w", err)
 	}
 	for rows.Next() {
 		var d config.DownstreamCfg
 		var formatsJSON, urlsJSON, pathsJSON, authJSON string
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &authJSON); err != nil {
+		var enabled int
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan downstream: %w", err)
 		}
+		// Always write the explicit state back so the YAML reflects the toggle;
+		// a pointer keeps round-tripping stable (nil could never be produced here).
+		isEnabled := enabled == 1
+		d.IsEnabled = &isEnabled
 		d.ApiFormats = []string{}
 		if formatsJSON != "" && formatsJSON != "[]" {
 			if err := json.Unmarshal([]byte(formatsJSON), &d.ApiFormats); err != nil {
