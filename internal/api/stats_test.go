@@ -319,7 +319,7 @@ func TestStats_CapturePayloadsFlagLeaked(t *testing.T) {
 	handler := router.Handler()
 
 	// Toggle the runtime flag (mirrors what the Settings tab does).
-	InitRuntimeConfig("auto", nil, "", "downstreams", "info", true, false)
+	InitRuntimeConfig("127.0.0.1:11510", "auto", nil, "", "downstreams", "info", true, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/stats?range=today", nil)
 	w := httptest.NewRecorder()
@@ -340,7 +340,7 @@ func TestStats_CapturePayloadsFlagLeaked(t *testing.T) {
 	}
 
 	// Reset for other tests
-	InitRuntimeConfig("auto", nil, "", "downstreams", "info", false, false)
+	InitRuntimeConfig("127.0.0.1:11510", "auto", nil, "", "downstreams", "info", false, false)
 }
 
 func TestStatsQueryBuilder_Today(t *testing.T) {

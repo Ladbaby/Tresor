@@ -2973,10 +2973,34 @@ const proxyModeHelpTexts = {
     none: 'Connect directly — no proxy used',
 };
 
+// bind_addr as last reported by the daemon (refreshed on every loadSettings).
+let serverBindAddr = '';
+// Set when a settings save in this page session changed bind_addr. Cleared
+// only on a fresh page load — restarting Tresor implies the user reloads
+// the UI, at which point the new address is already active.
+let bindAddrNeedsRestart = false;
+
+function updateBindAddrRestartNote() {
+    const el = document.getElementById('bind-addr-restart-note');
+    if (!el) return;
+    if (bindAddrNeedsRestart) {
+        el.textContent = '⚠️ Bind address changed — please restart Tresor to apply this change.';
+        el.style.color = '#e6a23c';
+    } else {
+        el.textContent = '';
+        el.style.color = '';
+    }
+}
+
 async function loadSettings() {
     const statusEl = document.getElementById('settings-status');
     try {
         const cfg = await api('/config');
+        const bindAddrEl = document.getElementById('setting-bind-addr');
+        if (bindAddrEl) {
+            bindAddrEl.value = cfg.bind_addr || '';
+            serverBindAddr = cfg.bind_addr || '';
+        }
         document.getElementById('proxy-mode').value = cfg.proxy_mode || 'auto';
         const helpText = proxyModeHelpTexts[cfg.proxy_mode] || '';
         document.getElementById('proxy-mode-help').textContent = helpText;
@@ -3110,6 +3134,14 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
             proxy_api_keys: proxyAPIKeys,
             default_tab: document.getElementById('default-tab').value,
         };
+        // Include bind address if the field exists
+        const bindAddrEl = document.getElementById('setting-bind-addr');
+        let bindAddrChanged = false;
+        if (bindAddrEl) {
+            const addr = bindAddrEl.value.trim();
+            body.bind_addr = addr;
+            bindAddrChanged = !!serverBindAddr && addr !== serverBindAddr;
+        }
         // Include log level if the selector exists
         const logLevelEl = document.getElementById('setting-log-level');
         if (logLevelEl) {
@@ -3146,7 +3178,15 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
             return;
         }
 
-        statusEl.textContent = 'Settings saved — proxy mode and auth keys updated live.';
+        let savedMsg = 'Settings saved — proxy mode and auth keys updated live.';
+        if (bindAddrChanged) {
+            savedMsg = 'Settings saved. Bind address changed — please restart Tresor to apply the new address.';
+            // Show the restart reminder below the form until the page is
+            // reloaded (i.e. after the daemon has been restarted).
+            bindAddrNeedsRestart = true;
+            updateBindAddrRestartNote();
+        }
+        statusEl.textContent = savedMsg;
         statusEl.className = 'settings-status success';
         // Reload settings to refresh UI state
         loadSettings();

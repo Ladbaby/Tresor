@@ -122,6 +122,22 @@ func (r *Router) requestConfigWrite() {
 	r.configDebounceMu.Unlock()
 }
 
+// writeConfigNow cancels any pending debounced write and flushes the config
+// to YAML immediately. Used for settings that take effect only after a
+// daemon restart (e.g. bind_addr) so the user can restart right away without
+// losing the change.
+func (r *Router) writeConfigNow() {
+	r.configDebounceMu.Lock()
+	if r.configDebounceTimer != nil {
+		r.configDebounceTimer.Stop()
+		r.configDebounceTimer = nil
+	}
+	r.configDebounceMu.Unlock()
+	if err := r.store.WriteConfig(r.cfg); err != nil {
+		log.Printf("warning: failed to write config YAML: %v", err)
+	}
+}
+
 // Handler returns an http.Handler for the API routes only (under /api/).
 func (r *Router) Handler() http.Handler {
 	mux := http.NewServeMux()

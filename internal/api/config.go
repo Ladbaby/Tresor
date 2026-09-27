@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ var ValidDefaultTabs = []string{"dashboard", "downstreams", "aliases", "rules", 
 
 // RuntimeConfig exposes the mutable runtime settings via the admin API.
 type RuntimeConfig struct {
+	BindAddr        string   `json:"bind_addr"`
 	ProxyMode       string   `json:"proxy_mode"`
 	ProxyAPIKeys    []string `json:"proxy_api_keys"`
 	AdminPassword   string   `json:"admin_password,omitempty"`
@@ -28,6 +30,7 @@ type RuntimeConfig struct {
 // RuntimeConfigResponse is what GET /api/config returns.
 // The actual password is never sent back; we only indicate whether one is set.
 type RuntimeConfigResponse struct {
+	BindAddr         string   `json:"bind_addr"`
 	ProxyMode        string   `json:"proxy_mode"`
 	ProxyAPIKeys     []string `json:"proxy_api_keys"`
 	AdminPasswordSet bool     `json:"admin_password_set"`
@@ -44,8 +47,9 @@ var (
 
 // InitRuntimeConfig sets the initial runtime config from the YAML config so the
 // API reflects what the engine was started with.
-func InitRuntimeConfig(mode string, proxyAPIKeys []string, adminPassword string, defaultTab string, logLevel string, capturePayloads bool, retryOnEmpty bool) {
+func InitRuntimeConfig(bindAddr string, mode string, proxyAPIKeys []string, adminPassword string, defaultTab string, logLevel string, capturePayloads bool, retryOnEmpty bool) {
 	runtimeCfgMu.Lock()
+	runtimeCfg.BindAddr = bindAddr
 	runtimeCfg.ProxyMode = mode
 	runtimeCfg.ProxyAPIKeys = proxyAPIKeys
 	runtimeCfg.AdminPassword = adminPassword
@@ -63,6 +67,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		cfg := runtimeCfg
 		runtimeCfgMu.RUnlock()
 		writeJSON(w, http.StatusOK, RuntimeConfigResponse{
+			BindAddr:         cfg.BindAddr,
 			ProxyMode:        cfg.ProxyMode,
 			ProxyAPIKeys:     cfg.ProxyAPIKeys,
 			AdminPasswordSet: cfg.AdminPassword != "",
@@ -91,11 +96,21 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		proxyKeysProvided := raw["proxy_api_keys"] != nil
 		proxyModeProvided := raw["proxy_mode"] != nil
 		defaultTabProvided := raw["default_tab"] != nil
+		bindAddrProvided := raw["bind_addr"] != nil
 
 		var incoming RuntimeConfig
 		if err := json.Unmarshal(bodyBytes, &incoming); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
+		}
+
+		// Validate bind_addr: must be a valid "host:port" pair.
+		if bindAddrProvided {
+			incoming.BindAddr = strings.TrimSpace(incoming.BindAddr)
+			if _, _, err := net.SplitHostPort(incoming.BindAddr); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid bind_addr; must be in the form \"host:port\" (e.g. \"127.0.0.1:11510\")")
+				return
+			}
 		}
 
 		// Validate proxy_mode value.
@@ -137,6 +152,9 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 
 		runtimeCfgMu.Lock()
 		runtimeCfg.ProxyMode = incoming.ProxyMode
+		if bindAddrProvided {
+			runtimeCfg.BindAddr = incoming.BindAddr
+		}
 		runtimeCfg.ProxyAPIKeys = incoming.ProxyAPIKeys
 		if passwordProvided {
 			runtimeCfg.AdminPassword = incoming.AdminPassword
@@ -186,6 +204,13 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			r.cfg.ProxyMode = incoming.ProxyMode
 			r.requestConfigWrite()
 		}
+		if bindAddrProvided && r.cfg.BindAddr != incoming.BindAddr {
+			r.cfg.BindAddr = incoming.BindAddr
+			// bind_addr only takes effect on daemon restart, so flush the
+			// YAML immediately (bypassing the debounce) — otherwise a user
+			// who restarts right after saving would lose the change.
+			r.writeConfigNow()
+		}
 		if defaultTabProvided && r.cfg.DefaultTab != incoming.DefaultTab {
 			r.cfg.DefaultTab = incoming.DefaultTab
 			r.requestConfigWrite()
@@ -204,6 +229,7 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		}
 
 		writeJSON(w, http.StatusOK, RuntimeConfigResponse{
+			BindAddr:         runtimeCfg.BindAddr,
 			ProxyMode:        incoming.ProxyMode,
 			ProxyAPIKeys:     incoming.ProxyAPIKeys,
 			AdminPasswordSet: passwordProvided && incoming.AdminPassword != "",

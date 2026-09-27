@@ -154,7 +154,7 @@ func runDaemon(cfg *config.AppConfig) error {
 	}
 
 	// Initialize runtime config state in the API layer
-	api.InitRuntimeConfig(cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel, cfg.CapturePayloads, cfg.RetryOnEmpty)
+	api.InitRuntimeConfig(cfg.BindAddr, cfg.ProxyMode, cfg.ProxyAPIKeys, cfg.AdminPassword, cfg.DefaultTab, cfg.LogLevel, cfg.CapturePayloads, cfg.RetryOnEmpty)
 
 	// Build admin API router
 	adminRouter := api.NewRouter(s, eng, logger, payloadStore, iconFetcher, cfg, Version, BuildTime)

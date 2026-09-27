@@ -365,6 +365,20 @@
                     <h2>Settings</h2>
                     <div id="settings-panel">
                         <div class="settings-group">
+                            <h3>Server</h3>
+                            <p class="settings-description">
+                                TCP address the Tresor gateway listens on, in <code>host:port</code> form.
+                            </p>
+                            <div class="settings-row">
+                                <label for="setting-bind-addr">Bind Address</label>
+                                <input type="text" id="setting-bind-addr" placeholder="127.0.0.1:11510" class="settings-input">
+                            </div>
+                            <div class="settings-row">
+                                <span class="settings-help" id="bind-addr-restart-note"></span>
+                            </div>
+                        </div>
+
+                        <div class="settings-group">
                             <h3>Outbound Proxy</h3>
                             <p class="settings-description">
                                 Controls how outbound requests to downstream LLM providers are routed through HTTP proxies.
