@@ -622,6 +622,9 @@ func TestFlexErrorUnmarshal(t *testing.T) {
 		{"plain string", `"authorization_pending"`, "authorization_pending", ""},
 		{"object code+description", `{"code":"authorization_pending","description":"wait"}`, "authorization_pending", "wait"},
 		{"object type only", `{"type":"slow_down"}`, "slow_down", ""},
+		{"object error+error_description", `{"error":"slow_down","error_description":"wait"}`, "slow_down", "wait"},
+		{"object message", `{"code":"expired_token","message":"gone"}`, "expired_token", "gone"},
+		{"object unknown fields ignored", `{"weird":[]}`, "", ""},
 		{"null", `null`, "", ""},
 		{"empty object", `{}`, "", ""},
 	}
@@ -638,6 +641,51 @@ func TestFlexErrorUnmarshal(t *testing.T) {
 				t.Fatalf("message = %q, want %q", fe.Message, tc.msg)
 			}
 		})
+	}
+
+	// Unrecognized non-object, non-string, non-null shapes must be a hard
+	// error (fail fast) rather than silently swallowed into an empty code
+	// that would poll until timeout.
+	for _, in := range []string{`true`, `42`, `[1,2]`} {
+		var fe flexError
+		if err := json.Unmarshal([]byte(in), &fe); err == nil {
+			t.Fatalf("unmarshal %s: expected error for unrecognized shape, got none (code=%q)", in, fe.Code)
+		}
+	}
+}
+
+// TestFlexIntUnmarshal covers the flexInt decoder for number, numeric-string,
+// and non-numeric-string inputs.
+func TestFlexIntUnmarshal(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"bare number", `5`, 5},
+		{"numeric string", `"7"`, 7},
+		{"padded numeric string", `" 3 "`, 3},
+		{"zero", `0`, 0},
+		{"null is a no-op, stays zero", `null`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var f flexInt
+			if err := json.Unmarshal([]byte(tc.in), &f); err != nil {
+				t.Fatalf("unmarshal %s: %v", tc.in, err)
+			}
+			if int(f) != tc.want {
+				t.Fatalf("value = %d, want %d", int(f), tc.want)
+			}
+		})
+	}
+
+	// Non-numeric string and non-number must error.
+	for _, in := range []string{`"abc"`, `true`} {
+		var f flexInt
+		if err := json.Unmarshal([]byte(in), &f); err == nil {
+			t.Fatalf("unmarshal %s: expected error, got none", in)
+		}
 	}
 }
 

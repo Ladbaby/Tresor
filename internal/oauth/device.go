@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -33,7 +34,7 @@ func (f *flexInt) UnmarshalJSON(data []byte) error {
 	}
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {
-		n, err := strconv.Atoi(s)
+		n, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil {
 			return fmt.Errorf("flexInt: %q is not a number", s)
 		}
@@ -73,9 +74,15 @@ func (fe *flexError) UnmarshalJSON(data []byte) error {
 		ErrorDesc   string `json:"error_description"`
 	}
 	if err := json.Unmarshal(data, &obj); err != nil {
-		// null or unrecognized — leave empty and keep polling.
-		fe.Code, fe.Message = "", ""
-		return nil
+		// null (or absent) is the "no error" state — leave empty, keep
+		// polling. Any other unrecognized shape (number, bool, array) is
+		// malformed; surface it so the login fails fast with the raw body
+		// rather than silently polling until the device-code deadline.
+		if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+			fe.Code, fe.Message = "", ""
+			return nil
+		}
+		return fmt.Errorf("flexError: unrecognized error value %s", string(data))
 	}
 	fe.Code = firstNonEmpty(obj.Code, obj.Error, obj.Type)
 	fe.Message = firstNonEmpty(obj.Message, obj.Description, obj.ErrorDesc)
@@ -326,7 +333,14 @@ func deviceExchangeForm(p *Provider, pl *pendingLogin, tr *tokenResponse) url.Va
 }
 
 // isTerminalDeviceError reports whether a device-poll error should abort the
-// login rather than keep polling.
+// login rather than keep polling. Only the two known non-terminal states
+// (authorization_pending, slow_down) keep polling; every other error is
+// treated as terminal. In particular, a provider error code that is neither
+// of those (e.g. access_denied, or any novel code) fails the login with the
+// provider's message rather than silently polling until the device-code
+// deadline — that is strictly better than the prior behavior, in which an
+// object-shaped error broke parsing and killed the login with a confusing
+// "cannot unmarshal" message.
 func isTerminalDeviceError(err error) bool {
 	if err == nil {
 		return false
