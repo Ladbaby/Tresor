@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -16,6 +17,31 @@ import (
 // slow its polling cadence (RFC 8628 "slow_down"). It is not a terminal
 // error; pollDevice uses it to increase the poll interval.
 var errSlowDown = errors.New("slow_down")
+
+// flexInt accepts a JSON value that may be either a number or a numeric
+// string (e.g. "5"). Some providers — ChatGPT in particular — return numeric
+// fields such as device-auth "interval" as strings, which a plain int field
+// would reject with "cannot unmarshal string into ... type int".
+type flexInt int
+
+// UnmarshalJSON decodes either a bare number or a quoted numeric string.
+func (f *flexInt) UnmarshalJSON(data []byte) error {
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = flexInt(n)
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return fmt.Errorf("flexInt: %q is not a number", s)
+		}
+		*f = flexInt(n)
+		return nil
+	}
+	return fmt.Errorf("flexInt: cannot parse %s", string(data))
+}
 
 // requestDeviceLogin requests a device code from the provider and starts a
 // background poller. It populates pl with the user-facing code and polling
@@ -53,11 +79,11 @@ func (m *Manager) requestDeviceLogin(p *Provider, pl *pendingLogin) (*pendingLog
 	}
 
 	var dc struct {
-		DeviceAuthID string `json:"device_auth_id"`
-		UserCode     string `json:"user_code"`
-		Interval     int    `json:"interval"`
-		ExpiresIn    int    `json:"expires_in"`
-		DeviceCode   string `json:"device_code"`
+		DeviceAuthID string  `json:"device_auth_id"`
+		UserCode     string  `json:"user_code"`
+		Interval     flexInt `json:"interval"`
+		ExpiresIn    flexInt `json:"expires_in"`
+		DeviceCode   string  `json:"device_code"`
 	}
 	if err := json.Unmarshal(rb, &dc); err != nil {
 		return pl, fmt.Errorf("parse device auth response: %w", err)
@@ -76,7 +102,7 @@ func (m *Manager) requestDeviceLogin(p *Provider, pl *pendingLogin) (*pendingLog
 	// Start the background poller
 	pollCtx, pollCancel := context.WithCancel(context.Background())
 	pl.pollCancel = pollCancel
-	go m.pollDevice(p, pl, dc.Interval, pollCtx)
+	go m.pollDevice(p, pl, int(dc.Interval), pollCtx)
 	return pl, nil
 }
 
@@ -188,12 +214,12 @@ func (m *Manager) devicePoll(p *Provider, pl *pendingLogin) (*tokenResponse, err
 	}
 
 	var dr struct {
-		Error             string `json:"error"`
-		ErrorMessage      string `json:"error_description"`
-		AccessToken       string `json:"access_token"`
-		AuthorizationCode string `json:"authorization_code"`
-		CodeVerifier      string `json:"code_verifier"`
-		ExpiresIn         int64  `json:"expires_in"`
+		Error             string  `json:"error"`
+		ErrorMessage      string  `json:"error_description"`
+		AccessToken       string  `json:"access_token"`
+		AuthorizationCode string  `json:"authorization_code"`
+		CodeVerifier      string  `json:"code_verifier"`
+		ExpiresIn         flexInt `json:"expires_in"`
 	}
 	if err := json.Unmarshal(rb, &dr); err != nil {
 		return nil, fmt.Errorf("parse device poll response: %w", err), false
@@ -204,7 +230,7 @@ func (m *Manager) devicePoll(p *Provider, pl *pendingLogin) (*tokenResponse, err
 		return &tokenResponse{
 			AccessToken: dr.AccessToken,
 			TokenType:   "Bearer",
-			ExpiresIn:   dr.ExpiresIn,
+			ExpiresIn:   int64(dr.ExpiresIn),
 		}, nil, false
 	case dr.AuthorizationCode != "":
 		// ChatGPT-style: exchange the authorization code afterwards

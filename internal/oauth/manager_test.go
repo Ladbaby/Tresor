@@ -469,6 +469,75 @@ func TestDeviceFlow_PollToCompletion(t *testing.T) {
 	}
 }
 
+// TestDeviceFlow_StringIntervalRegression locks in the fix for a provider
+// (ChatGPT) that returns device-auth "interval" as a quoted string rather
+// than a JSON number, which a plain int field rejected with
+// "cannot unmarshal string into ... type int".
+func TestDeviceFlow_StringIntervalRegression(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+
+	mu := sync.Mutex{}
+	pollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		pollCount++
+		isPoll := pollCount >= 2
+		mu.Unlock()
+		if !isPoll {
+			// ChatGPT returns interval/expires_in as quoted strings.
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"device_auth_id": "da-1",
+				"user_code":      "ABCD-EFGH",
+				"interval":       "1",
+				"expires_in":     "600",
+			})
+			return
+		}
+		mu.Lock()
+		p := pollCount
+		mu.Unlock()
+		if p == 2 {
+			json.NewEncoder(w).Encode(map[string]string{"error": "authorization_pending"})
+			return
+		}
+		// expires_in as a string too.
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "device-tok", "expires_in": "3600"})
+	}))
+	defer server.Close()
+
+	bindOAuth(t, s, ds, &config.DownstreamAuthCfg{
+		Type:            "oauth",
+		Flow:            FlowDevice,
+		DeviceAuthURL:   server.URL + "/auth",
+		DeviceTokenURL:  server.URL + "/poll",
+		DeviceVerifyURL: "https://auth.openai.com/codex/device",
+	})
+
+	if _, err := m.StartLogin(ds.ID); err != nil {
+		t.Fatalf("start device login (string interval): %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, _ := m.Status(ds.ID)
+		if st.Connected {
+			break
+		}
+		if st.Status == "failed" {
+			t.Fatalf("login failed: %s", st.Error)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for device login")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	tok, err := s.GetOAuthToken(ds.ID)
+	if err != nil || tok == nil || tok.AccessToken != "device-tok" {
+		t.Fatalf("device token: %+v err=%v", tok, err)
+	}
+}
+
 // extractParam pulls a query parameter out of a URL string.
 func extractParam(t *testing.T, rawURL, key string) string {
 	t.Helper()
