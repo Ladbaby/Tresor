@@ -176,7 +176,7 @@ func runDaemon(cfg *config.AppConfig) error {
 		defer tcpListener.Close()
 
 		go func() {
-			log.Printf("Tresor gateway listening on TCP %s", cfg.BindAddr)
+			log.Printf("Tresor gateway listening on http://%s", cfg.BindAddr)
 			// The admin router serves both the admin API and the gateway handler
 			// For now, we serve the combined router
 			if err := engine.ServeProxy(eng, adminRouter.Handler(), webHandler, api.IsWebUIPath, tcpListener); err != nil {
