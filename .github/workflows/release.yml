@@ -254,6 +254,15 @@ jobs:
     permissions:
       contents: write
     needs: [build-windows, build-linux, build-macos, build-android, test]
+    # Run whenever the test job passes and no selected build actually failed.
+    # Unselected platforms report "skipped", which must NOT block the release —
+    # otherwise releasing a single platform would skip publishing entirely.
+    if: |
+      needs.test.result == 'success' &&
+      (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped') &&
+      (needs.build-linux.result == 'success' || needs.build-linux.result == 'skipped') &&
+      (needs.build-macos.result == 'success' || needs.build-macos.result == 'skipped') &&
+      (needs.build-android.result == 'success' || needs.build-android.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history)
