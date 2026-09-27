@@ -20,6 +20,12 @@ type Downstream struct {
 	// FormatURLs maps API format names to per-format base URLs.
 	// Empty/nil map means "use BaseURL for all formats".
 	FormatURLs map[string]string
+	// FormatPaths maps API format names to the request path used when
+	// forwarding in that format. When set for the active format the outbound
+	// path is base_url + format_path and the client's own path is ignored;
+	// when unset the engine appends the client's path. Empty/nil = no
+	// override for any format.
+	FormatPaths map[string]string
 	// Auth holds the per-downstream auth config (api_key or oauth).
 	Auth *config.DownstreamAuthCfg
 }

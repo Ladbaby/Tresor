@@ -856,6 +856,125 @@ func TestEngine_HandleProxy_DirectModelForwards(t *testing.T) {
 	}
 }
 
+// TestEngine_HandleProxy_FormatPathOverride verifies that when a downstream
+// declares a per-format request path (format_paths), the outbound path is
+// base_url + format_path regardless of the client's own path. This is how the
+// ChatGPT Codex backend (Responses at /responses, not /v1/responses) is targeted.
+func TestEngine_HandleProxy_FormatPathOverride(t *testing.T) {
+	s := newTestStore(t)
+
+	var gotPath string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	if err := s.CreateDownstream(&store.Downstream{
+		ID:          "ds-resp",
+		Name:        "Responses",
+		BaseURL:     dsServer.URL,
+		Auth:        &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key-resp"},
+		ApiFormats:  []string{"openai_responses"},
+		FormatPaths: map[string]string{"openai_responses": "/responses"},
+	}); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+	addOutputModelIDs(t, s, "ds-resp", "gpt-5.5")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"gpt-5.5","input":"hi"}`
+	// Client calls the standard responses path; the engine must rewrite to /responses.
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if code := w.Result().StatusCode; code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if gotPath != "/responses" {
+		t.Fatalf("expected downstream path /responses, got %q", gotPath)
+	}
+}
+
+// TestEngine_HandleProxy_NoFormatPathFallsBackToClientPath verifies that a
+// downstream without a format_paths entry forwards the client's own path.
+func TestEngine_HandleProxy_NoFormatPathFallsBackToClientPath(t *testing.T) {
+	s := newTestStore(t)
+
+	var gotPath string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	addDownstream(t, s, "ds-plain", "Plain", dsServer.URL, "key-plain", "openai_responses")
+	addOutputModelIDs(t, s, "ds-plain", "gpt-5.5")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"gpt-5.5","input":"hi"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if code := w.Result().StatusCode; code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("expected downstream path /v1/responses (client path), got %q", gotPath)
+	}
+}
+
+// TestEngine_HandleProxy_FormatPathWithFormatURL verifies the combined Codex
+// case: per-format base URL (format_urls) AND per-format path (format_paths)
+// set on the same format. The outbound URL must be format_url + format_path.
+func TestEngine_HandleProxy_FormatPathWithFormatURL(t *testing.T) {
+	s := newTestStore(t)
+
+	var gotURL string
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL = r.URL.RequestURI()
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer dsServer.Close()
+
+	if err := s.CreateDownstream(&store.Downstream{
+		ID:          "ds-codex",
+		Name:        "Codex",
+		BaseURL:     "https://chatgpt.com/backend-api/codex",
+		Auth:        &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key-codex"},
+		ApiFormats:  []string{"openai_responses"},
+		FormatURLs:  map[string]string{"openai_responses": dsServer.URL},
+		FormatPaths: map[string]string{"openai_responses": "/responses"},
+	}); err != nil {
+		t.Fatalf("create downstream: %v", err)
+	}
+	addOutputModelIDs(t, s, "ds-codex", "gpt-5.5")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"gpt-5.5","input":"hi"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if code := w.Result().StatusCode; code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if gotURL != "/responses" {
+		t.Fatalf("expected downstream URL %s/responses, got %q", dsServer.URL, gotURL)
+	}
+}
+
 // TestEngine_HandleProxy_EmptyModel_Returns400 verifies that requests without
 // a model field are rejected with 400 Bad Request.
 func TestEngine_HandleProxy_EmptyModel_Returns400(t *testing.T) {

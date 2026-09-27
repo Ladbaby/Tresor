@@ -23,14 +23,14 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	// --- Downstreams with output_model_ids ---
 	var downstreams []config.DownstreamCfg
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_formats, format_urls, auth FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, auth FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return fmt.Errorf("query downstreams: %w", err)
 	}
 	for rows.Next() {
 		var d config.DownstreamCfg
-		var formatsJSON, urlsJSON, authJSON string
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &authJSON); err != nil {
+		var formatsJSON, urlsJSON, pathsJSON, authJSON string
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &authJSON); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan downstream: %w", err)
 		}
@@ -46,6 +46,13 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 			if err := json.Unmarshal([]byte(urlsJSON), &d.FormatURLs); err != nil {
 				rows.Close()
 				return fmt.Errorf("parse format_urls for downstream %s: %w", d.ID, err)
+			}
+		}
+		d.FormatPaths = map[string]string{}
+		if pathsJSON != "" && pathsJSON != "{}" {
+			if err := json.Unmarshal([]byte(pathsJSON), &d.FormatPaths); err != nil {
+				rows.Close()
+				return fmt.Errorf("parse format_paths for downstream %s: %w", d.ID, err)
 			}
 		}
 		// Parse the unified auth blob. It is written back verbatim (tokens are

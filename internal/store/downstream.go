@@ -23,6 +23,14 @@ type Downstream struct {
 	// FormatURLs maps API format names to per-format base URLs. Nil or empty
 	// map means "fall back to BaseURL for all formats".
 	FormatURLs map[string]string `json:"format_urls,omitempty"`
+	// FormatPaths maps API format names to the request path used when
+	// forwarding in that format (e.g. openai_responses -> "/responses"). When
+	// set for the downstream's active format the outbound path is
+	// base_url + format_path (the client's own path is ignored); when unset
+	// the engine appends the client's path as usual. Useful for providers
+	// whose endpoint lives at a non-standard path (e.g. the ChatGPT Codex
+	// backend serves Responses at /responses, not /v1/responses).
+	FormatPaths map[string]string `json:"format_paths,omitempty"`
 	// Auth holds the per-downstream authentication configuration (API key or
 	// OAuth). It is the single source of truth for how this downstream is
 	// authenticated. Tokens are stored separately in oauth_tokens (SQLite only).
@@ -70,7 +78,7 @@ func decodeAuthJSON(d *Downstream, authJSON string) {
 // ListDownstreams returns all downstreams with their output model IDs.
 func (s *Store) ListDownstreams() ([]Downstream, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_formats, format_urls, auth, created_at FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, auth, created_at FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list downstreams: %w", err)
 	}
@@ -79,11 +87,11 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 	var ds []Downstream
 	for rows.Next() {
 		var d Downstream
-		var formatsJSON, urlsJSON, authJSON string
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &authJSON, &d.CreatedAt); err != nil {
+		var formatsJSON, urlsJSON, pathsJSON, authJSON string
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &authJSON, &d.CreatedAt); err != nil {
 			return nil, err
 		}
-		decodeDownstreamJSON(&d, formatsJSON, urlsJSON)
+		decodeDownstreamJSON(&d, formatsJSON, urlsJSON, pathsJSON)
 		decodeAuthJSON(&d, authJSON)
 		d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 		ds = append(ds, d)
@@ -94,14 +102,14 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 // GetDownstream returns a single downstream by ID with output model IDs.
 func (s *Store) GetDownstream(id string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON, urlsJSON, authJSON string
+	var formatsJSON, urlsJSON, pathsJSON, authJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, base_url, api_formats, format_urls, auth, created_at FROM downstreams WHERE id = ?`, id).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &authJSON, &d.CreatedAt)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, auth, created_at FROM downstreams WHERE id = ?`, id).
+		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &authJSON, &d.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get downstream %s: %w", id, err)
 	}
-	decodeDownstreamJSON(&d, formatsJSON, urlsJSON)
+	decodeDownstreamJSON(&d, formatsJSON, urlsJSON, pathsJSON)
 	decodeAuthJSON(&d, authJSON)
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil
@@ -112,7 +120,7 @@ func (s *Store) GetDownstream(id string) (*Downstream, error) {
 // and the JSON literal "[]" / "{}" as the corresponding zero value, and
 // guarantees the result is a non-nil slice/map (the JSON omitempty tag on
 // ApiFormats / FormatURLs would otherwise omit them from API responses).
-func decodeDownstreamJSON(d *Downstream, formatsJSON, urlsJSON string) {
+func decodeDownstreamJSON(d *Downstream, formatsJSON, urlsJSON, pathsJSON string) {
 	d.ApiFormats = []string{}
 	if formatsJSON != "" && formatsJSON != "[]" {
 		_ = json.Unmarshal([]byte(formatsJSON), &d.ApiFormats)
@@ -120,6 +128,10 @@ func decodeDownstreamJSON(d *Downstream, formatsJSON, urlsJSON string) {
 	d.FormatURLs = map[string]string{}
 	if urlsJSON != "" && urlsJSON != "{}" {
 		_ = json.Unmarshal([]byte(urlsJSON), &d.FormatURLs)
+	}
+	d.FormatPaths = map[string]string{}
+	if pathsJSON != "" && pathsJSON != "{}" {
+		_ = json.Unmarshal([]byte(pathsJSON), &d.FormatPaths)
 	}
 }
 
@@ -146,11 +158,16 @@ func (s *Store) CreateDownstream(d *Downstream) error {
 		formatURLs = map[string]string{}
 	}
 	urlsJSON, _ := json.Marshal(formatURLs)
+	formatPaths := d.FormatPaths
+	if formatPaths == nil {
+		formatPaths = map[string]string{}
+	}
+	pathsJSON, _ := json.Marshal(formatPaths)
 	authJSON := authJSONColumn(d)
 
 	_, err = tx.Exec(
-		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, auth) VALUES (?, ?, ?, '', ?, ?, ?)`,
-		d.ID, d.Name, d.BaseURL, string(formatsJSON), string(urlsJSON), authJSON)
+		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, auth) VALUES (?, ?, ?, '', ?, ?, ?, ?)`,
+		d.ID, d.Name, d.BaseURL, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON)
 	if err != nil {
 		return fmt.Errorf("create downstream: %w", err)
 	}
@@ -190,11 +207,16 @@ func (s *Store) UpdateDownstream(d *Downstream) error {
 		formatURLs = map[string]string{}
 	}
 	urlsJSON, _ := json.Marshal(formatURLs)
+	formatPaths := d.FormatPaths
+	if formatPaths == nil {
+		formatPaths = map[string]string{}
+	}
+	pathsJSON, _ := json.Marshal(formatPaths)
 	authJSON := authJSONColumn(d)
 
 	res, err := tx.Exec(
-		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, auth = ? WHERE id = ?`,
-		d.Name, d.BaseURL, d.EffectiveAPIKey(), string(formatsJSON), string(urlsJSON), authJSON, d.ID)
+		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, auth = ? WHERE id = ?`,
+		d.Name, d.BaseURL, d.EffectiveAPIKey(), string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, d.ID)
 	if err != nil {
 		return fmt.Errorf("update downstream: %w", err)
 	}
@@ -325,22 +347,22 @@ func (s *Store) ListAllModels() ([]string, error) {
 // the same model, the one with the earliest created_at wins (deterministic).
 func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON, urlsJSON, authJSON string
+	var formatsJSON, urlsJSON, pathsJSON, authJSON string
 	err := s.db.QueryRow(
-		`SELECT d.id, d.name, d.base_url, d.api_formats, d.format_urls, d.auth, d.created_at
+		`SELECT d.id, d.name, d.base_url, d.api_formats, d.format_urls, d.format_paths, d.auth, d.created_at
 		 FROM downstreams d
 		 JOIN output_model_ids o ON o.downstream_id = d.id
 		 WHERE o.model_id = ?
 		 ORDER BY d.created_at ASC
 		 LIMIT 1`, model).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &authJSON, &d.CreatedAt)
+		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &authJSON, &d.CreatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("find downstream by output model %s: %w", model, err)
 	}
-	decodeDownstreamJSON(&d, formatsJSON, urlsJSON)
+	decodeDownstreamJSON(&d, formatsJSON, urlsJSON, pathsJSON)
 	decodeAuthJSON(&d, authJSON)
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil

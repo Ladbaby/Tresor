@@ -94,6 +94,15 @@ type DownstreamCfg struct {
 	// OpenAI at the root URL).
 	FormatURLs map[string]string `yaml:"format_urls,omitempty"`
 
+	// FormatPaths maps API format names to the request path used when
+	// forwarding in that format (e.g. openai_responses -> "/responses"). When
+	// set for a format the outbound path is base_url + format_path (the
+	// client's own path is ignored); when unset the engine appends the
+	// client's path. Useful for providers whose endpoint lives at a
+	// non-standard path (e.g. ChatGPT Codex serves Responses at /responses,
+	// not /v1/responses).
+	FormatPaths map[string]string `yaml:"format_paths,omitempty"`
+
 	// ApiFormat is a legacy field accepted for backward-compatible YAML loading.
 	// It gets converted to ApiFormats during the sanitize step.
 	ApiFormat string `yaml:"api_format,omitempty"`

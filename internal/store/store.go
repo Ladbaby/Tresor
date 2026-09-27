@@ -369,6 +369,14 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Add format_paths column (per-API-format request path overrides). Default
+	// '{}' means the engine appends the client's path for every format.
+	if !s.columnExists("downstreams", "format_paths") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN format_paths TEXT DEFAULT '{}'`); err != nil {
+			return fmt.Errorf("migrate add format_paths: %w", err)
+		}
+	}
+
 	// Add OAuth auth-method columns. auth_method is "api_key" (default) or
 	// "oauth"; oauth_provider names an entry in the YAML oauth_providers list.
 	// Runtime-only: never round-tripped through the YAML config.
@@ -1019,6 +1027,17 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 			return fmt.Errorf("marshal format_urls for %s: %w", d.ID, err)
 		}
 
+		// Marshal format_paths (per-API-format request path overrides), same
+		// normalization as format_urls.
+		formatPaths := d.FormatPaths
+		if formatPaths == nil {
+			formatPaths = map[string]string{}
+		}
+		pathsJSON, err := json.Marshal(formatPaths)
+		if err != nil {
+			return fmt.Errorf("marshal format_paths for %s: %w", d.ID, err)
+		}
+
 		// The unified auth blob + the legacy api_key column (kept in sync for
 		// api_key downstreams so older readers still see the key).
 		authJSON := "{}"
@@ -1040,8 +1059,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 
 		if exists {
 			if _, err := tx.Exec(
-				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, auth = ? WHERE id = ?",
-				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), authJSON, d.ID); err != nil {
+				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, auth = ? WHERE id = ?",
+				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, d.ID); err != nil {
 				return fmt.Errorf("update downstream %s: %w", d.ID, err)
 			}
 			// Replace output_model_ids from YAML
@@ -1063,8 +1082,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 			}
 		} else {
 			if _, err := tx.Exec(
-				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, auth) VALUES (?, ?, ?, ?, ?, ?, ?)",
-				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), authJSON); err != nil {
+				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, auth) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON); err != nil {
 				return fmt.Errorf("insert downstream %s: %w", d.ID, err)
 			}
 			if len(d.OutputModelIDs) > 0 {

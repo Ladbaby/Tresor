@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -58,6 +59,15 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 		}
+		// Validate per-format path overrides, if any
+		if ds.FormatPaths != nil {
+			for f, pth := range ds.FormatPaths {
+				if err := validateFormatPath(pth); err != nil {
+					writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid format_paths[%s]: %v", f, err))
+					return
+				}
+			}
+		}
 		if err := validateAuthForStore(ds.Auth); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -92,6 +102,27 @@ func maskDownstreamAPIKey(ds *store.Downstream) {
 	if ds.Auth.Type == "oauth" && ds.Auth.ClientSecret != "" {
 		ds.Auth.ClientSecret = "***"
 	}
+}
+
+// validateFormatPath ensures a per-format request path is a well-formed
+// relative path: it must start with "/" and must not be an absolute URL or a
+// protocol-relative reference ("//host/..."), since it is concatenated onto
+// the downstream's base_url. A network-path reference would be re-targeted at
+// the host after the leading slashes, so it is rejected outright.
+func validateFormatPath(p string) error {
+	if p == "" {
+		return fmt.Errorf("path must not be empty")
+	}
+	if !strings.HasPrefix(p, "/") {
+		return fmt.Errorf("path must start with /")
+	}
+	if strings.HasPrefix(p, "//") {
+		return fmt.Errorf("path must not be protocol-relative (start with //)")
+	}
+	if u, err := url.Parse(p); err != nil || u.IsAbs() {
+		return fmt.Errorf("path must be a relative path, not an absolute URL")
+	}
+	return nil
 }
 
 // validateAuthForStore normalizes and validates a downstream's auth config,
@@ -217,6 +248,7 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			ApiFormats     *[]string          `json:"api_formats"`
 			OutputModelIDs *[]string          `json:"output_model_ids"`
 			FormatURLs     *map[string]string `json:"format_urls"`
+			FormatPaths    *map[string]string `json:"format_paths"`
 			Auth           *config.DownstreamAuthCfg `json:"auth"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
@@ -256,6 +288,15 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			// Replace the whole map (not merge) so callers can clear keys by
 			// omitting them — the UI builds the complete map each save.
 			existing.FormatURLs = *patch.FormatURLs
+		}
+		if patch.FormatPaths != nil {
+			for f, pth := range *patch.FormatPaths {
+				if err := validateFormatPath(pth); err != nil {
+					writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid format_paths[%s]: %v", f, err))
+					return
+				}
+			}
+			existing.FormatPaths = *patch.FormatPaths
 		}
 
 		// Auth: a non-nil Auth replaces the whole auth block. Validate it (and

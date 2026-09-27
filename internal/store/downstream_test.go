@@ -213,3 +213,40 @@ func contains(b []byte, sub string) bool {
 	}
 	return false
 }
+
+func TestDownstream_FormatPaths_RoundTrip(t *testing.T) {
+	s := newTestStore(t)
+
+	ds := &Downstream{
+		Name:        "ChatGPT",
+		BaseURL:     "https://chatgpt.com/backend-api/codex",
+		ApiFormats:  []string{"openai_responses"},
+		FormatPaths: map[string]string{"openai_responses": "/responses"},
+	}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	got, err := s.GetDownstream(ds.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.FormatPaths == nil {
+		t.Fatal("FormatPaths is nil")
+	}
+	if got.FormatPaths["openai_responses"] != "/responses" {
+		t.Fatalf("openai_responses path: got %q, want /responses", got.FormatPaths["openai_responses"])
+	}
+
+	got.FormatPaths["openai_responses"] = "/responses/alt"
+	if err := s.UpdateDownstream(got); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got2, err := s.GetDownstream(ds.ID)
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if got2.FormatPaths["openai_responses"] != "/responses/alt" {
+		t.Fatalf("openai_responses path after update: got %q", got2.FormatPaths["openai_responses"])
+	}
+}

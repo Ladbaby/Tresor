@@ -494,3 +494,174 @@ func base64urlEncode(_ *testing.T, b []byte) string {
 
 // keep fmt import used
 var _ = fmt.Sprintf
+
+// makeChatGPTJWT builds a (unsigned) JWT whose payload carries the
+// namespaced chatgpt_account_id claim the Codex backend expects, so tests
+// can exercise the account-id / originator header injection without a real
+// token.
+func makeChatGPTJWT(t *testing.T, accountID string, exp time.Time) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	var payload map[string]interface{} = map[string]interface{}{
+		"exp": exp.Unix(),
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_account_id": accountID,
+		},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal jwt payload: %v", err)
+	}
+	body := base64.RawURLEncoding.EncodeToString(raw)
+	return header + "." + body + "."
+}
+
+// TestResolveValidToken_ChatGPTHeadersAfterRefresh verifies the fix for a
+// stale-headers bug: the ChatGPT identity headers must be derived from the
+// FINAL (post-refresh) access token, not the pre-refresh one. Here the stored
+// token has no chatgpt claim and is expired; the refresh response is a ChatGPT
+// token carrying an account claim, so the resolved headers must reflect it.
+func TestResolveValidToken_ChatGPTHeadersAfterRefresh(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+
+	// The refreshed token carries the ChatGPT account claim.
+	newTok := makeChatGPTJWT(t, "acct-new", time.Now().Add(time.Hour))
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  newTok,
+			"refresh_token": "refreshed-rt",
+			"expires_in":    3600,
+		})
+	}))
+	defer ts.Close()
+
+	bindOAuth(t, s, ds, authCodeAuth(ts.URL))
+	// Stored token: expired and plain (no chatgpt claim).
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  "expired-plain",
+		RefreshToken: "old-rt",
+		ExpiresAt:    time.Now().Add(-time.Minute).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, extra, err := m.ResolveValidToken(ds.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if tok != newTok {
+		t.Fatalf("token not the refreshed one")
+	}
+	// Headers must come from the refreshed token's claim, not the stale one.
+	if got := extra["chatgpt-account-id"]; got != "acct-new" {
+		t.Fatalf("chatgpt-account-id = %q, want acct-new (derived from refreshed token)", got)
+	}
+	if got := extra["originator"]; got != "pi" {
+		t.Fatalf("originator = %q, want pi", got)
+	}
+}
+
+// TestResolveValidToken_ChatGPTHeaders verifies that when the access token is
+// a ChatGPT/Codex token, the chatgpt-account-id, originator and User-Agent
+// headers are injected (matching the pi reference client).
+func TestResolveValidToken_ChatGPTHeaders(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+	bindOAuth(t, s, ds, authCodeAuth("https://t.test/token"))
+
+	tok := makeChatGPTJWT(t, "acct-123", time.Now().Add(time.Hour))
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  tok,
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, extra, err := m.ResolveValidToken(ds.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got := extra["chatgpt-account-id"]; got != "acct-123" {
+		t.Fatalf("chatgpt-account-id = %q, want acct-123", got)
+	}
+	if got := extra["originator"]; got != "pi" {
+		t.Fatalf("originator = %q, want pi", got)
+	}
+	if got := extra["User-Agent"]; !strings.HasPrefix(got, "pi (") {
+		t.Fatalf("User-Agent = %q, want prefix 'pi ('", got)
+	}
+}
+
+// TestResolveValidToken_ChatGPTHeadersOperatorOverride verifies operator
+// extra_headers take precedence over the injected identity.
+func TestResolveValidToken_ChatGPTHeadersOperatorOverride(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+	bindOAuth(t, s, ds, &config.DownstreamAuthCfg{
+		Type:             "oauth",
+		Flow:             FlowAuthCode,
+		AuthorizationURL: "https://a.test/auth",
+		TokenURL:         "https://t.test/token",
+		ExtraHeaders:     map[string]string{"originator": "mytool"},
+	})
+
+	tok := makeChatGPTJWT(t, "acct-999", time.Now().Add(time.Hour))
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  tok,
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, extra, err := m.ResolveValidToken(ds.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got := extra["originator"]; got != "mytool" {
+		t.Fatalf("originator = %q, want operator override mytool", got)
+	}
+	// account id is still injected (no operator value for it)
+	if got := extra["chatgpt-account-id"]; got != "acct-999" {
+		t.Fatalf("chatgpt-account-id = %q, want acct-999", got)
+	}
+}
+
+// TestResolveValidToken_NonChatGPTNoHeaders verifies a non-ChatGPT token
+// (no chatgpt_account_id claim) does not get the Codex headers.
+func TestResolveValidToken_NonChatGPTNoHeaders(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+	bindOAuth(t, s, ds, authCodeAuth("https://t.test/token"))
+
+	// A plain JWT with only an exp claim — no chatgpt claim.
+	tok := makeChatGPTJWT(t, "", time.Now().Add(time.Hour))
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  tok,
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, extra, err := m.ResolveValidToken(ds.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(extra) != 0 {
+		t.Fatalf("unexpected extra headers for non-chatgpt token: %v", extra)
+	}
+}

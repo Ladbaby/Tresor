@@ -631,6 +631,80 @@ func TestUpdateDownstream_InvalidFormatURL_Rejected(t *testing.T) {
 	}
 }
 
+// format_paths: create rejects a value that is not a leading-slash path.
+func TestCreateDownstream_InvalidFormatPath_Rejected(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	body := map[string]interface{}{
+		"name":         "bad-fp",
+		"base_url":     "https://api.test.com",
+		"format_paths": map[string]string{"openai": "not/a-path"},
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid format path, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// format_paths: create rejects an absolute URL and a protocol-relative path,
+// since both would escape the downstream's base host.
+func TestCreateDownstream_InvalidFormatPath_AbsoluteAndProtocolRelative(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	for _, bad := range []string{"https://evil.com/x", "//evil.com/x"} {
+		body := map[string]interface{}{
+			"name":         "bad-fp",
+			"base_url":     "https://api.test.com",
+			"format_paths": map[string]string{"openai": bad},
+		}
+		data, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %q, got %d: %s", bad, w.Code, w.Body.String())
+		}
+	}
+}
+
+// format_paths: update rejects a non-path value, and a valid patch round-trips.
+func TestUpdateDownstream_FormatPaths_ValidateAndRoundTrip(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	seeded := seedDownstreamForPatch(t, handler, "fp-ok", "https://codex.test",
+		[]string{"openai_responses"}, nil)
+
+	// Invalid value rejected on update.
+	if got := patchDownstream(handler, seeded.ID, map[string]interface{}{
+		"format_paths": map[string]string{"openai_responses": "https://x"},
+	}); got != http.StatusBadRequest {
+		t.Fatalf("expected 400 for absolute URL, got %d", got)
+	}
+
+	// Valid relative path accepted and persisted.
+	if got := patchDownstream(handler, seeded.ID, map[string]interface{}{
+		"format_paths": map[string]string{"openai_responses": "/responses"},
+	}); got != http.StatusOK {
+		t.Fatalf("expected 200, got %d", got)
+	}
+	after, err := getDownstreamFresh(handler, seeded.ID)
+	if err != nil {
+		t.Fatalf("read after patch: %v", err)
+	}
+	if after.FormatPaths["openai_responses"] != "/responses" {
+		t.Fatalf("openai_responses path: got %q, want /responses", after.FormatPaths["openai_responses"])
+	}
+}
+
 // Regression for minimax-style downstream with api_formats: [openai, anthropic].
 // Previously the fetch-models probe always sent x-api-key when the list
 // contained "anthropic", so OpenAI-compatible endpoints like

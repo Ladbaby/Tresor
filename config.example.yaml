@@ -46,85 +46,67 @@ retry_on_empty: false
 # Tilde (~) is expanded to the user's home directory.
 icon_cache_dir: "~/.config/tresor/tresor-icons/"
 
-# Authentication lives on each downstream as an `auth` object (see below).
-# Two types are supported:
-#
-#   - api_key (default): a static key sent as the Authorization header.
-#         auth:
-#           type: api_key
-#           api_key: "sk-..."
-#
-#   - oauth: the daemon brokers an OAuth login and stores the tokens in the
-#     SQLite DB only — tokens are NEVER written to this file. Flow values:
-#       "auth_code" (Authorization Code + PKCE, browser redirect to a loopback
-#                  callback) or "device" (RFC 8628 device code).
-#
-# Example of an OAuth downstream (auth_code + PKCE via discovery):
-#   - id: xai
-#     name: xAI
-#     api_formats: [openai]
-#     base_url: https://api.x.ai/v1
-#     auth:
-#       type: oauth
-#       flow: auth_code
-#       discovery_url: https://auth.x.ai/.well-known/openid-configuration
-#       client_id: b1a00492-073a-47ea-816f-4c329264a828
-#       scopes: "openid profile email offline_access grok-cli:access api:access"
-#     output_model_ids: [grok-4]
-#
-# A confidential OAuth client (client_secret is sent as HTTP Basic auth on
-# token requests) with provider-specific authorize-URL params:
-#   - id: gemini
-#     name: Gemini CLI
-#     api_formats: [gemini]
-#     base_url: https://generativelanguage.googleapis.com
-#     auth:
-#       type: oauth
-#       flow: auth_code
-#       authorization_url: https://accounts.google.com/o/oauth2/auth
-#       token_url: https://oauth2.googleapis.com/token
-#       client_id: xxx.apps.googleusercontent.com
-#       client_secret: gxxx
-#       scopes: "https://www.googleapis.com/auth/generative-language"
-#       extra_authorize_params:
-#         access_type: offline
-#         prompt: true
-#     output_model_ids: [gemini-2.5-pro]
-#
-# Example of a device-code downstream (ChatGPT/Codex subscription):
-#   - id: chatgpt
-#     name: ChatGPT
-#     api_formats: [openai_responses]
-#     base_url: https://chatgpt.com/backend-api/codex
-#     auth:
-#       type: oauth
-#       flow: device
-#       device_auth_url: https://auth.openai.com/api/accounts/deviceauth/usercode
-#       device_token_url: https://auth.openai.com/api/accounts/deviceauth/token
-#       device_verify_url: https://auth.openai.com/codex/device
-#       token_url: https://auth.openai.com/oauth/token
-#       client_id: app_EMoamEEZ73f0CkXaXp7hrann
-#       device_redirect_uri: https://auth.openai.com/deviceauth/callback
-#     output_model_ids: [gpt-5.5]
-#
-# Legacy top-level `api_key:` and `oauth_providers:` sections are still parsed
-# and migrated into the per-downstream `auth` object at startup for
-# backward compatibility.
-
 # Downstream LLM providers
+# Example downstreams below. You can add more providers using similar format.
 downstreams:
+  - id: chatgpt
+    name: ChatGPT subscription
+    api_formats: [openai_responses]
+    base_url: https://chatgpt.com/backend-api/codex
+    format_paths:
+      openai_responses: /responses
+    auth:
+      type: oauth
+      flow: device
+      device_auth_url: https://auth.openai.com/api/accounts/deviceauth/usercode
+      device_token_url: https://auth.openai.com/api/accounts/deviceauth/token
+      device_verify_url: https://auth.openai.com/codex/device
+      token_url: https://auth.openai.com/oauth/token
+      client_id: app_EMoamEEZ73f0CkXaXp7hrann
+      device_redirect_uri: https://auth.openai.com/deviceauth/callback
+    output_model_ids: [gpt-6-astra]
+
+  - id: xai
+    name: Grok subscription
+    api_formats: [openai]
+    base_url: https://api.x.ai/v1
+    auth:
+      type: oauth
+      flow: auth_code
+      discovery_url: https://auth.x.ai/.well-known/openid-configuration
+      client_id: b1a00492-073a-47ea-816f-4c329264a828
+      scopes: "openid profile email offline_access grok-cli:access api:access"
+    output_model_ids: [grok-4]
+
+  - id: gemini
+    name: Gemini subscription
+    api_formats: [gemini]
+    base_url: https://generativelanguage.googleapis.com
+    auth:
+      type: oauth
+      flow: auth_code
+      authorization_url: https://accounts.google.com/o/oauth2/auth
+      token_url: https://oauth2.googleapis.com/token
+      client_id: xxx.apps.googleusercontent.com
+      client_secret: gxxx
+      scopes: "https://www.googleapis.com/auth/generative-language"
+      extra_authorize_params:
+        access_type: offline
+        prompt: true
+    output_model_ids: [gemini-3.8-flash]
+
   - id: openai-responses
-    name: OpenAI
+    name: OpenAI API
     api_formats: [openai_responses]
     base_url: https://api.openai.com
     auth:
       type: api_key
       api_key: ""                         # Set your API key here
     output_model_ids:                    # Known output models for this provider
-      - gpt-5.5
+      - gpt-6-astra
 
   - id: anthropic
-    name: Anthropic
+    name: Anthropic API
     api_formats: [anthropic]
     base_url: https://api.anthropic.com
     auth:
@@ -135,24 +117,21 @@ downstreams:
       - claude-haiku-4-5
 
   - id: gemini
-    name: Google Gemini
+    name: Gemini API
     api_formats: [gemini]
     base_url: https://generativelanguage.googleapis.com
     auth:
       type: api_key
       api_key: ""                         # Set your API key here
     output_model_ids:                    # Known output models for this provider
-      - gemini-3.7-flash
+      - gemini-3.8-flash
 
-  # DeepSeek exposes different endpoints for different API formats:
-  # OpenAI Chat Completions + OpenAI Responses are served at the root URL,
-  # but Anthropic Messages is served at /anthropic. The optional
-  # `format_urls` map lets you specify per-format base URLs that override
-  # `base_url` for that format only. Formats without an entry fall back
-  # to `base_url`.
   - id: deepseek
-    name: DeepSeek
-    api_formats: [openai, anthropic]
+    name: DeepSeek API
+    api_formats:
+      - openai
+      - openai_responses
+      - anthropic
     base_url: https://api.deepseek.com
     format_urls:
       anthropic: https://api.deepseek.com/anthropic
@@ -161,7 +140,22 @@ downstreams:
       api_key: ""
     output_model_ids:
       - deepseek-v4-pro
-      - deepseek-v4-flash
+      - deepseek-flash
+
+  - id: minimax
+    name: Minimax API
+    api_formats:
+      - openai
+      - openai_responses
+      - anthropic
+    base_url: https://api.minimaxi.com
+    format_urls:
+        anthropic: https://api.minimaxi.com/anthropic
+    auth:
+      type: api_key
+      api_key: ""
+    output_model_ids:
+      - MiniMax-M3
 
 # Routing rules (OPTIONAL) — customize forwarding with transform pipelines.
 # Rules are NOT required for normal forwarding: model resolution uses aliases and
@@ -209,19 +203,19 @@ downstreams:
 # Model aliases — group by input model, list output options
 # Groups are ordered by array position; web UI supports drag-and-drop reordering.
 aliases:
-# Example: regex alias to match all Claude models, and re-route to gpt-5.5
+# Example: regex alias to match all Claude models, and re-route to gpt
   - input_model_id: "claude-.*"
     is_regex: true
     options:
       - id: alias-claude-wildcard
         downstream_id: openai-responses
-        output_model_id: gpt-5.5
+        output_model_id: gpt-6-astra
 
-  - input_model_id: claude-opus-4-8
+  - input_model_id: claude-opus-5
     options:
-      - id: alias-gpt4o-openai
+      - id: alias-gpt-openai
         downstream_id: openai
-        output_model_id: gpt-4o
+        output_model_id: gpt-6-astra
 
       - id: alias-claude-sonnet-anthropic
         downstream_id: anthropic
@@ -231,4 +225,4 @@ aliases:
     options:
       - id: alias-gemini-google
         downstream_id: gemini
-        output_model_id: gemini-3.5-flash
+        output_model_id: gemini-3.8-flash

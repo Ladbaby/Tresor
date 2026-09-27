@@ -865,13 +865,14 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	entry.DownstreamName = result.ds.Name
 	isOAuth := result.ds.IsOAuth()
 	dsCopy := &Downstream{
-		ID:         result.ds.ID,
-		Name:       result.ds.Name,
-		BaseURL:    result.ds.BaseURL,
-		APIKey:     result.ds.EffectiveAPIKey(),
-		ApiFormats: result.ds.ApiFormats,
-		FormatURLs: result.ds.FormatURLs,
-		Auth:       result.ds.Auth,
+		ID:          result.ds.ID,
+		Name:        result.ds.Name,
+		BaseURL:     result.ds.BaseURL,
+		APIKey:      result.ds.EffectiveAPIKey(),
+		ApiFormats:  result.ds.ApiFormats,
+		FormatURLs:  result.ds.FormatURLs,
+		FormatPaths: result.ds.FormatPaths,
+		Auth:        result.ds.Auth,
 	}
 	// OAuth downstreams authenticate with a managed token instead of a
 	// static API key. Resolve a currently-valid token (refreshing when
@@ -1870,15 +1871,28 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	// Determine the path to append. If the base_url already contains the API
-	// version prefix (e.g., "/v1"), strip it from the request path to avoid
-	// duplication (e.g., "https://host/v1" + "/v1/chat/completions").
-	requestPath := original.URL.Path
-	parsedBase, parseErr := url.Parse(baseURL)
-	if parseErr == nil && parsedBase.Path != "" {
-		basePrefix := strings.TrimSuffix(parsedBase.Path, "/")
-		if strings.HasPrefix(requestPath, basePrefix) {
-			requestPath = strings.TrimPrefix(requestPath, basePrefix)
+	// Determine the path to send. Two modes:
+	//  1. Per-format path override (FormatPaths): when the downstream declares
+	//     a request path for its active format (e.g. openai_responses ->
+	//     "/responses"), use it directly and ignore the client's own path. The
+	//     final path is base_url + format_path, which is what the provider
+	//     expects regardless of what the client called.
+	//  2. Default: append the client's path, stripping a duplicated API
+	//     version prefix (e.g. "https://host/v1" + "/v1/chat/completions").
+	// An empty DownstreamFormat or missing map key simply yields "" and falls
+	// through to the default, so the lookup is safe without an explicit guard.
+	requestPath := ""
+	if ctx.TargetDownstream != nil && ctx.TargetDownstream.FormatPaths != nil {
+		requestPath = ctx.TargetDownstream.FormatPaths[ctx.DownstreamFormat]
+	}
+	if requestPath == "" {
+		requestPath = original.URL.Path
+		parsedBase, parseErr := url.Parse(baseURL)
+		if parseErr == nil && parsedBase.Path != "" {
+			basePrefix := strings.TrimSuffix(parsedBase.Path, "/")
+			if strings.HasPrefix(requestPath, basePrefix) {
+				requestPath = strings.TrimPrefix(requestPath, basePrefix)
+			}
 		}
 	}
 

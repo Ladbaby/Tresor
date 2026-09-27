@@ -1049,6 +1049,37 @@ function renderFormatURLInputs(ds) {
     }).join('');
 }
 
+// Default request path per API format — used only as a placeholder hint when
+// the user hasn't set a per-format path. Leaving a path blank means the
+// engine appends the client's own request path.
+const FORMAT_DEFAULT_PATHS = {
+    openai: '/v1/chat/completions',
+    openai_responses: '/v1/responses',
+    anthropic: '/v1/messages',
+    gemini: '/v1beta/models',
+};
+
+function renderFormatPathInputs(ds) {
+    const formats = ds.api_formats || [];
+    const paths = ds.format_paths || {};
+    if (formats.length === 0) {
+        return '<div class="format-urls-empty">Pick API formats above to configure per-format request paths.</div>';
+    }
+    return formats.map(f => {
+        const stem = formatIconStem(f);
+        const val = paths[f] || '';
+        return `
+            <div class="format-url-row">
+                <img class="format-icon icon-${esc(f)}" src="icons/${esc(stem)}.svg" alt="" aria-hidden="true">
+                <span class="format-url-label">${esc(FORMAT_LABELS[f] || f)}</span>
+                <input type="text" class="format-path-input" data-format="${esc(f)}"
+                       value="${esc(val)}"
+                       placeholder="${esc(FORMAT_DEFAULT_PATHS[f] || '')}"
+                       autocomplete="off">
+            </div>`;
+    }).join('');
+}
+
 // --- Inline OAuth editor ---
 // The OAuth recipe lives entirely on the downstream (in ds.auth), so the UI
 // edits it in place — no separate provider registry. Each field is a
@@ -1223,6 +1254,12 @@ function renderDownstreamDetail(ds) {
             <label>Per-format URLs <span class="detail-section-hint">— leave blank to fall back to the global base URL</span></label>
             <div class="detail-format-urls">
                 ${renderFormatURLInputs(ds)}
+            </div>
+        </div>
+        <div class="detail-section">
+            <label>Per-format request paths <span class="detail-section-hint">— override the path sent to this host (base URL + this). Leave blank to forward the client's own path</span></label>
+            <div class="detail-format-urls">
+                ${renderFormatPathInputs(ds)}
             </div>
         </div>
         <div class="detail-section">
@@ -1433,6 +1470,21 @@ function refreshDownstreamDetail() {
                 if (err) { t.value = prev; return; }
                 _currentDownstream.format_urls = urls;
             });
+        } else if (t.classList.contains('format-path-input')) {
+            const format = t.dataset.format;
+            const newPath = t.value.trim();
+            const currentPath = (_currentDownstream.format_paths || {})[format] || '';
+            if (newPath === currentPath) return;
+            const prev = currentPath;
+            const paths = {};
+            root.querySelectorAll('.format-path-input').forEach(input => {
+                const v = input.value.trim();
+                if (v) paths[input.dataset.format] = v;
+            });
+            await autoSaveDownstreamField(_currentDownstream.id, { format_paths: paths }, (err) => {
+                if (err) { t.value = prev; return; }
+                _currentDownstream.format_paths = paths;
+            });
         } else if (t.classList.contains('detail-edit-key')) {
             // ponytail: empty → no-op. typing replaces the saved key on save.
             if (t.value === '') return;
@@ -1468,7 +1520,7 @@ function refreshDownstreamDetail() {
     root.addEventListener('keydown', (e) => {
         if (e.key !== 'Enter') return;
         const t = e.target;
-        if (t.matches('.detail-edit-name, .detail-edit-url, .detail-edit-key, .format-url-input, .add-model-input, .oauth-field')) {
+        if (t.matches('.detail-edit-name, .detail-edit-url, .detail-edit-key, .format-url-input, .format-path-input, .add-model-input, .oauth-field')) {
             e.preventDefault();
             t.blur();
         }
@@ -1872,6 +1924,7 @@ async function createNewDownstream() {
                 api_formats: [],
                 output_model_ids: [],
                 format_urls: {},
+                format_paths: {},
             }),
         });
         // Refresh the list and switch the selection to the new one.

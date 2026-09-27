@@ -39,3 +39,29 @@ func tokenExpiry(accessToken string, expiresAt int64) time.Time {
 	}
 	return time.Time{}
 }
+
+// jwtChatGPTAccountID extracts the "chatgpt_account_id" claim from an
+// OpenAI/ChatGPT access token. The claim lives under the namespaced key
+// "https://api.openai.com/auth", which is where both reference clients (pi
+// and litellm) locate it. Returns "" when the token is not a ChatGPT token,
+// is malformed, or lacks the claim — a non-empty result is therefore a
+// reliable signal that the token belongs to a ChatGPT subscription.
+func jwtChatGPTAccountID(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		OpenAI struct {
+			ChatGPTAccountID string `json:"chatgpt_account_id"`
+		} `json:"https://api.openai.com/auth"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return claims.OpenAI.ChatGPTAccountID
+}

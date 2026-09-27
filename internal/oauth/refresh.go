@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os/exec"
+	"runtime"
+	"strings"
+	"sync"
 	"time"
 
 	"tresor/internal/store"
@@ -52,7 +56,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 
 	// Fast path: still valid
 	if exp := tokenExpiry(t.AccessToken, t.ExpiresAt); exp.IsZero() || time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp) {
-		return t.AccessToken, extra, nil
+		return t.AccessToken, finalizeOAuthHeaders(extra, t.AccessToken), nil
 	}
 
 	// Needs a refresh
@@ -67,7 +71,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	}
 	if t2 != nil && !t2.NeedsLogin {
 		if exp := tokenExpiry(t2.AccessToken, t2.ExpiresAt); exp.IsZero() || time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp) {
-			return t2.AccessToken, extra, nil
+			return t2.AccessToken, finalizeOAuthHeaders(extra, t2.AccessToken), nil
 		}
 		t = t2
 	}
@@ -103,7 +107,38 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	if err := m.store.SaveOAuthToken(nt); err != nil {
 		return "", nil, err
 	}
-	return nt.AccessToken, extra, nil
+	return nt.AccessToken, finalizeOAuthHeaders(extra, nt.AccessToken), nil
+}
+
+// finalizeOAuthHeaders layers the ChatGPT/Codex identity headers onto a
+// provider's base extra headers, derived from the FINAL access token about to
+// be sent. The Codex backend binds the OAuth JWT to a specific account via the
+// chatgpt-account-id header and fingerprints the client with originator +
+// User-Agent; when the token carries the chatgpt_account_id claim we send all
+// three, matching the reference clients (pi / litellm). Non-ChatGPT tokens
+// have no such claim, so this is a no-op for every other provider.
+// Operator-supplied extra_headers (already merged into base) take precedence.
+//
+// It must run against the final token — not the pre-refresh one — because a
+// refresh can rotate in a token whose account claim differs (or was absent
+// before).
+func finalizeOAuthHeaders(base map[string]string, accessToken string) map[string]string {
+	out := make(map[string]string, len(base)+3)
+	for k, v := range base {
+		out[k] = v
+	}
+	if acct := jwtChatGPTAccountID(accessToken); acct != "" {
+		if _, ok := out["chatgpt-account-id"]; !ok {
+			out["chatgpt-account-id"] = acct
+		}
+		if _, ok := out["originator"]; !ok {
+			out["originator"] = "pi"
+		}
+		if _, ok := out["User-Agent"]; !ok {
+			out["User-Agent"] = codexUserAgent()
+		}
+	}
+	return out
 }
 
 // refreshToken performs a grant_type=refresh_token exchange.
@@ -163,4 +198,42 @@ func (m *Manager) refreshDueNow() {
 			log.Printf("oauth: proactive refresh for %s: %v", id, err)
 		}
 	}
+}
+
+// codexUserAgent mirrors the reference client's User-Agent shape
+// "pi (<os> <release>; <arch>)", e.g. "pi (linux 6.8.0; amd64)". The OS release
+// is best-effort (it varies by platform and may be empty); the lookup is
+// memoized because the header is built on every request.
+var (
+	codexUAOnce sync.Once
+	codexUA     string
+)
+
+func codexUserAgent() string {
+	codexUAOnce.Do(func() {
+		codexUA = "pi (" + runtime.GOOS + " " + osRelease() + "; " + runtime.GOARCH + ")"
+	})
+	return codexUA
+}
+
+// osRelease returns the OS release string for the current platform, or "" if
+// it can't be determined. Best-effort: a failure simply yields an empty release.
+func osRelease() string {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "linux":
+		cmd = exec.Command("uname", "-r")
+	case "darwin":
+		cmd = exec.Command("sw_vers", "-productVersion")
+	case "windows":
+		// release /10.0 corresponds to Windows 10/11; keep it coarse.
+		return "10.0"
+	default:
+		return ""
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
