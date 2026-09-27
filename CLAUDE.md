@@ -178,7 +178,7 @@ Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plu
 | GET | `/api/health` | Health check (public) |
 | GET | `/api/version` | Print version and build info (public) |
 | GET/PUT | `/api/log_level` | Get/set request logging verbosity |
-| GET/PUT | `/api/config` | Get/set runtime config (proxy_mode, proxy_api_keys, admin_password, default_tab, log_level, capture_payloads, retry_on_empty) |
+| GET/PUT | `/api/config` | Get/set runtime config (bind_addr, proxy_mode, proxy_api_keys, admin_password, default_tab, log_level, capture_payloads, retry_on_empty). PUT is a partial merge: only fields present in the body are applied (empty string = unchanged, except admin_password where "" clears it). bind_addr is persisted to YAML immediately and requires a daemon restart to take effect. |
 | POST | `/api/fetch-models` | Fetch available models from a provider (body: base_url + api_key) |
 | GET | `/api/rules` | List all rules |
 | POST | `/api/rules` | Create a new rule |
