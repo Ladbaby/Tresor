@@ -42,6 +42,7 @@ downstreams:                    # LLM provider endpoints
     base_url: https://api.example.com
     api_key: sk-...
     api_formats: [openai]       # API format(s): openai, anthropic, openai_responses, gemini
+    is_enabled: true            # ON/OFF toggle; OFF hides the provider + its models "as if deleted"
     output_model_ids:           # Models this downstream can handle (required for forwarding)
       - gpt-4o
 
