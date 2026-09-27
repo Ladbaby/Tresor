@@ -43,6 +43,54 @@ func (f *flexInt) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("flexInt: cannot parse %s", string(data))
 }
 
+// flexError accepts an "error" field that is either a plain string (RFC 8628
+// form, e.g. "authorization_pending") or an object (some providers — ChatGPT
+// in particular — nest it, e.g. {"code":"authorization_pending",
+// "description":"..."}). Without this, an object-shaped error breaks the whole
+// response unmarshal with "cannot unmarshal object into ... type string",
+// which the poller treats as terminal and kills an otherwise-valid login.
+type flexError struct {
+	Code    string
+	Message string
+}
+
+// UnmarshalJSON decodes a string, null, or an object carrying a code-ish
+// field plus an optional message/description.
+func (fe *flexError) UnmarshalJSON(data []byte) error {
+	// Plain RFC 8628 string form.
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		fe.Code = s
+		return nil
+	}
+	// Object form — grab whichever field names the provider uses.
+	var obj struct {
+		Code        string `json:"code"`
+		Error       string `json:"error"`
+		Type        string `json:"type"`
+		Message     string `json:"message"`
+		Description string `json:"description"`
+		ErrorDesc   string `json:"error_description"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		// null or unrecognized — leave empty and keep polling.
+		fe.Code, fe.Message = "", ""
+		return nil
+	}
+	fe.Code = firstNonEmpty(obj.Code, obj.Error, obj.Type)
+	fe.Message = firstNonEmpty(obj.Message, obj.Description, obj.ErrorDesc)
+	return nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // requestDeviceLogin requests a device code from the provider and starts a
 // background poller. It populates pl with the user-facing code and polling
 // state.
@@ -214,16 +262,21 @@ func (m *Manager) devicePoll(p *Provider, pl *pendingLogin) (*tokenResponse, err
 	}
 
 	var dr struct {
-		Error             string  `json:"error"`
-		ErrorMessage      string  `json:"error_description"`
-		AccessToken       string  `json:"access_token"`
-		AuthorizationCode string  `json:"authorization_code"`
-		CodeVerifier      string  `json:"code_verifier"`
-		ExpiresIn         flexInt `json:"expires_in"`
+		Error             flexError `json:"error"`
+		ErrorMessage      string    `json:"error_description"`
+		AccessToken       string    `json:"access_token"`
+		AuthorizationCode string    `json:"authorization_code"`
+		CodeVerifier      string    `json:"code_verifier"`
+		ExpiresIn         flexInt   `json:"expires_in"`
 	}
 	if err := json.Unmarshal(rb, &dr); err != nil {
 		return nil, fmt.Errorf("parse device poll response: %w", err), false
 	}
+
+	// errorText combines the flexible error code with any top-level or
+	// nested description for the terminal error message.
+	errCode := dr.Error.Code
+	errText := firstNonEmpty(errCode, dr.ErrorMessage, dr.Error.Message)
 
 	switch {
 	case dr.AccessToken != "":
@@ -237,16 +290,16 @@ func (m *Manager) devicePoll(p *Provider, pl *pendingLogin) (*tokenResponse, err
 		pl.AuthorizedCode = dr.AuthorizationCode
 		pl.PollVerifier = dr.CodeVerifier
 		return &tokenResponse{}, nil, true
-	case dr.Error == "authorization_pending":
+	case errCode == "authorization_pending":
 		return nil, nil, false
-	case dr.Error == "slow_down":
+	case errCode == "slow_down":
 		// RFC 8628: signal pollDevice to increase the poll interval.
 		return nil, errSlowDown, false
-	case dr.Error == "expired_token":
+	case errCode == "expired_token":
 		return nil, fmt.Errorf("device code expired"), false
 	default:
-		if dr.Error != "" {
-			return nil, fmt.Errorf("device poll error: %s %s", dr.Error, dr.ErrorMessage), false
+		if errCode != "" {
+			return nil, fmt.Errorf("device poll error: %s", errText), false
 		}
 		return nil, nil, false
 	}

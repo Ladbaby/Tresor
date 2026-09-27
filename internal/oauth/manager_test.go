@@ -538,6 +538,109 @@ func TestDeviceFlow_StringIntervalRegression(t *testing.T) {
 	}
 }
 
+// TestDeviceFlow_ObjectErrorRegression locks in the fix for a provider
+// (ChatGPT) that nests the device-poll "error" as an object
+// (e.g. {"error":{"code":"authorization_pending",...}}) rather than a plain
+// RFC 8628 string. Previously the object-shaped error broke the whole response
+// unmarshal, the poller treated it as terminal, and the login popup closed with
+// "cannot unmarshal object into ... type string".
+func TestDeviceFlow_ObjectErrorRegression(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+
+	mu := sync.Mutex{}
+	pollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		pollCount++
+		isPoll := pollCount >= 2
+		p := pollCount
+		mu.Unlock()
+		if !isPoll {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"device_auth_id": "da-1",
+				"user_code":      "ABCD-EFGH",
+				"interval":       1,
+			})
+			return
+		}
+		if p == 2 {
+			// Object-shaped "pending" error — must not kill the login.
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{
+					"code":        "authorization_pending",
+					"description": "still waiting for user",
+				},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "device-tok", "expires_in": 3600})
+	}))
+	defer server.Close()
+
+	bindOAuth(t, s, ds, &config.DownstreamAuthCfg{
+		Type:            "oauth",
+		Flow:            FlowDevice,
+		DeviceAuthURL:   server.URL + "/auth",
+		DeviceTokenURL:  server.URL + "/poll",
+		DeviceVerifyURL: "https://auth.openai.com/codex/device",
+	})
+
+	if _, err := m.StartLogin(ds.ID); err != nil {
+		t.Fatalf("start device login (object error): %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, _ := m.Status(ds.ID)
+		if st.Connected {
+			break
+		}
+		if st.Status == "failed" {
+			t.Fatalf("login failed (object error should not be terminal): %s", st.Error)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for device login")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	tok, err := s.GetOAuthToken(ds.ID)
+	if err != nil || tok == nil || tok.AccessToken != "device-tok" {
+		t.Fatalf("device token: %+v err=%v", tok, err)
+	}
+}
+
+// TestFlexErrorUnmarshal covers the flexError decoder directly for both the
+// string and object forms, including null.
+func TestFlexErrorUnmarshal(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    string
+		code  string
+		msg   string
+	}{
+		{"plain string", `"authorization_pending"`, "authorization_pending", ""},
+		{"object code+description", `{"code":"authorization_pending","description":"wait"}`, "authorization_pending", "wait"},
+		{"object type only", `{"type":"slow_down"}`, "slow_down", ""},
+		{"null", `null`, "", ""},
+		{"empty object", `{}`, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var fe flexError
+			if err := json.Unmarshal([]byte(tc.in), &fe); err != nil {
+				t.Fatalf("unmarshal %s: %v", tc.in, err)
+			}
+			if fe.Code != tc.code {
+				t.Fatalf("code = %q, want %q", fe.Code, tc.code)
+			}
+			if fe.Message != tc.msg {
+				t.Fatalf("message = %q, want %q", fe.Message, tc.msg)
+			}
+		})
+	}
+}
+
 // extractParam pulls a query parameter out of a URL string.
 func extractParam(t *testing.T, rawURL, key string) string {
 	t.Helper()
