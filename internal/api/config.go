@@ -78,7 +78,10 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		})
 
 	case http.MethodPut:
-		// Parse raw JSON first to determine which fields were provided.
+		// Partial merge: only the fields present in the request body are
+		// applied; everything else keeps its current value. This lets the
+		// web UI auto-save a single field at a time (blur/change) without
+		// disturbing the other settings.
 		var raw map[string]interface{}
 		bodyBytes, err := io.ReadAll(req.Body)
 		if err != nil {
@@ -90,31 +93,167 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		// Check if admin_password was explicitly provided in the request.
-		passwordProvided := raw["admin_password"] != nil
-		// Check if proxy_api_keys / proxy_mode / default_tab were explicitly provided.
-		proxyKeysProvided := raw["proxy_api_keys"] != nil
-		proxyModeProvided := raw["proxy_mode"] != nil
-		defaultTabProvided := raw["default_tab"] != nil
-		bindAddrProvided := raw["bind_addr"] != nil
+		// Field presence rules (documented contract for PUT /api/config):
+		//   - string fields: key present with a non-empty string → applied;
+		//     an empty string means "unchanged"
+		//   - admin_password: exception — a present string value (even "") is
+		//     applied; "" clears the password
+		//   - proxy_api_keys: array of strings (JSON null means unchanged)
+		//   - bool fields: key present with a bool value → applied
+		// A wrong type for any provided field is a 400.
+		passwordProvided := false
+		var newPassword string
+		if v, ok := raw["admin_password"]; ok {
+			s, isStr := v.(string)
+			if !isStr {
+				writeError(w, http.StatusBadRequest, "admin_password must be a string")
+				return
+			}
+			passwordProvided = true
+			newPassword = s
+		}
 
-		var incoming RuntimeConfig
-		if err := json.Unmarshal(bodyBytes, &incoming); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-			return
+		proxyKeysProvided := false
+		var proxyKeys []string
+		if v, ok := raw["proxy_api_keys"]; ok && v != nil {
+			arr, isArr := v.([]interface{})
+			if !isArr {
+				writeError(w, http.StatusBadRequest, "proxy_api_keys must be an array of strings")
+				return
+			}
+			proxyKeys = make([]string, 0, len(arr))
+			for _, k := range arr {
+				s, isStr := k.(string)
+				if !isStr {
+					writeError(w, http.StatusBadRequest, "proxy_api_keys elements must be strings")
+					return
+				}
+				proxyKeys = append(proxyKeys, s)
+			}
+			proxyKeysProvided = true
+		}
+
+		proxyModeProvided := false
+		var proxyModeVal string
+		if v, ok := raw["proxy_mode"]; ok {
+			s, isStr := v.(string)
+			if !isStr {
+				writeError(w, http.StatusBadRequest, "proxy_mode must be a string")
+				return
+			}
+			if s != "" {
+				proxyModeProvided = true
+				proxyModeVal = s
+			}
+		}
+
+		bindAddrProvided := false
+		var bindAddrVal string
+		if v, ok := raw["bind_addr"]; ok {
+			s, isStr := v.(string)
+			if !isStr {
+				writeError(w, http.StatusBadRequest, "bind_addr must be a string")
+				return
+			}
+			if s != "" {
+				bindAddrProvided = true
+				bindAddrVal = strings.TrimSpace(s)
+			}
+		}
+
+		defaultTabProvided := false
+		var defaultTabVal string
+		if v, ok := raw["default_tab"]; ok {
+			s, isStr := v.(string)
+			if !isStr {
+				writeError(w, http.StatusBadRequest, "default_tab must be a string")
+				return
+			}
+			// "" is allowed here to reset to the default; validation below
+			// accepts both known tabs and the empty string.
+			defaultTabProvided = true
+			defaultTabVal = s
+		}
+
+		logLevelProvided := false
+		var logLevelVal string
+		if v, ok := raw["log_level"]; ok {
+			s, isStr := v.(string)
+			if !isStr {
+				writeError(w, http.StatusBadRequest, "log_level must be a string")
+				return
+			}
+			if s != "" {
+				logLevelProvided = true
+				logLevelVal = s
+			}
+		}
+
+		captureProvided := false
+		var captureVal bool
+		if v, ok := raw["capture_payloads"]; ok {
+			b, isBool := v.(bool)
+			if !isBool {
+				writeError(w, http.StatusBadRequest, "capture_payloads must be a boolean")
+				return
+			}
+			captureProvided = true
+			captureVal = b
+		}
+
+		retryProvided := false
+		var retryVal bool
+		if v, ok := raw["retry_on_empty"]; ok {
+			b, isBool := v.(bool)
+			if !isBool {
+				writeError(w, http.StatusBadRequest, "retry_on_empty must be a boolean")
+				return
+			}
+			retryProvided = true
+			retryVal = b
+		}
+
+		// Start from the current runtime config so omitted fields are
+		// preserved verbatim.
+		runtimeCfgMu.RLock()
+		merged := runtimeCfg
+		runtimeCfgMu.RUnlock()
+
+		if bindAddrProvided {
+			merged.BindAddr = bindAddrVal
+		}
+		if proxyModeProvided {
+			merged.ProxyMode = proxyModeVal
+		}
+		if proxyKeysProvided {
+			merged.ProxyAPIKeys = proxyKeys
+		}
+		if passwordProvided {
+			merged.AdminPassword = newPassword
+		}
+		if defaultTabProvided {
+			merged.DefaultTab = defaultTabVal
+		}
+		if logLevelProvided {
+			merged.LogLevel = logLevelVal
+		}
+		if captureProvided {
+			merged.CapturePayloads = captureVal
+		}
+		if retryProvided {
+			merged.RetryOnEmpty = retryVal
 		}
 
 		// Validate bind_addr: must be a valid "host:port" pair.
 		if bindAddrProvided {
-			incoming.BindAddr = strings.TrimSpace(incoming.BindAddr)
-			if _, _, err := net.SplitHostPort(incoming.BindAddr); err != nil {
+			if _, _, err := net.SplitHostPort(merged.BindAddr); err != nil {
 				writeError(w, http.StatusBadRequest, "invalid bind_addr; must be in the form \"host:port\" (e.g. \"127.0.0.1:11510\")")
 				return
 			}
 		}
 
 		// Validate proxy_mode value.
-		mode := proxy.Mode(incoming.ProxyMode)
+		mode := proxy.Mode(merged.ProxyMode)
 		switch mode {
 		case proxy.ModeAuto, proxy.ModeEnv, proxy.ModeWindows, proxy.ModeNone:
 			// valid
@@ -123,11 +262,11 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		// Validate default_tab value.
-		if incoming.DefaultTab != "" {
+		// Validate default_tab value (empty string resets to default).
+		if defaultTabProvided && merged.DefaultTab != "" {
 			valid := false
 			for _, tab := range ValidDefaultTabs {
-				if incoming.DefaultTab == tab {
+				if merged.DefaultTab == tab {
 					valid = true
 					break
 				}
@@ -139,104 +278,96 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		}
 
 		// Validate log_level value.
-		if incoming.LogLevel != "" {
-			logLevel, err := engine.ParseLogLevel(incoming.LogLevel)
+		if logLevelProvided {
+			logLevel, err := engine.ParseLogLevel(merged.LogLevel)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, "invalid log_level; must be one of: debug, info, warn, error")
 				return
 			}
 			// Push the log level change to the logger live.
 			r.logger.SetLevel(logLevel)
-			r.logger.Debug("log level changed to %s", incoming.LogLevel)
+			r.logger.Debug("log level changed to %s", merged.LogLevel)
 		}
 
 		runtimeCfgMu.Lock()
-		runtimeCfg.ProxyMode = incoming.ProxyMode
-		if bindAddrProvided {
-			runtimeCfg.BindAddr = incoming.BindAddr
-		}
-		runtimeCfg.ProxyAPIKeys = incoming.ProxyAPIKeys
-		if passwordProvided {
-			runtimeCfg.AdminPassword = incoming.AdminPassword
-		}
-		runtimeCfg.DefaultTab = incoming.DefaultTab
-		runtimeCfg.LogLevel = incoming.LogLevel
-		runtimeCfg.CapturePayloads = incoming.CapturePayloads
-		runtimeCfg.RetryOnEmpty = incoming.RetryOnEmpty
+		runtimeCfg = merged
 		runtimeCfgMu.Unlock()
 
 		// Push the change to the running engine live.
 		r.engine.SetProxyMode(mode)
-		r.engine.SetProxyAuthKeys(incoming.ProxyAPIKeys)
+		if proxyKeysProvided {
+			r.engine.SetProxyAuthKeys(merged.ProxyAPIKeys)
+		}
 		if r.oauthMgr != nil {
 			r.oauthMgr.SetProxyMode(mode)
 		}
 		// Attach/detach the inspector's payload store to match the toggle.
-		if incoming.CapturePayloads && r.payloadStore != nil {
-			r.engine.SetPayloadStore(r.payloadStore)
-		} else {
-			r.engine.SetPayloadStore(nil)
+		if captureProvided {
+			if merged.CapturePayloads && r.payloadStore != nil {
+				r.engine.SetPayloadStore(r.payloadStore)
+			} else {
+				r.engine.SetPayloadStore(nil)
+			}
 		}
 		// Push retry-on-empty setting to the engine.
-		r.engine.SetRetryOnEmpty(incoming.RetryOnEmpty)
+		if retryProvided {
+			r.engine.SetRetryOnEmpty(merged.RetryOnEmpty)
+		}
 		if r.iconFetcher != nil {
 			r.iconFetcher.SetProxyMode(mode)
 		}
 
 		// Update auth middleware password live (only when explicitly provided).
 		if passwordProvided {
-			r.authMW.SetPassword(incoming.AdminPassword)
+			r.authMW.SetPassword(merged.AdminPassword)
 		}
 
 		// Persist changed settings to YAML config (so they survive restart).
-		if passwordProvided {
-			r.cfg.AdminPassword = incoming.AdminPassword
+		if passwordProvided && r.cfg.AdminPassword != merged.AdminPassword {
+			r.cfg.AdminPassword = merged.AdminPassword
 			r.requestConfigWrite()
 		}
-		if proxyKeysProvided && !stringSlicesEqual(r.cfg.ProxyAPIKeys, incoming.ProxyAPIKeys) {
-			if incoming.ProxyAPIKeys == nil {
-				incoming.ProxyAPIKeys = []string{}
-			}
-			r.cfg.ProxyAPIKeys = incoming.ProxyAPIKeys
+		if proxyKeysProvided && !stringSlicesEqual(r.cfg.ProxyAPIKeys, merged.ProxyAPIKeys) {
+			r.cfg.ProxyAPIKeys = merged.ProxyAPIKeys
 			r.requestConfigWrite()
 		}
-		if proxyModeProvided && r.cfg.ProxyMode != incoming.ProxyMode {
-			r.cfg.ProxyMode = incoming.ProxyMode
+		if proxyModeProvided && r.cfg.ProxyMode != merged.ProxyMode {
+			r.cfg.ProxyMode = merged.ProxyMode
 			r.requestConfigWrite()
 		}
-		if bindAddrProvided && r.cfg.BindAddr != incoming.BindAddr {
-			r.cfg.BindAddr = incoming.BindAddr
+		if bindAddrProvided && r.cfg.BindAddr != merged.BindAddr {
+			r.cfg.BindAddr = merged.BindAddr
 			// bind_addr only takes effect on daemon restart, so flush the
 			// YAML immediately (bypassing the debounce) — otherwise a user
 			// who restarts right after saving would lose the change.
 			r.writeConfigNow()
 		}
-		if defaultTabProvided && r.cfg.DefaultTab != incoming.DefaultTab {
-			r.cfg.DefaultTab = incoming.DefaultTab
+		if defaultTabProvided && r.cfg.DefaultTab != merged.DefaultTab {
+			r.cfg.DefaultTab = merged.DefaultTab
 			r.requestConfigWrite()
 		}
-		if r.cfg.CapturePayloads != incoming.CapturePayloads {
-			r.cfg.CapturePayloads = incoming.CapturePayloads
+		if captureProvided && r.cfg.CapturePayloads != merged.CapturePayloads {
+			r.cfg.CapturePayloads = merged.CapturePayloads
 			r.requestConfigWrite()
 		}
-		if r.cfg.RetryOnEmpty != incoming.RetryOnEmpty {
-			r.cfg.RetryOnEmpty = incoming.RetryOnEmpty
+		if retryProvided && r.cfg.RetryOnEmpty != merged.RetryOnEmpty {
+			r.cfg.RetryOnEmpty = merged.RetryOnEmpty
 			r.requestConfigWrite()
 		}
-		if r.cfg.LogLevel != incoming.LogLevel {
-			r.cfg.LogLevel = incoming.LogLevel
+		if logLevelProvided && r.cfg.LogLevel != merged.LogLevel {
+			r.cfg.LogLevel = merged.LogLevel
 			r.requestConfigWrite()
 		}
 
 		writeJSON(w, http.StatusOK, RuntimeConfigResponse{
-			BindAddr:         runtimeCfg.BindAddr,
-			ProxyMode:        incoming.ProxyMode,
-			ProxyAPIKeys:     incoming.ProxyAPIKeys,
-			AdminPasswordSet: passwordProvided && incoming.AdminPassword != "",
-			DefaultTab:       incoming.DefaultTab,
-			LogLevel:         incoming.LogLevel,
-			CapturePayloads:  incoming.CapturePayloads,
-			RetryOnEmpty:     incoming.RetryOnEmpty,
+			BindAddr:         merged.BindAddr,
+			ProxyMode:        merged.ProxyMode,
+			ProxyAPIKeys:     merged.ProxyAPIKeys,
+			AdminPasswordSet: merged.AdminPassword != "",
+			DefaultTab:       merged.DefaultTab,
+			LogLevel:         merged.LogLevel,
+			CapturePayloads:  merged.CapturePayloads,
+			RetryOnEmpty:     merged.RetryOnEmpty,
 		})
 
 	default:

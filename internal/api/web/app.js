@@ -3078,7 +3078,12 @@ function addProxyKeyRow(container, value) {
     removeBtn.className = 'api-key-remove';
     removeBtn.textContent = '×';
     removeBtn.title = 'Remove key';
-    removeBtn.onclick = function () { row.remove(); };
+    removeBtn.onclick = function () {
+        row.remove();
+        // Autosave the key list now that a key was removed, otherwise the
+        // server would keep a stale key until some other edit triggered a save.
+        saveProxyKeysFromEditor();
+    };
 
     row.appendChild(input);
     row.appendChild(removeBtn);
@@ -3095,106 +3100,140 @@ document.getElementById('btn-add-proxy-key').addEventListener('click', function 
     container.querySelector('.api-key-input:last-of-type').focus();
 });
 
-// Update help text when dropdown changes
+// ---- Settings: per-field auto-save (blur/change), like the Downstreams tab.
+// Each control saves only its own field; the backend merges partial bodies so
+// untouched settings are preserved. A transient status line confirms each save.
+
+function settingsStatus(msg, kind) {
+    const statusEl = document.getElementById('settings-status');
+    if (!statusEl) return;
+    statusEl.textContent = msg;
+    statusEl.className = 'settings-status' + (kind ? ' ' + kind : '');
+}
+
+async function saveConfigField(body, okMsg) {
+    try {
+        const cfg = await api('/config', { method: 'PUT', body: JSON.stringify(body) });
+        settingsStatus(okMsg || 'Saved.', 'success');
+        // Keep the daemon-reported bind_addr in sync.
+        const bindAddrEl = document.getElementById('setting-bind-addr');
+        if (bindAddrEl && body.bind_addr !== undefined) {
+            serverBindAddr = cfg.bind_addr || bindAddrEl.value.trim();
+        }
+    } catch (err) {
+        settingsStatus('Failed to save: ' + err.message, 'error');
+        throw err;
+    }
+}
+
+// Bind address — saves on blur. Triggers the restart reminder when it changes.
+document.getElementById('setting-bind-addr').addEventListener('blur', async function () {
+    const addr = this.value.trim();
+    if (!addr || addr === serverBindAddr) return;
+    const prev = this.value;
+    try {
+        await saveConfigField({ bind_addr: addr });
+        bindAddrNeedsRestart = true;
+        updateBindAddrRestartNote();
+    } catch (err) {
+        this.value = prev;
+        bindAddrNeedsRestart = false;
+        updateBindAddrRestartNote();
+    }
+});
+
+// Proxy mode — saves on change.
 document.getElementById('proxy-mode').addEventListener('change', function () {
     document.getElementById('proxy-mode-help').textContent = proxyModeHelpTexts[this.value] || '';
+    settingsStatus('Saving proxy mode…');
+    saveConfigField({ proxy_mode: this.value });
 });
 
-// Save settings button
-document.getElementById('btn-save-settings').addEventListener('click', async () => {
-    const statusEl = document.getElementById('settings-status');
-    statusEl.textContent = 'Saving...';
-    statusEl.className = 'settings-status';
-
-    // Collect proxy API keys from the editor
-    const keyInputs = document.querySelectorAll('#proxy-api-keys-container .api-key-input');
-    const proxyAPIKeys = [];
-    keyInputs.forEach(function (input) {
+// Proxy API keys — re-collect and save whenever a key row is added, edited,
+// or removed. The editor re-renders rows dynamically, so we hook the add
+// button and the key inputs' blur events.
+function saveProxyKeysFromEditor() {
+    const inputs = document.querySelectorAll('#proxy-api-keys-container .api-key-input');
+    const keys = [];
+    inputs.forEach(function (input) {
         const v = input.value.trim();
-        if (v) proxyAPIKeys.push(v);
+        if (v) keys.push(v);
     });
+    settingsStatus('Saving API keys…');
+    saveConfigField({ proxy_api_keys: keys });
+}
 
-    // Collect admin password
-    const newPassword = document.getElementById('admin-password').value;
-    const confirmPassword = document.getElementById('admin-password-confirm').value;
-    const clearPassword = document.getElementById('clear-password').checked;
+// Wire key-input blur on rows as they are created (delegated via the container
+// since rows are appended dynamically).
+(function () {
+    const container = document.getElementById('proxy-api-keys-container');
+    container.addEventListener('focusout', function (e) {
+        if (e.target.classList.contains('api-key-input')) saveProxyKeysFromEditor();
+    });
+})();
 
-    // Validate password inputs
-    if (clearPassword) {
-        newPassword = '';
-    } else if (newPassword && newPassword !== confirmPassword) {
-        statusEl.textContent = 'Passwords do not match.';
-        statusEl.className = 'settings-status error';
-        return;
-    }
+// Default tab — saves on change.
+document.getElementById('default-tab').addEventListener('change', function () {
+    settingsStatus('Saving default tab…');
+    saveConfigField({ default_tab: this.value });
+});
 
-    try {
-        const body = {
-            proxy_mode: document.getElementById('proxy-mode').value,
-            proxy_api_keys: proxyAPIKeys,
-            default_tab: document.getElementById('default-tab').value,
-        };
-        // Include bind address if the field exists
-        const bindAddrEl = document.getElementById('setting-bind-addr');
-        let bindAddrChanged = false;
-        if (bindAddrEl) {
-            const addr = bindAddrEl.value.trim();
-            body.bind_addr = addr;
-            bindAddrChanged = !!serverBindAddr && addr !== serverBindAddr;
-        }
-        // Include log level if the selector exists
-        const logLevelEl = document.getElementById('setting-log-level');
-        if (logLevelEl) {
-            body.log_level = logLevelEl.value;
-        }
-        // Include the payload-capture flag if the checkbox exists
-        const captureEl = document.getElementById('setting-capture-payloads');
-        if (captureEl) {
-            body.capture_payloads = captureEl.checked;
-        }
-        // Include the retry-on-empty flag if the checkbox exists
-        const retryEl = document.getElementById('setting-retry-on-empty');
-        if (retryEl) {
-            body.retry_on_empty = retryEl.checked;
-        }
-        // Only send admin_password if the user entered something or wants to clear it
-        if (newPassword || clearPassword) {
-            body.admin_password = newPassword;
-        }
-        const resp = await api('/config', {
-            method: 'PUT',
-            body: JSON.stringify(body),
-        });
+// Log level — saves on change.
+document.getElementById('setting-log-level').addEventListener('change', function () {
+    settingsStatus('Saving log level…');
+    saveConfigField({ log_level: this.value });
+});
 
-        // If the password was changed (not cleared), log out the current session
-        // so the user must log in with the new password.
-        if (newPassword && !clearPassword) {
-            statusEl.textContent = 'Settings saved. Logging out — please sign in with your new password.';
-            statusEl.className = 'settings-status success';
-            // Brief pause so the user can see the success message
-            setTimeout(function () {
-                logout();
-            }, 1500);
+// Payload capture — saves on change.
+document.getElementById('setting-capture-payloads').addEventListener('change', function () {
+    settingsStatus('Saving payload capture…');
+    saveConfigField({ capture_payloads: this.checked }).then(function () {
+        capturePayloadsEnabled = document.getElementById('setting-capture-payloads').checked;
+    });
+});
+
+// Retry on empty — saves on change.
+document.getElementById('setting-retry-on-empty').addEventListener('change', function () {
+    settingsStatus('Saving retry setting…');
+    saveConfigField({ retry_on_empty: this.checked });
+});
+
+// Admin password — the only control that still needs an explicit action,
+// because clearing/changing the password has security consequences and a
+// confirm step. We keep a small "Apply Password" button scoped to this group.
+(function () {
+    const btn = document.getElementById('btn-apply-password');
+    if (!btn) return;
+    btn.addEventListener('click', async function () {
+        const newPassword = document.getElementById('admin-password').value;
+        const confirmPassword = document.getElementById('admin-password-confirm').value;
+        const clearPassword = document.getElementById('clear-password').checked;
+        const pw = clearPassword ? '' : newPassword;
+        if (!clearPassword && newPassword && newPassword !== confirmPassword) {
+            settingsStatus('Passwords do not match.', 'error');
             return;
         }
-
-        let savedMsg = 'Settings saved — proxy mode and auth keys updated live.';
-        if (bindAddrChanged) {
-            savedMsg = 'Settings saved. Bind address changed — please restart Tresor to apply the new address.';
-            // Show the restart reminder below the form until the page is
-            // reloaded (i.e. after the daemon has been restarted).
-            bindAddrNeedsRestart = true;
-            updateBindAddrRestartNote();
+        if (!pw && !clearPassword) {
+            settingsStatus('Enter a password or check "Clear password".', 'error');
+            return;
         }
-        statusEl.textContent = savedMsg;
-        statusEl.className = 'settings-status success';
-        // Reload settings to refresh UI state
-        loadSettings();
-    } catch (err) {
-        statusEl.textContent = 'Failed to save: ' + err.message;
-        statusEl.className = 'settings-status error';
-    }
-});
+        settingsStatus('Saving password…');
+        try {
+            await saveConfigField({ admin_password: pw });
+            document.getElementById('admin-password').value = '';
+            document.getElementById('admin-password-confirm').value = '';
+            document.getElementById('clear-password').checked = false;
+            if (pw) {
+                settingsStatus('Password changed. Logging out — please sign in with your new password.', 'success');
+                setTimeout(function () { logout(); }, 1500);
+                return;
+            }
+            settingsStatus('Password cleared.', 'success');
+        } catch (err) {
+            settingsStatus('Failed to save password: ' + err.message, 'error');
+        }
+    });
+})();
 
 // ---- Logs ----
 

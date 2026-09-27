@@ -111,14 +111,7 @@ func (r *Router) requestConfigWrite() {
 	if r.configDebounceTimer != nil {
 		r.configDebounceTimer.Stop()
 	}
-	r.configDebounceTimer = time.AfterFunc(2*time.Second, func() {
-		if err := r.store.WriteConfig(r.cfg); err != nil {
-			log.Printf("warning: failed to write config YAML: %v", err)
-		}
-		r.configDebounceMu.Lock()
-		r.configDebounceTimer = nil
-		r.configDebounceMu.Unlock()
-	})
+	r.configDebounceTimer = time.AfterFunc(2*time.Second, r.flushConfig)
 	r.configDebounceMu.Unlock()
 }
 
@@ -132,7 +125,26 @@ func (r *Router) writeConfigNow() {
 		r.configDebounceTimer.Stop()
 		r.configDebounceTimer = nil
 	}
+	r.flushConfigLocked()
 	r.configDebounceMu.Unlock()
+}
+
+// flushConfig is the debounce timer callback. It acquires configDebounceMu so
+// the debounced write and writeConfigNow can never run concurrently (both
+// write the same temp file).
+func (r *Router) flushConfig() {
+	r.configDebounceMu.Lock()
+	defer r.configDebounceMu.Unlock()
+	r.flushConfigLocked()
+}
+
+// flushConfigLocked writes the config to YAML. The caller must hold
+// configDebounceMu.
+func (r *Router) flushConfigLocked() {
+	if r.configDebounceTimer != nil {
+		r.configDebounceTimer.Stop()
+		r.configDebounceTimer = nil
+	}
 	if err := r.store.WriteConfig(r.cfg); err != nil {
 		log.Printf("warning: failed to write config YAML: %v", err)
 	}
