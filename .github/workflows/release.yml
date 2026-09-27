@@ -254,10 +254,14 @@ jobs:
     permissions:
       contents: write
     needs: [build-windows, build-linux, build-macos, build-android, test]
-    # Run whenever the test job passes and no selected build actually failed.
-    # Unselected platforms report "skipped", which must NOT block the release —
-    # otherwise releasing a single platform would skip publishing entirely.
+    # Unselected platforms report "skipped", and a skipped `needs` dependency
+    # propagates a skip to this job — UNLESS the job uses always() or
+    # !cancelled() to opt out of that propagation. A plain result check alone
+    # is not enough. So: !cancelled() lets the job run past skipped (and even
+    # failed) deps, and the explicit result checks below decide whether it
+    # actually proceeds — unselected "skipped" passes, a real "failure" blocks.
     if: |
+      !cancelled() &&
       needs.test.result == 'success' &&
       (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped') &&
       (needs.build-linux.result == 'success' || needs.build-linux.result == 'skipped') &&
