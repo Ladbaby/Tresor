@@ -3734,3 +3734,136 @@ html[data-theme="light"] form select {
     text-align: center;
     padding: 2rem;
 }
+
+/* --- OAuth authentication section (downstream detail pane) --- */
+.auth-method-toggle {
+    display: inline-flex;
+    gap: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 0.6rem;
+}
+.auth-method-btn {
+    padding: 0.45rem 0.9rem;
+    font-size: 0.82rem;
+    font-weight: 500;
+    border: none;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.1s;
+}
+.auth-method-btn:hover { color: var(--text-primary); }
+.auth-method-btn.active {
+    background: var(--accent);
+    color: #fff;
+}
+.oauth-panel { display: block; }
+.oauth-panel-row {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.oauth-panel-row.oauth-actions-row { margin-top: 0.7rem; }
+
+/* Inline OAuth recipe editor: stacked label + input rows. */
+.oauth-field-row {
+    display: grid;
+    grid-template-columns: 150px 1fr;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.45rem;
+}
+.oauth-field-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.oauth-field,
+.oauth-flow-select {
+    width: 100%;
+    padding: 0.4rem 0.6rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.83rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.oauth-flow-select {
+    font-family: inherit;
+    /* The shared block above uses the `background:` shorthand, which resets
+       repeat to `repeat` and size to `auto`; the higher-specificity theme
+       `select` rule then re-adds the arrow image and it tiles. Re-assert the
+       single, right-aligned arrow here. */
+    background-color: var(--bg-tertiary);
+    background-image: var(--select-arrow);
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    background-size: 12px;
+    padding-right: 2rem;
+}
+.oauth-field:focus,
+.oauth-flow-select:focus { outline: none; border-color: var(--accent); }
+.oauth-field::placeholder { color: var(--text-muted); font-style: italic; font-family: inherit; }
+
+/* Extra-headers mini editor inside the OAuth panel. */
+.oauth-headers-block {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border-color);
+}
+.oauth-headers-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.4rem;
+}
+.oauth-headers-head label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 0;
+}
+.oauth-headers-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+.oauth-header-row {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+}
+.oauth-header-row input {
+    flex: 1;
+    padding: 0.35rem 0.55rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.oauth-header-row input:focus { outline: none; border-color: var(--accent); }
+.oauth-header-remove {
+    background: var(--bg-tertiary);
+    color: var(--danger-hover);
+    border: 1px solid var(--border-color);
+    padding: 0.2rem 0.45rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    line-height: 1;
+}
+.oauth-header-remove:hover { background: var(--danger); color: #fff; }
+.oauth-headers-empty { color: var(--text-muted); font-size: 0.8rem; font-style: italic; }
+
+.oauth-status-line { margin-top: 0.5rem; min-height: 1.1rem; font-size: 0.82rem; }
+.oauth-status { display: inline-block; }
+.oauth-status.ok { color: #2e9e5b; }
+.oauth-status.pending { color: var(--text-secondary); }
+.oauth-status.error { color: #d64545; }

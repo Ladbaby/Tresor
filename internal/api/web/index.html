@@ -203,6 +203,19 @@
                             <div id="fetch-models-list" class="fetch-models-list"></div>
                         </div>
                     </div>
+
+                    <!-- OAuth Device-Code Login — shown when the provider uses the RFC 8628 device flow -->
+                    <div id="oauth-device-modal" class="modal hidden">
+                        <div class="modal-content" style="max-width:460px;">
+                            <span class="close">&times;</span>
+                            <h3>Sign in with your account</h3>
+                            <p class="text-muted">Visit the URL below and enter the code to authorize Tresor.</p>
+                            <p class="device-verify-url" style="word-break:break-all;font-family:monospace;background:var(--bg-secondary,#f2f2f2);padding:0.5rem;border-radius:6px;"></p>
+                            <p class="text-muted">Code:</p>
+                            <p class="device-code" style="font-size:1.6rem;letter-spacing:0.2em;font-family:monospace;font-weight:600;text-align:center;"></p>
+                            <p class="oauth-status pending" id="oauth-device-status">Waiting for authorization…</p>
+                        </div>
+                    </div>
                 </section>
 
                 <!-- Aliases Tab -->

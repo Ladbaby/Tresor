@@ -150,6 +150,9 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		// Push the change to the running engine live.
 		r.engine.SetProxyMode(mode)
 		r.engine.SetProxyAuthKeys(incoming.ProxyAPIKeys)
+		if r.oauthMgr != nil {
+			r.oauthMgr.SetProxyMode(mode)
+		}
 		// Attach/detach the inspector's payload store to match the toggle.
 		if incoming.CapturePayloads && r.payloadStore != nil {
 			r.engine.SetPayloadStore(r.payloadStore)

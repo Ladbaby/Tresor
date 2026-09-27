@@ -244,6 +244,20 @@ func (s *Store) migrate() error {
 			PRIMARY KEY (bucket, downstream_id, model)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_bucket ON usage_stats(bucket)`,
+		// oauth_tokens table: one row per OAuth-connected downstream.
+		// Secrets live in SQLite only — never written to the YAML config.
+		`CREATE TABLE IF NOT EXISTS oauth_tokens (
+			downstream_id TEXT PRIMARY KEY REFERENCES downstreams(id),
+			provider      TEXT NOT NULL,
+			flow          TEXT NOT NULL,
+			access_token  TEXT NOT NULL,
+			refresh_token TEXT,
+			token_type    TEXT DEFAULT 'Bearer',
+			expires_at    INTEGER DEFAULT 0,
+			extra         TEXT DEFAULT '{}',
+			needs_login   INTEGER DEFAULT 0,
+			updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_model  ON usage_stats(model)`,
 		// ip_usage_stats table: per-client-IP token usage aggregated by hourly
 		// bucket. One row per (hour, client_ip). Populated by the engine only
@@ -352,6 +366,33 @@ func (s *Store) migrate() error {
 	if !s.columnExists("downstreams", "format_urls") {
 		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN format_urls TEXT DEFAULT '{}'`); err != nil {
 			return fmt.Errorf("migrate add format_urls: %w", err)
+		}
+	}
+
+	// Add OAuth auth-method columns. auth_method is "api_key" (default) or
+	// "oauth"; oauth_provider names an entry in the YAML oauth_providers list.
+	// Runtime-only: never round-tripped through the YAML config.
+	if !s.columnExists("downstreams", "auth_method") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN auth_method TEXT DEFAULT 'api_key'`); err != nil {
+			return fmt.Errorf("migrate add auth_method: %w", err)
+		}
+	}
+	if !s.columnExists("downstreams", "oauth_provider") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN oauth_provider TEXT DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate add oauth_provider: %w", err)
+		}
+	}
+
+	// Add the unified `auth` JSON column. It supersedes api_key / auth_method /
+	// oauth_provider, which are retained for back-compat backfill but no longer
+	// read by the app. On first introduction, backfill every existing row from
+	// its legacy columns so no auth info is lost.
+	if !s.columnExists("downstreams", "auth") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN auth TEXT DEFAULT '{}'`); err != nil {
+			return fmt.Errorf("migrate add auth: %w", err)
+		}
+		if err := s.migrateBackfillAuth(); err != nil {
+			return fmt.Errorf("migrate backfill auth: %w", err)
 		}
 	}
 
@@ -659,6 +700,134 @@ func (s *Store) LoadConfigData(cfg *config.AppConfig) error {
 	return nil
 }
 
+// migrateBackfillAuth populates the new `auth` column on every existing row
+// from the legacy api_key / auth_method / oauth_provider columns. For an
+// OAuth downstream it records the referenced recipe name in the transient
+// oauth_provider field; cmd/run.go resolves that name into the full recipe
+// during the startup config migration. Runs only when the `auth` column is
+// first introduced.
+func (s *Store) migrateBackfillAuth() error {
+	rows, err := s.db.Query(`SELECT id, auth, api_key, auth_method, oauth_provider FROM downstreams`)
+	if err != nil {
+		return fmt.Errorf("query downstreams for auth backfill: %w", err)
+	}
+	type row struct {
+		id, auth, apiKey, authMethod, oauthProvider string
+	}
+	var pending []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.auth, &r.apiKey, &r.authMethod, &r.oauthProvider); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan auth backfill row: %w", err)
+		}
+		// Skip rows that already have a real auth blob.
+		if r.auth != "" && r.auth != "{}" {
+			continue
+		}
+		pending = append(pending, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate auth backfill rows: %w", err)
+	}
+	rows.Close()
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin auth backfill tx: %w", err)
+	}
+	stmt, err := tx.Prepare(`UPDATE downstreams SET auth = ? WHERE id = ?`)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare auth backfill stmt: %w", err)
+	}
+	defer stmt.Close()
+	for _, r := range pending {
+		var authCfg config.DownstreamAuthCfg
+		if r.authMethod == "oauth" {
+			authCfg = config.DownstreamAuthCfg{Type: "oauth", OAuthProvider: r.oauthProvider}
+		} else {
+			authCfg = config.DownstreamAuthCfg{Type: "api_key", APIKey: r.apiKey}
+		}
+		b, err := json.Marshal(authCfg)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("marshal auth backfill for %s: %w", r.id, err)
+		}
+		if _, err := stmt.Exec(string(b), r.id); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("update auth backfill for %s: %w", r.id, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// MigrateLegacyOAuthProviders resolves the old top-level oauth_providers
+// recipes into the per-downstream auth column for any DB row still bound to a
+// recipe by name (downstreams.oauth_provider != ''). After this runs, the
+// auth column carries the full recipe and the oauth binding is self-contained.
+// Rows whose name has no matching recipe are left untouched.
+func (s *Store) MigrateLegacyOAuthProviders(legacy []config.OAuthProviderCfg) error {
+	if len(legacy) == 0 {
+		return nil
+	}
+	recipes := make(map[string]config.OAuthProviderCfg, len(legacy))
+	for _, p := range legacy {
+		recipes[p.Name] = p
+	}
+
+	rows, err := s.db.Query(`SELECT id, oauth_provider FROM downstreams WHERE oauth_provider != ''`)
+	if err != nil {
+		return fmt.Errorf("query downstreams for oauth migration: %w", err)
+	}
+	type ref struct{ id, name string }
+	var refs []ref
+	for rows.Next() {
+		var r ref
+		if err := rows.Scan(&r.id, &r.name); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan oauth migration row: %w", err)
+		}
+		refs = append(refs, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate oauth migration rows: %w", err)
+	}
+	rows.Close()
+
+	if len(refs) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin oauth migration tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, r := range refs {
+		recipe, ok := recipes[r.name]
+		if !ok {
+			continue // no recipe for this name; leave the row as-is
+		}
+		auth := recipe.ToAuthCfg()
+		b, err := json.Marshal(auth)
+		if err != nil {
+			return fmt.Errorf("marshal migrated auth for %s: %w", r.id, err)
+		}
+		if _, err := tx.Exec(`UPDATE downstreams SET auth = ? WHERE id = ?`, string(b), r.id); err != nil {
+			return fmt.Errorf("update migrated auth for %s: %w", r.id, err)
+		}
+	}
+	return tx.Commit()
+}
+
 // columnExists checks if a column exists on a table using PRAGMA table_info.
 func (s *Store) columnExists(table, column string) bool {
 	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
@@ -850,6 +1019,19 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 			return fmt.Errorf("marshal format_urls for %s: %w", d.ID, err)
 		}
 
+		// The unified auth blob + the legacy api_key column (kept in sync for
+		// api_key downstreams so older readers still see the key).
+		authJSON := "{}"
+		legacyKey := ""
+		if d.Auth != nil {
+			if b, err := json.Marshal(d.Auth); err == nil {
+				authJSON = string(b)
+			}
+			if d.Auth.Type == "api_key" {
+				legacyKey = d.Auth.APIKey
+			}
+		}
+
 		// Check if this downstream already exists
 		var exists bool
 		if err := tx.QueryRow("SELECT COUNT(*) > 0 FROM downstreams WHERE id = ?", d.ID).Scan(&exists); err != nil {
@@ -858,8 +1040,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 
 		if exists {
 			if _, err := tx.Exec(
-				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ? WHERE id = ?",
-				d.Name, d.BaseURL, d.APIKey, string(formatsJSON), string(urlsJSON), d.ID); err != nil {
+				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, auth = ? WHERE id = ?",
+				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), authJSON, d.ID); err != nil {
 				return fmt.Errorf("update downstream %s: %w", d.ID, err)
 			}
 			// Replace output_model_ids from YAML
@@ -881,8 +1063,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 			}
 		} else {
 			if _, err := tx.Exec(
-				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls) VALUES (?, ?, ?, ?, ?, ?)",
-				d.ID, d.Name, d.BaseURL, d.APIKey, string(formatsJSON), string(urlsJSON)); err != nil {
+				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, auth) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), authJSON); err != nil {
 				return fmt.Errorf("insert downstream %s: %w", d.ID, err)
 			}
 			if len(d.OutputModelIDs) > 0 {

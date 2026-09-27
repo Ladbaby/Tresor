@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"tresor/internal/config"
 	"tresor/internal/store"
 )
 
@@ -284,7 +285,7 @@ func addDownstream(t *testing.T, s *store.Store, id, name, baseURL, apiKey strin
 		formats = apiFormats
 	}
 	if err := s.CreateDownstream(&store.Downstream{
-		ID: id, Name: name, BaseURL: baseURL, APIKey: apiKey, ApiFormats: formats,
+		ID: id, Name: name, BaseURL: baseURL, Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: apiKey}, ApiFormats: formats,
 	}); err != nil {
 		t.Fatalf("create downstream %s: %v", id, err)
 	}
@@ -1735,7 +1736,7 @@ func TestEngine_HandleProxy_FormatURL_SelectsByDownstreamFormat(t *testing.T) {
 		ID:         "deepseek",
 		Name:       "DeepSeek",
 		BaseURL:    openaiServer.URL,
-		APIKey:     "sk-test",
+		Auth:       &config.DownstreamAuthCfg{Type: "api_key", APIKey: "sk-test"},
 		ApiFormats: []string{"openai", "anthropic"},
 		FormatURLs: map[string]string{
 			"anthropic": anthropicServer.URL,
@@ -1814,7 +1815,7 @@ func TestEngine_HandleProxy_FormatURL_FallsBackToBaseURL(t *testing.T) {
 		ID:         "openai-only",
 		Name:       "OpenAI",
 		BaseURL:    openaiServer.URL,
-		APIKey:     "sk-test",
+		Auth:       &config.DownstreamAuthCfg{Type: "api_key", APIKey: "sk-test"},
 		ApiFormats: []string{"openai", "anthropic"},
 		OutputModelIDs: []string{"oai-chat"},
 	}); err != nil {

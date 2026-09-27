@@ -3,6 +3,7 @@ package engine
 import (
 	"net/http"
 
+	"tresor/internal/config"
 	"tresor/internal/store"
 )
 
@@ -11,11 +12,16 @@ type Downstream struct {
 	ID         string
 	Name       string
 	BaseURL    string
+	// APIKey is the effective credential forwarded to the downstream. For
+	// api_key auth it is the static key; for oauth it is the live access
+	// token resolved at request time (substituted in place).
 	APIKey     string
 	ApiFormats []string
 	// FormatURLs maps API format names to per-format base URLs.
 	// Empty/nil map means "use BaseURL for all formats".
 	FormatURLs map[string]string
+	// Auth holds the per-downstream auth config (api_key or oauth).
+	Auth *config.DownstreamAuthCfg
 }
 
 // PipelineContext carries state through the transformation pipeline.
@@ -26,7 +32,17 @@ type PipelineContext struct {
 	// correct per-format URL from TargetDownstream.FormatURLs, and is also
 	// used for empty-response detection / stream format detection.
 	DownstreamFormat string
+	// OAuthExtraHeaders are additional headers required by the OAuth
+	// provider (e.g. originator, user-agent). Applied in forwardRequest
+	// after the standard auth header is set.
+	OAuthExtraHeaders map[string]string
 	Variables        map[string]interface{}
+}
+
+// TokenResolver resolves a currently-valid OAuth access token for a
+// downstream (refreshing as needed). Implemented by the oauth.Manager.
+type TokenResolver interface {
+	ResolveValidToken(downstreamID string) (token string, extraHeaders map[string]string, err error)
 }
 
 // RequestTransformer modifies an outgoing request before it is forwarded.

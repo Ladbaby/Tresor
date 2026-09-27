@@ -29,7 +29,7 @@ func TestWriteConfig_RoundTrip(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
 	// Populate DB with known data
-	ds := &Downstream{ID: "ds-test", Name: "Test Provider", BaseURL: "https://test.com", APIKey: "sk-123"}
+	ds := &Downstream{ID: "ds-test", Name: "Test Provider", BaseURL: "https://test.com", Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: "sk-123"}}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatalf("create downstream: %v", err)
 	}
@@ -67,8 +67,8 @@ func TestWriteConfig_RoundTrip(t *testing.T) {
 	if parsed.Downstreams[0].ID != "ds-test" {
 		t.Fatalf("expected downstream id ds-test, got %q", parsed.Downstreams[0].ID)
 	}
-	if parsed.Downstreams[0].APIKey != "sk-123" {
-		t.Fatalf("expected api_key sk-123, got %q", parsed.Downstreams[0].APIKey)
+	if parsed.Downstreams[0].Auth == nil || parsed.Downstreams[0].Auth.APIKey != "sk-123" {
+		t.Fatalf("expected api_key sk-123, got %+v", parsed.Downstreams[0].Auth)
 	}
 
 	if len(parsed.Rules) != 1 {

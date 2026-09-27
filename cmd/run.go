@@ -16,6 +16,7 @@ import (
 	"tresor/internal/engine"
 	"tresor/internal/icons"
 	"tresor/internal/inspect"
+	"tresor/internal/oauth"
 	"tresor/internal/plugins"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
@@ -60,6 +61,19 @@ func runDaemon(cfg *config.AppConfig) error {
 
 	// Load YAML config data into DB (upsert). Falls back to seed defaults
 	// if no downstreams/rules/aliases are defined in the config.
+	//
+	// Before the upsert, migrate any legacy top-level oauth_providers recipes
+	// into the per-downstream auth blocks (both in the YAML being loaded and
+	// in existing DB rows bound by name), so the new unified auth model takes
+	// over seamlessly. Once written back, the old section is dropped.
+	if len(cfg.LegacyOAuthProviders()) > 0 {
+		legacy := cfg.LegacyOAuthProviders()
+		// Resolve any DB rows still bound to a recipe by name, then drop the
+		// legacy list so it is not written back to the YAML.
+		migrateLegacyOAuthProvidersDB(s, legacy)
+		migrateLegacyOAuthProvidersYAML(cfg)
+	}
+
 	if err := s.LoadConfigData(cfg); err != nil {
 		return fmt.Errorf("failed to load config data: %w", err)
 	}
@@ -84,6 +98,21 @@ func runDaemon(cfg *config.AppConfig) error {
 	// Configure inbound proxy request authentication
 	eng.SetProxyAuthKeys(cfg.ProxyAPIKeys)
 
+	// Build the OAuth manager. It is always created (even when no downstream
+	// currently uses OAuth) so the web UI can configure and connect OAuth at
+	// runtime without a restart. It resolves valid access tokens for
+	// downstreams that use OAuth auth instead of a static API key.
+	oauthMgr := oauth.NewManager(s, proxy.Mode(cfg.ProxyMode))
+	if cfg.BindAddr != "" {
+		if host, port, err := net.SplitHostPort(cfg.BindAddr); err == nil {
+			if host == "" || host == "0.0.0.0" || host == "::" {
+				host = "127.0.0.1"
+			}
+			oauthMgr.SetCallbackBase(host + ":" + port)
+		}
+	}
+	eng.SetTokenManager(oauthMgr)
+
 	// Build icon fetcher — resolves model IDs to SVG icons, lazily fetching
 	// from a public CDN on first miss and caching to disk beside the DB.
 	// Default cache dir is <db_dir>/tresor-icons unless icon_cache_dir is set
@@ -103,6 +132,9 @@ func runDaemon(cfg *config.AppConfig) error {
 	refreshCtx, stopRefresh := context.WithCancel(context.Background())
 	defer stopRefresh()
 	iconFetcher.StartPeriodicRefresh(refreshCtx)
+	if oauthMgr != nil {
+		oauthMgr.StartRefresher(refreshCtx)
+	}
 
 	// Initialize request logger
 	logger := engine.NewRequestLogger()
@@ -126,6 +158,7 @@ func runDaemon(cfg *config.AppConfig) error {
 
 	// Build admin API router
 	adminRouter := api.NewRouter(s, eng, logger, payloadStore, iconFetcher, cfg, Version, BuildTime)
+	adminRouter.SetOAuthManager(oauthMgr)
 	webHandler := api.WebHandler()
 
 	// Configure retry-on-empty setting on the engine
@@ -216,4 +249,21 @@ func purgeOldUsageStats(s *store.Store) error {
 		log.Printf("usage_stats janitor: no rows older than %s to delete", cutoff.Format("2006-01-02"))
 	}
 	return nil
+}
+
+// migrateLegacyOAuthProvidersYAML clears the parsed legacy oauth_providers
+// list so it is not written back to the YAML. (Downstreams defined in old
+// YAML carried only a top-level api_key — no recipe name — so there is
+// nothing to fold into them; DB rows bound to a recipe are handled by
+// MigrateLegacyOAuthProviders.)
+func migrateLegacyOAuthProvidersYAML(cfg *config.AppConfig) {
+	cfg.SetLegacyOAuthProviders(nil)
+}
+
+// migrateLegacyOAuthProvidersDB delegates to the store so the call site in
+// run.go stays readable.
+func migrateLegacyOAuthProvidersDB(s *store.Store, legacy []config.OAuthProviderCfg) {
+	if err := s.MigrateLegacyOAuthProviders(legacy); err != nil {
+		log.Printf("warning: legacy oauth_providers DB migration failed: %v", err)
+	}
 }

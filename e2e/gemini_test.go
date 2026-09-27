@@ -164,7 +164,7 @@ downstreams:
 			"name":            "Test Gemini",
 			"api_formats":     []string{"gemini"},
 			"base_url":        "http://127.0.0.1:9380",
-			"api_key":         "gem-test-key",
+			"auth":            map[string]interface{}{"type": "api_key", "api_key": "gem-test-key"},
 			"output_model_ids": []string{},
 		}
 		b, _ := json.Marshal(body)

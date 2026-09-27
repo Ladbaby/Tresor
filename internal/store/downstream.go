@@ -9,26 +9,68 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"tresor/internal/config"
 )
 
 // Downstream represents a target endpoint or model provider.
 type Downstream struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	BaseURL        string    `json:"base_url"`
-	APIKey         string    `json:"api_key,omitempty"`
-	ApiFormats     []string  `json:"api_formats"`
-	OutputModelIDs []string  `json:"output_model_ids,omitempty"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	BaseURL        string   `json:"base_url"`
+	ApiFormats     []string `json:"api_formats"`
+	OutputModelIDs []string `json:"output_model_ids,omitempty"`
 	// FormatURLs maps API format names to per-format base URLs. Nil or empty
 	// map means "fall back to BaseURL for all formats".
 	FormatURLs map[string]string `json:"format_urls,omitempty"`
-	CreatedAt  time.Time         `json:"created_at"`
+	// Auth holds the per-downstream authentication configuration (API key or
+	// OAuth). It is the single source of truth for how this downstream is
+	// authenticated. Tokens are stored separately in oauth_tokens (SQLite only).
+	Auth      *config.DownstreamAuthCfg `json:"auth"`
+	CreatedAt time.Time                 `json:"created_at"`
+}
+
+// EffectiveAPIKey returns the static API key when the downstream uses api_key
+// auth, or "" when it uses OAuth (the live token is resolved separately).
+func (d *Downstream) EffectiveAPIKey() string {
+	if d.Auth == nil || d.Auth.Type != "api_key" {
+		return ""
+	}
+	return d.Auth.APIKey
+}
+
+// IsOAuth reports whether the downstream authenticates via OAuth.
+func (d *Downstream) IsOAuth() bool {
+	return d.Auth != nil && d.Auth.Type == "oauth"
+}
+
+// authJSONColumn returns the JSON blob stored in the downstreams.auth column.
+func authJSONColumn(d *Downstream) string {
+	if d.Auth == nil {
+		return "{}"
+	}
+	b, _ := json.Marshal(d.Auth)
+	return string(b)
+}
+
+// decodeAuthJSON parses the downstreams.auth column into d.Auth, guaranteeing
+// a non-nil result (so API responses always carry an auth object).
+func decodeAuthJSON(d *Downstream, authJSON string) {
+	d.Auth = &config.DownstreamAuthCfg{Type: "api_key"}
+	if authJSON != "" && authJSON != "{}" {
+		if err := json.Unmarshal([]byte(authJSON), d.Auth); err != nil {
+			d.Auth = &config.DownstreamAuthCfg{Type: "api_key"}
+		}
+	}
+	if d.Auth.Type == "" {
+		d.Auth.Type = "api_key"
+	}
 }
 
 // ListDownstreams returns all downstreams with their output model IDs.
 func (s *Store) ListDownstreams() ([]Downstream, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_key, api_formats, format_urls, created_at FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_formats, format_urls, auth, created_at FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list downstreams: %w", err)
 	}
@@ -37,11 +79,12 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 	var ds []Downstream
 	for rows.Next() {
 		var d Downstream
-		var formatsJSON, urlsJSON string
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &urlsJSON, &d.CreatedAt); err != nil {
+		var formatsJSON, urlsJSON, authJSON string
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &authJSON, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		decodeDownstreamJSON(&d, formatsJSON, urlsJSON)
+		decodeAuthJSON(&d, authJSON)
 		d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 		ds = append(ds, d)
 	}
@@ -51,14 +94,15 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 // GetDownstream returns a single downstream by ID with output model IDs.
 func (s *Store) GetDownstream(id string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON, urlsJSON string
+	var formatsJSON, urlsJSON, authJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, base_url, api_key, api_formats, format_urls, created_at FROM downstreams WHERE id = ?`, id).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &urlsJSON, &d.CreatedAt)
+		`SELECT id, name, base_url, api_formats, format_urls, auth, created_at FROM downstreams WHERE id = ?`, id).
+		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &authJSON, &d.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get downstream %s: %w", id, err)
 	}
 	decodeDownstreamJSON(&d, formatsJSON, urlsJSON)
+	decodeAuthJSON(&d, authJSON)
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil
 }
@@ -102,10 +146,11 @@ func (s *Store) CreateDownstream(d *Downstream) error {
 		formatURLs = map[string]string{}
 	}
 	urlsJSON, _ := json.Marshal(formatURLs)
+	authJSON := authJSONColumn(d)
 
 	_, err = tx.Exec(
-		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls) VALUES (?, ?, ?, ?, ?, ?)`,
-		d.ID, d.Name, d.BaseURL, d.APIKey, string(formatsJSON), string(urlsJSON))
+		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, auth) VALUES (?, ?, ?, '', ?, ?, ?)`,
+		d.ID, d.Name, d.BaseURL, string(formatsJSON), string(urlsJSON), authJSON)
 	if err != nil {
 		return fmt.Errorf("create downstream: %w", err)
 	}
@@ -145,10 +190,11 @@ func (s *Store) UpdateDownstream(d *Downstream) error {
 		formatURLs = map[string]string{}
 	}
 	urlsJSON, _ := json.Marshal(formatURLs)
+	authJSON := authJSONColumn(d)
 
 	res, err := tx.Exec(
-		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ? WHERE id = ?`,
-		d.Name, d.BaseURL, d.APIKey, string(formatsJSON), string(urlsJSON), d.ID)
+		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, auth = ? WHERE id = ?`,
+		d.Name, d.BaseURL, d.EffectiveAPIKey(), string(formatsJSON), string(urlsJSON), authJSON, d.ID)
 	if err != nil {
 		return fmt.Errorf("update downstream: %w", err)
 	}
@@ -191,6 +237,10 @@ func (s *Store) DeleteDownstream(id string) error {
 	removeFromMatchDownstreams(tx, id)
 	// Delete all aliases referencing this downstream
 	if _, err := tx.Exec("DELETE FROM aliases WHERE downstream_id = ?", id); err != nil {
+		return err
+	}
+	// Delete OAuth token if present
+	if _, err := tx.Exec("DELETE FROM oauth_tokens WHERE downstream_id = ?", id); err != nil {
 		return err
 	}
 	// Delete output model IDs for this downstream
@@ -275,15 +325,15 @@ func (s *Store) ListAllModels() ([]string, error) {
 // the same model, the one with the earliest created_at wins (deterministic).
 func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON, urlsJSON string
+	var formatsJSON, urlsJSON, authJSON string
 	err := s.db.QueryRow(
-		`SELECT d.id, d.name, d.base_url, d.api_key, d.api_formats, d.format_urls, d.created_at
+		`SELECT d.id, d.name, d.base_url, d.api_formats, d.format_urls, d.auth, d.created_at
 		 FROM downstreams d
 		 JOIN output_model_ids o ON o.downstream_id = d.id
 		 WHERE o.model_id = ?
 		 ORDER BY d.created_at ASC
 		 LIMIT 1`, model).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &d.APIKey, &formatsJSON, &urlsJSON, &d.CreatedAt)
+		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &authJSON, &d.CreatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -291,6 +341,7 @@ func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 		return nil, fmt.Errorf("find downstream by output model %s: %w", model, err)
 	}
 	decodeDownstreamJSON(&d, formatsJSON, urlsJSON)
+	decodeAuthJSON(&d, authJSON)
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil
 }

@@ -3,6 +3,8 @@ package store
 import (
 	"os"
 	"testing"
+
+	"tresor/internal/config"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -159,7 +161,7 @@ func TestStore_CRUD_Downstreams(t *testing.T) {
 	d := &Downstream{
 		Name:    "Test Provider",
 		BaseURL: "https://test.api.com/v1",
-		APIKey:  "sk-test123",
+		Auth:    &config.DownstreamAuthCfg{Type: "api_key", APIKey: "sk-test123"},
 	}
 	if err := s.CreateDownstream(d); err != nil {
 		t.Fatalf("create downstream: %v", err)
@@ -572,7 +574,7 @@ func TestStore_FindDownstreamByOutputModel(t *testing.T) {
 	d1 := &Downstream{
 		Name:    "Provider A",
 		BaseURL: "https://a.example.com/v1",
-		APIKey:  "key-a",
+		Auth:    &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key-a"},
 	}
 	if err := s.CreateDownstream(d1); err != nil {
 		t.Fatalf("create downstream: %v", err)
@@ -586,7 +588,7 @@ func TestStore_FindDownstreamByOutputModel(t *testing.T) {
 	d2 := &Downstream{
 		Name:    "Provider B",
 		BaseURL: "https://b.example.com/v1",
-		APIKey:  "key-b",
+		Auth:    &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key-b"},
 	}
 	if err := s.CreateDownstream(d2); err != nil {
 		t.Fatalf("create downstream: %v", err)
@@ -606,8 +608,8 @@ func TestStore_FindDownstreamByOutputModel(t *testing.T) {
 	if resolved.ID != d1.ID {
 		t.Fatalf("expected downstream %s, got %s", d1.ID, resolved.ID)
 	}
-	if resolved.APIKey != "key-a" {
-		t.Fatalf("expected api_key key-a, got %q", resolved.APIKey)
+	if resolved.EffectiveAPIKey() != "key-a" {
+		t.Fatalf("expected api_key key-a, got %q", resolved.EffectiveAPIKey())
 	}
 
 	// Find by another known model (same downstream)
@@ -649,7 +651,7 @@ func TestStore_FindDownstreamByOutputModel_Deterministic(t *testing.T) {
 
 	// Two downstreams share the same model — earliest created_at wins
 	d1 := &Downstream{
-		Name: "Provider A", BaseURL: "https://a.example.com/v1", APIKey: "key-a",
+		Name: "Provider A", BaseURL: "https://a.example.com/v1", Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key-a"},
 	}
 	if err := s.CreateDownstream(d1); err != nil {
 		t.Fatalf("create downstream: %v", err)
@@ -659,7 +661,7 @@ func TestStore_FindDownstreamByOutputModel_Deterministic(t *testing.T) {
 	}
 
 	d2 := &Downstream{
-		Name: "Provider B", BaseURL: "https://b.example.com/v1", APIKey: "key-b",
+		Name: "Provider B", BaseURL: "https://b.example.com/v1", Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key-b"},
 	}
 	if err := s.CreateDownstream(d2); err != nil {
 		t.Fatalf("create downstream: %v", err)
@@ -1095,7 +1097,7 @@ func TestStore_FindMatchingRulesWithCandidates_WildcardPathRespectsModel(t *test
 
 func TestStore_FindMatchingRules_MultiplePatternModelsORAndOtherFieldsAND(t *testing.T) {
 	s := newTestStore(t)
-	ds := &Downstream{ID: "multi-model-ds", Name: "Multi", BaseURL: "http://example.com", APIKey: "key", ApiFormats: []string{"anthropic"}}
+	ds := &Downstream{ID: "multi-model-ds", Name: "Multi", BaseURL: "http://example.com", Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key"}, ApiFormats: []string{"anthropic"}}
 	if err := s.CreateDownstream(ds); err != nil {
 		t.Fatal(err)
 	}

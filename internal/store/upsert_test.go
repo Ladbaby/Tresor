@@ -10,7 +10,7 @@ func TestUpsertDownstreams_InsertNew(t *testing.T) {
 	s := newTestStore(t)
 
 	downstreams := []config.DownstreamCfg{
-		{ID: "ds-new", Name: "New Provider", BaseURL: "https://new.com", APIKey: "sk-new", OutputModelIDs: []string{"gpt-4o"}},
+		{ID: "ds-new", Name: "New Provider", BaseURL: "https://new.com", Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: "sk-new"}, OutputModelIDs: []string{"gpt-4o"}},
 	}
 	if err := s.upsertDownstreams(downstreams); err != nil {
 		t.Fatalf("upsert downstreams: %v", err)
@@ -39,7 +39,7 @@ func TestUpsertDownstreams_UpdateExisting(t *testing.T) {
 
 	// Upsert with updated fields
 	downstreams := []config.DownstreamCfg{
-		{ID: "ds-upd", Name: "New Name", BaseURL: "https://new.com", APIKey: "sk-updated", OutputModelIDs: []string{"model-a"}},
+		{ID: "ds-upd", Name: "New Name", BaseURL: "https://new.com", Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: "sk-updated"}, OutputModelIDs: []string{"model-a"}},
 	}
 	if err := s.upsertDownstreams(downstreams); err != nil {
 		t.Fatalf("upsert downstreams: %v", err)
@@ -52,8 +52,8 @@ func TestUpsertDownstreams_UpdateExisting(t *testing.T) {
 	if updated.Name != "New Name" {
 		t.Fatalf("expected name 'New Name', got %q", updated.Name)
 	}
-	if updated.APIKey != "sk-updated" {
-		t.Fatalf("expected api_key 'sk-updated', got %q", updated.APIKey)
+	if updated.Auth == nil || updated.Auth.APIKey != "sk-updated" {
+		t.Fatalf("expected api_key 'sk-updated', got %+v", updated.Auth)
 	}
 	if len(updated.OutputModelIDs) != 1 || updated.OutputModelIDs[0] != "model-a" {
 		t.Fatalf("expected output_model_ids [model-a], got %v", updated.OutputModelIDs)

@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"tresor/internal/config"
 	"tresor/internal/engine"
+	"tresor/internal/oauth"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
 )
@@ -29,9 +31,7 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 		}
 		// Mask API keys in responses
 		for i := range downstreams {
-			if downstreams[i].APIKey != "" {
-				downstreams[i].APIKey = "***"
-			}
+			maskDownstreamAPIKey(&downstreams[i])
 		}
 		writeJSON(w, http.StatusOK, downstreams)
 
@@ -58,14 +58,16 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 		}
+		if err := validateAuthForStore(ds.Auth); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if err := r.store.CreateDownstream(&ds); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		r.requestConfigWrite()
-		if ds.APIKey != "" {
-			ds.APIKey = "***"
-		}
+		maskDownstreamAPIKey(&ds)
 		writeJSONWithWarning(w, http.StatusCreated, ds, proxy.IsBareIP(ds.BaseURL))
 
 	default:
@@ -76,6 +78,41 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 // handleDownstreamByID handles GET, PUT, DELETE on /api/downstreams/{id}
 // and sub-resource operations on /api/downstreams/{id}/models,
 // /api/downstreams/{id}/models/{model_id}, and /api/downstreams/{id}/fetch-models.
+
+// maskDownstreamAPIKey replaces a downstream's stored credentials with a
+// mask before they are sent to a client. api_key auth carries an API key;
+// oauth carries an optional client_secret.
+func maskDownstreamAPIKey(ds *store.Downstream) {
+	if ds.Auth == nil {
+		return
+	}
+	if ds.Auth.Type == "api_key" && ds.Auth.APIKey != "" {
+		ds.Auth.APIKey = "***"
+	}
+	if ds.Auth.Type == "oauth" && ds.Auth.ClientSecret != "" {
+		ds.Auth.ClientSecret = "***"
+	}
+}
+
+// validateAuthForStore normalizes and validates a downstream's auth config,
+// defaulting a nil/empty type to api_key and rejecting an invalid oauth block.
+// It mutates the pointer in place so the validated value is what gets stored.
+func validateAuthForStore(auth *config.DownstreamAuthCfg) error {
+	if auth == nil {
+		return nil // CreateDownstream tolerates nil; the store defaults it.
+	}
+	if auth.Type == "" {
+		auth.Type = "api_key"
+	}
+	if auth.Type == "oauth" {
+		if _, err := oauth.Normalize(*auth, http.DefaultClient); err != nil {
+			return err
+		}
+	}
+	// The transient migration field is never persisted via the API.
+	auth.OAuthProvider = ""
+	return nil
+}
 func (r *Router) handleDownstreamByID(w http.ResponseWriter, req *http.Request) {
 	suffix := strings.TrimPrefix(req.URL.Path, "/api/downstreams/")
 
@@ -120,6 +157,33 @@ func (r *Router) handleDownstreamByID(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		r.handleDownstreamFetchModels(w, req, id)
+	case subResource == "oauth":
+		// /api/downstreams/{id}/oauth[/start]
+		switch {
+		case modelID == "":
+			// DELETE /api/downstreams/{id}/oauth (disconnect)
+			if req.Method != http.MethodDelete {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			r.handleOAuthDisconnect(w, req, id)
+		case modelID == "start":
+			// POST /api/downstreams/{id}/oauth/start
+			if req.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			r.handleOAuthStart(w, req, id)
+		default:
+			http.NotFound(w, req)
+		}
+	case subResource == "oauth-status":
+		// GET /api/downstreams/{id}/oauth-status
+		if req.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		r.handleOAuthStatus(w, req, id)
 	case subResource == "":
 		// Direct downstream operations: /{id}
 		r.handleDownstreamByIDDirect(w, req, id)
@@ -141,8 +205,8 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 		// The admin web UI uses this to populate the "Reveal" button in the
 		// downstream detail pane; the endpoint is admin-only (auth-protected)
 		// so revealing the key here is safe.
-		if req.URL.Query().Get("reveal") != "1" && ds.APIKey != "" {
-			ds.APIKey = "***"
+		if req.URL.Query().Get("reveal") != "1" {
+			maskDownstreamAPIKey(ds)
 		}
 		writeJSON(w, http.StatusOK, ds)
 
@@ -150,10 +214,10 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 		var patch struct {
 			Name           *string            `json:"name"`
 			BaseURL        *string            `json:"base_url"`
-			APIKey         *string            `json:"api_key"`
 			ApiFormats     *[]string          `json:"api_formats"`
 			OutputModelIDs *[]string          `json:"output_model_ids"`
 			FormatURLs     *map[string]string `json:"format_urls"`
+			Auth           *config.DownstreamAuthCfg `json:"auth"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -173,9 +237,6 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 		}
 		if patch.BaseURL != nil {
 			existing.BaseURL = *patch.BaseURL
-		}
-		if patch.APIKey != nil && *patch.APIKey != "" && *patch.APIKey != "***" {
-			existing.APIKey = *patch.APIKey
 		}
 		if patch.ApiFormats != nil {
 			existing.ApiFormats = *patch.ApiFormats
@@ -197,6 +258,29 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			existing.FormatURLs = *patch.FormatURLs
 		}
 
+		// Auth: a non-nil Auth replaces the whole auth block. Validate it (and
+		// handle the oauth→api_key token teardown) before persisting.
+		if patch.Auth != nil {
+			if err := validateAuthForStore(patch.Auth); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			// Switching from oauth to api_key clears the stored token so the
+			// downstream stops resolving a (now irrelevant) OAuth token.
+			if patch.Auth.Type == "api_key" && existing.IsOAuth() {
+				r.clearOAuthFor(id)
+			}
+			// Preserve any real key when the client echoes back the mask.
+			if patch.Auth.Type == "api_key" && patch.Auth.APIKey == "***" && existing.Auth != nil && existing.Auth.APIKey != "" {
+				patch.Auth.APIKey = existing.Auth.APIKey
+			}
+			// Same for an oauth client_secret echoed back masked.
+			if patch.Auth.Type == "oauth" && patch.Auth.ClientSecret == "***" && existing.Auth != nil && existing.Auth.ClientSecret != "" {
+				patch.Auth.ClientSecret = existing.Auth.ClientSecret
+			}
+			existing.Auth = patch.Auth
+		}
+
 		if existing.BaseURL != "" {
 			if err := proxy.ValidateOutboundURL(existing.BaseURL); err != nil {
 				writeError(w, http.StatusBadRequest, "invalid base_url: "+err.Error())
@@ -209,9 +293,7 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			return
 		}
 		r.requestConfigWrite()
-		if existing.APIKey != "" {
-			existing.APIKey = "***"
-		}
+		maskDownstreamAPIKey(existing)
 		writeJSONWithWarning(w, http.StatusOK, *existing, proxy.IsBareIP(existing.BaseURL))
 
 	case http.MethodDelete:
@@ -267,11 +349,76 @@ func (r *Router) handleDownstreamModels(w http.ResponseWriter, req *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if ds.APIKey != "" {
-		ds.APIKey = "***"
-	}
+	maskDownstreamAPIKey(ds)
 	r.requestConfigWrite()
 	writeJSON(w, http.StatusOK, ds)
+}
+
+// --- OAuth handlers ---
+
+// clearOAuthFor removes a downstream's OAuth token and reverts it to
+// API-key mode. Best-effort: used when the user switches back from OAuth.
+func (r *Router) clearOAuthFor(id string) {
+	if r.oauthMgr == nil {
+		return
+	}
+	_ = r.oauthMgr.Disconnect(id)
+}
+
+// handleOAuthStart handles POST /api/downstreams/{id}/oauth/start.
+// The downstream's own auth config (set via PUT) is the source of the
+// OAuth recipe, so no provider name is needed in the body.
+func (r *Router) handleOAuthStart(w http.ResponseWriter, req *http.Request, id string) {
+	if r.oauthMgr == nil {
+		writeError(w, http.StatusBadRequest, "OAuth support is not enabled on this daemon")
+		return
+	}
+	info, err := r.oauthMgr.StartLogin(id)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+// handleOAuthStatus handles GET /api/downstreams/{id}/oauth-status.
+func (r *Router) handleOAuthStatus(w http.ResponseWriter, req *http.Request, id string) {
+	if r.oauthMgr == nil {
+		writeJSON(w, http.StatusOK, oauth.StatusInfo{Status: "idle"})
+		return
+	}
+	info, err := r.oauthMgr.Status(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+// handleOAuthDisconnect handles DELETE /api/downstreams/{id}/oauth.
+func (r *Router) handleOAuthDisconnect(w http.ResponseWriter, req *http.Request, id string) {
+	if r.oauthMgr == nil {
+		writeError(w, http.StatusBadRequest, "OAuth support is not enabled on this daemon")
+		return
+	}
+	if err := r.oauthMgr.Disconnect(id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	r.requestConfigWrite()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+}
+
+// handleOAuthCallback serves the loopback OAuth redirect for the
+// auth_code flow. Registered as a public (unauthenticated) route because
+// the provider redirects the user's browser here without any Tresor
+// session cookie; the PKCE state parameter is the security check.
+func (r *Router) handleOAuthCallback(w http.ResponseWriter, req *http.Request) {
+	if r.oauthMgr == nil {
+		http.Error(w, "OAuth support is not enabled on this daemon", http.StatusBadRequest)
+		return
+	}
+	r.oauthMgr.HandleCallback(w, req)
 }
 
 // handleDownstreamFetchModels handles POST /api/downstreams/{id}/fetch-models.
@@ -308,7 +455,17 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 			baseURL = u
 		}
 	}
-	return fetchModelsByCreds(baseURL, ds.APIKey, ds.ApiFormats)
+	if ds.IsOAuth() {
+		if r.oauthMgr == nil {
+			return nil, fmt.Errorf("OAuth support is not enabled on this daemon")
+		}
+		token, _, err := r.oauthMgr.ResolveValidToken(ds.ID)
+		if err != nil {
+			return nil, fmt.Errorf("provider not connected — finish the OAuth login in the Downstreams tab")
+		}
+		return fetchModelsByCreds(baseURL, token, ds.ApiFormats)
+	}
+	return fetchModelsByCreds(baseURL, ds.EffectiveAPIKey(), ds.ApiFormats)
 }
 
 // fetchModelsByCreds fetches models given raw credentials (used for both existing

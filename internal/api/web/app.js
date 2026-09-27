@@ -1049,11 +1049,129 @@ function renderFormatURLInputs(ds) {
     }).join('');
 }
 
+// --- Inline OAuth editor ---
+// The OAuth recipe lives entirely on the downstream (in ds.auth), so the UI
+// edits it in place — no separate provider registry. Each field is a
+// data-oauth-field input; on blur/change the full auth block is rebuilt from
+// the visible fields and saved.
+
+function oauthFieldRow(field, label, value, placeholder, type) {
+    type = type || 'text';
+    return `
+        <div class="oauth-field-row">
+            <label class="oauth-field-label">${esc(label)}</label>
+            <input type="${type}" class="oauth-field" data-oauth-field="${esc(field)}"
+                   value="${esc(value || '')}" placeholder="${esc(placeholder || '')}" autocomplete="off">
+        </div>`;
+}
+
+// Dynamic key→value block (extra headers / extra authorize params), styled
+// like the extra-headers block. role and prefix distinguish the two blocks.
+function oauthKVBlock(role, prefix, title, addAction, keyPlaceholder, valuePlaceholder, entries) {
+    const rows = Object.entries(entries || {}).map(([k, v]) => `
+        <div class="oauth-header-row">
+            <input type="text" class="oauth-${prefix}-key" placeholder="${esc(keyPlaceholder)}" value="${esc(k)}" autocomplete="off">
+            <input type="text" class="oauth-${prefix}-value" placeholder="${esc(valuePlaceholder)}" value="${esc(v)}" autocomplete="off">
+            <button type="button" class="oauth-${prefix}-remove" title="Remove">×</button>
+        </div>`).join('');
+    return `
+        <div class="oauth-headers-block">
+            <div class="oauth-headers-head">
+                <label>${esc(title)}</label>
+                <button type="button" class="btn-small" data-action="${esc(addAction)}">＋ Add</button>
+            </div>
+            <div class="oauth-headers-list" data-oauth-role="${esc(role)}">
+                ${rows || `<div class="oauth-headers-empty">None</div>`}
+            </div>
+        </div>`;
+}
+
+// Collect key→value rows of one dynamic block into a plain object.
+function collectOAuthKV(root, role, prefix) {
+    const out = {};
+    root.querySelectorAll(`[data-oauth-role="${role}"] .oauth-header-row`).forEach(row => {
+        const k = row.querySelector(`.oauth-${prefix}-key`).value.trim();
+        const v = row.querySelector(`.oauth-${prefix}-value`).value.trim();
+        if (k) out[k] = v;
+    });
+    return out;
+}
+
+function renderOAuthEditor(auth) {
+    const flow = auth.flow || 'auth_code';
+    const rows = [];
+    rows.push(`
+        <div class="oauth-field-row">
+            <label class="oauth-field-label">Flow</label>
+            <select class="oauth-flow-select" data-oauth-field="flow">
+                <option value="auth_code"${flow === 'auth_code' ? ' selected' : ''}>Auth Code + PKCE (loopback)</option>
+                <option value="device"${flow === 'device' ? ' selected' : ''}>Device Code (RFC 8628)</option>
+            </select>
+        </div>`);
+
+    if (flow === 'auth_code') {
+        rows.push(oauthFieldRow('discovery_url', 'Discovery URL', auth.discovery_url, 'https://provider/.well-known/openid-configuration', 'url'));
+        rows.push(oauthFieldRow('authorization_url', 'Authorization URL', auth.authorization_url, 'https://provider/oauth/authorize', 'url'));
+        rows.push(oauthFieldRow('token_url', 'Token URL', auth.token_url, 'https://provider/oauth/token', 'url'));
+    } else {
+        rows.push(oauthFieldRow('device_auth_url', 'Device Auth URL', auth.device_auth_url, 'https://provider/oauth/device', 'url'));
+        rows.push(oauthFieldRow('device_token_url', 'Device Token URL', auth.device_token_url, 'https://provider/oauth/token', 'url'));
+        rows.push(oauthFieldRow('device_verify_url', 'Verify URL', auth.device_verify_url, 'https://provider/activate', 'url'));
+        rows.push(oauthFieldRow('device_redirect_uri', 'Device Redirect URI', auth.device_redirect_uri, 'optional', 'url'));
+    }
+
+    rows.push(oauthFieldRow('client_id', 'Client ID', auth.client_id, 'optional for public clients'));
+    if (flow === 'auth_code') {
+        rows.push(oauthFieldRow('client_secret', 'Client Secret', auth.client_secret, 'confidential clients only — sent as Basic auth on token requests', 'password'));
+    }
+    rows.push(oauthFieldRow('scopes', 'Scopes', auth.scopes, 'space-separated, optional'));
+
+    if (flow === 'auth_code') {
+        // Extra query params appended to the authorize URL (e.g. Codex's
+        // codex_cli_simplified_flow=true).
+        rows.push(oauthKVBlock('oauth-auth-params', 'auth-param', 'Extra Authorize Params', 'oauth-add-auth-param', 'Param name', 'Value', auth.extra_authorize_params));
+    }
+
+    // Extra static headers injected onto every forwarded LLM request.
+    rows.push(oauthKVBlock('oauth-headers', 'header', 'Extra Headers', 'oauth-add-header', 'Header name', 'Value', auth.extra_headers));
+
+    return rows.join('');
+}
+
+// Build the complete oauth auth block from the currently-visible OAuth editor
+// fields in the detail pane, plus the existing api_key (preserved so a later
+// switch back to API-key auth doesn't lose the stored key).
+function collectOAuthAuth(root) {
+    const auth = { type: 'oauth', flow: 'auth_code' };
+    root.querySelectorAll('[data-oauth-field]').forEach(el => {
+        const key = el.dataset.oauthField;
+        if (key === 'flow') { auth.flow = el.value; return; }
+        const v = el.value.trim();
+        if (v) auth[key] = v;
+    });
+    if (!auth.flow) auth.flow = 'auth_code';
+    // Extra headers
+    const headers = collectOAuthKV(root, 'oauth-headers', 'header');
+    if (Object.keys(headers).length > 0) auth.extra_headers = headers;
+    // Extra authorize-URL params (auth_code flow only)
+    const authParams = collectOAuthKV(root, 'oauth-auth-params', 'auth-param');
+    if (Object.keys(authParams).length > 0) auth.extra_authorize_params = authParams;
+    // Preserve a previously-saved API key so toggling back to API-key auth
+    // does not wipe it.
+    if (_currentDownstream && _currentDownstream.auth && _currentDownstream.auth.api_key) {
+        auth.api_key = _currentDownstream.auth.api_key;
+    }
+    return auth;
+}
+
+
 function renderDownstreamDetail(ds) {
     const formats = ds.api_formats || [];
     const models = ds.output_model_ids || [];
-    // ponytail: `hasKey` is implicit — non-empty api_key means there's a saved key.
-    const hasKey = !!(ds.api_key && ds.api_key.length > 0);
+    const auth = ds.auth || { type: 'api_key' };
+    const hasKey = !!(auth.api_key && auth.api_key.length > 0);
+    const isOAuth = auth.type === 'oauth';
+    const oauthState = (window.__oauthStatusCache || {})[ds.id] || null;
 
     document.getElementById('downstreams-detail').innerHTML = `
         <div class="detail-header">
@@ -1072,11 +1190,28 @@ function renderDownstreamDetail(ds) {
             </div>
         </div>
         <div class="detail-section">
-            <label>API Key</label>
+            <label>Authentication</label>
+            <div class="auth-method-toggle">
+                <button type="button" class="auth-method-btn${!isOAuth ? ' active' : ''}" data-action="auth-method" data-method="api_key">API Key</button>
+                <button type="button" class="auth-method-btn${isOAuth ? ' active' : ''}" data-action="auth-method" data-method="oauth">OAuth</button>
+            </div>
+            ${isOAuth
+        ? `
+            <div class="oauth-panel">
+                ${renderOAuthEditor(auth)}
+                <div class="oauth-panel-row oauth-actions-row">
+                    <button type="button" class="btn-small btn-primary" data-action="oauth-connect" ${oauthState && oauthState.status === 'pending' ? 'disabled' : ''}>Connect</button>
+                    ${oauthState && oauthState.connected ? '<button type="button" class="btn-small" data-action="oauth-disconnect">Disconnect</button>' : ''}
+                </div>
+                <div class="oauth-status-line" id="oauth-status-line">
+                    ${renderOAuthStatusLine(oauthState)}
+                </div>
+            </div>`
+        : `
             <div class="detail-edit-key-wrap">
                 <input type="password" class="detail-edit-key" value="" placeholder="${hasKey ? '•••••••••••••••• (saved — type to replace)' : 'sk-…'}" autocomplete="off">
                 <button type="button" class="eye-toggle" data-action="toggle-key" title="Reveal / hide the saved key" aria-label="Toggle key visibility">👁</button>
-            </div>
+            </div>`}
         </div>
         <div class="detail-section">
             <label>API Host</label>
@@ -1112,6 +1247,126 @@ function renderDownstreamDetail(ds) {
     // so the next reveal doesn't get blocked by a leftover `justRevealed` from a
     // prior render.
     _keyRevealed = false;
+    if (isOAuth) refreshOAuthStatus(ds.id, { silent: true });
+}
+
+// --- OAuth connect flow ---
+
+let _oauthPollTimers = {};
+
+function renderOAuthStatusLine(st) {
+    if (!st) return '';
+    if (st.connected) {
+        let exp = '';
+        if (st.expires_at) {
+            const mins = Math.max(0, Math.round((new Date(st.expires_at) - Date.now()) / 60000));
+            exp = ` (token refreshes in ~${mins} min)`;
+        }
+        const flowLabel = st.flow === 'device' ? ' via device code' : '';
+        return `<span class="oauth-status ok">Connected${flowLabel}${exp}</span>`;
+    }
+    if (st.status === 'pending') {
+        return '<span class="oauth-status pending">Waiting for you to complete the login in the other tab…</span>';
+    }
+    if (st.status === 'failed') {
+        return `<span class="oauth-status error">${esc(st.error || 'Login failed — click Connect to retry')}</span>`;
+    }
+    if (st.needs_login) {
+        return '<span class="oauth-status error">Token expired — click Connect to sign in again</span>';
+    }
+    return '';
+}
+
+async function refreshOAuthStatus(id, opts) {
+    const { silent } = opts || {};
+    try {
+        const st = await api('/downstreams/' + encodeURIComponent(id) + '/oauth-status');
+        window.__oauthStatusCache = window.__oauthStatusCache || {};
+        window.__oauthStatusCache[id] = st;
+        const line = document.getElementById('oauth-status-line');
+        if (line) line.innerHTML = renderOAuthStatusLine(st);
+        // Drive the device-code modal if it is open for this downstream.
+        const deviceModal = document.getElementById('oauth-device-modal');
+        if (deviceModal && !deviceModal.classList.contains('hidden') && deviceModal.dataset.dsId === id) {
+            const dstat = deviceModal.querySelector('#oauth-device-status');
+            if (dstat) dstat.textContent = st.status === 'failed' ? (st.error || 'Login failed') : 'Waiting for authorization…';
+            if (st.connected || st.status === 'failed') {
+                if (_oauthPollTimers[id]) { clearInterval(_oauthPollTimers[id]); delete _oauthPollTimers[id]; }
+                deviceModal.classList.add('hidden');
+                if (st.connected) showToast('OAuth connected');
+                if (_currentDownstream && _currentDownstream.id === id) {
+                    const full = await api('/downstreams/' + encodeURIComponent(id));
+                    Object.assign(_currentDownstream, full);
+                    refreshDownstreamDetail();
+                }
+                return st;
+            }
+        }
+        if (st.status !== 'pending' && _oauthPollTimers[id]) {
+            clearInterval(_oauthPollTimers[id]);
+            delete _oauthPollTimers[id];
+            // Re-render so Connect/Disconnect buttons re-enable and the
+            // downstream list refreshes.
+            if (_currentDownstream && _currentDownstream.id === id) {
+                const full = await api('/downstreams/' + encodeURIComponent(id));
+                Object.assign(_currentDownstream, full);
+                refreshDownstreamDetail();
+                if (!silent && st.connected) showToast('OAuth connected');
+            }
+        }
+        return st;
+    } catch (err) {
+        if (!silent) showToast('Status check failed: ' + err.message);
+        return null;
+    }
+}
+
+async function startOAuthConnect(id) {
+    try {
+        const info = await api('/downstreams/' + encodeURIComponent(id) + '/oauth/start', {
+            method: 'POST',
+            body: JSON.stringify({}),
+        });
+        if (info.authorize_url) {
+            // auth_code flow: open the provider's consent page in a new tab;
+            // the provider redirects back to our callback which stores the
+            // token. Poll status until it lands.
+            window.open(info.authorize_url, '_blank');
+            showToast('Complete the login in the opened tab');
+        } else if (info.user_code) {
+            // device flow: show the code modal and poll until authorized.
+            showDeviceLoginModal(info.verification_url, info.user_code, id);
+        }
+        // In both cases: poll the status endpoint until the login settles.
+        if (_oauthPollTimers[id]) clearInterval(_oauthPollTimers[id]);
+        _oauthPollTimers[id] = setInterval(() => refreshOAuthStatus(id, { silent: true }), 2000);
+        refreshOAuthStatus(id, { silent: true });
+    } catch (err) {
+        showToast('Connect failed: ' + err.message);
+    }
+}
+
+function showDeviceLoginModal(verifyUrl, userCode, dsId) {
+    const modal = document.getElementById('oauth-device-modal');
+    if (!modal) return;
+    modal.querySelector('.device-verify-url').textContent = verifyUrl || '';
+    modal.querySelector('.device-code').textContent = userCode || '';
+    modal.dataset.dsId = dsId;
+    modal.classList.remove('hidden');
+}
+
+async function disconnectOAuth(id) {
+    if (!confirm('Disconnect this provider? It will fall back to API-key auth.')) return;
+    try {
+        await api('/downstreams/' + encodeURIComponent(id) + '/oauth', { method: 'DELETE' });
+        if (_oauthPollTimers[id]) { clearInterval(_oauthPollTimers[id]); delete _oauthPollTimers[id]; }
+        const full = await api('/downstreams/' + encodeURIComponent(id));
+        if (_currentDownstream && _currentDownstream.id === id) Object.assign(_currentDownstream, full);
+        showToast('Disconnected');
+        refreshDownstreamDetail();
+    } catch (err) {
+        showToast('Disconnect failed: ' + err.message);
+    }
 }
 
 // ponytail: one delegated listener replaces per-render attach. Reads the active
@@ -1186,9 +1441,10 @@ function refreshDownstreamDetail() {
                 return;
             }
             const newKey = t.value;
-            await autoSaveDownstreamField(_currentDownstream.id, { api_key: newKey }, (err) => {
+            const auth = Object.assign({}, _currentDownstream.auth, { type: 'api_key', api_key: newKey });
+            await autoSaveDownstreamField(_currentDownstream.id, { auth: auth }, (err) => {
                 if (err) { t.value = ''; return; }
-                _currentDownstream.api_key = newKey;
+                if (_currentDownstream.auth) _currentDownstream.auth.api_key = newKey;
                 t.value = '';
                 t.type = 'password';
                 // Update the placeholder immediately (was only refreshed on
@@ -1198,6 +1454,13 @@ function refreshDownstreamDetail() {
                 if (eye) { eye.classList.remove('shown'); eye.textContent = '👁'; }
                 _keyRevealed = false;
             });
+        } else if (t.classList.contains('oauth-field') || t.classList.contains('oauth-header-key') || t.classList.contains('oauth-header-value') || t.classList.contains('oauth-auth-param-key') || t.classList.contains('oauth-auth-param-value')) {
+            // Any OAuth recipe field: rebuild the whole auth block and save.
+            const auth = collectOAuthAuth(root);
+            await autoSaveDownstreamField(_currentDownstream.id, { auth: auth }, (err) => {
+                if (err) return;
+                if (_currentDownstream.auth) Object.assign(_currentDownstream.auth, auth);
+            });
         }
     }, true);
 
@@ -1205,7 +1468,7 @@ function refreshDownstreamDetail() {
     root.addEventListener('keydown', (e) => {
         if (e.key !== 'Enter') return;
         const t = e.target;
-        if (t.matches('.detail-edit-name, .detail-edit-url, .detail-edit-key, .format-url-input, .add-model-input')) {
+        if (t.matches('.detail-edit-name, .detail-edit-url, .detail-edit-key, .format-url-input, .add-model-input, .oauth-field')) {
             e.preventDefault();
             t.blur();
         }
@@ -1216,6 +1479,18 @@ function refreshDownstreamDetail() {
     root.addEventListener('change', async (e) => {
         if (!_currentDownstream) return;
         const t = e.target;
+        if (t.matches('.oauth-flow-select')) {
+            // Switching flow swaps the endpoint fields. The required URLs for
+            // the new flow are not filled in yet, so don't save (the server
+            // would 400 on an incomplete recipe) — just re-render locally and
+            // let the per-field blur save once the user completes the fields.
+            const auth = collectOAuthAuth(root);
+            auth.flow = t.value;
+            if (_currentDownstream.auth) Object.assign(_currentDownstream.auth, auth);
+            refreshDownstreamDetail();
+            selectSidebarItem(_currentDownstream.id);
+            return;
+        }
         if (t.matches('.format-checkboxes input[type="checkbox"]')) {
             const checked = Array.from(root.querySelectorAll('.format-checkboxes input[type="checkbox"]:checked'), c => c.value);
             await autoSaveDownstreamField(_currentDownstream.id, { api_formats: checked }, (err) => {
@@ -1241,6 +1516,73 @@ function refreshDownstreamDetail() {
         const id = _currentDownstream.id;
 
         if (action === 'delete') { deleteDownstream(id); return; }
+        if (action === 'auth-method') {
+            const method = btn.dataset.method;
+            const currentType = (_currentDownstream.auth && _currentDownstream.auth.type) || 'api_key';
+            if (method === currentType) return;
+            let auth;
+            if (method === 'oauth') {
+                // Keep the existing recipe if the user toggled off and back on;
+                // otherwise show a fresh skeleton to fill in. Not saved yet —
+                // the recipe persists once the required fields blur.
+                auth = (_currentDownstream.auth && _currentDownstream.auth.type === 'oauth')
+                    ? _currentDownstream.auth : { type: 'oauth', flow: 'auth_code' };
+            } else {
+                // Show the key input; the stored key (if any) is preserved and
+                // only saved when the user actually types and blurs.
+                auth = { type: 'api_key', api_key: (_currentDownstream.auth || {}).api_key || '' };
+            }
+            // Re-render locally only. The server receives complete recipes via
+            // per-field blur (oauth) or key edit (api_key), never a bare skeleton.
+            _currentDownstream.auth = auth;
+            refreshDownstreamDetail();
+            selectSidebarItem(id);
+            return;
+        }
+        if (action === 'oauth-connect') {
+            startOAuthConnect(id);
+            return;
+        }
+        // Dynamic key→value blocks (extra headers / extra authorize params).
+        const oauthKV = {
+            'oauth-add-header':       { role: 'oauth-headers',      prefix: 'header',     keyPh: 'Header name' },
+            'oauth-add-auth-param':   { role: 'oauth-auth-params',  prefix: 'auth-param', keyPh: 'Param name' },
+        };
+        if (oauthKV[action]) {
+            const { role, prefix, keyPh } = oauthKV[action];
+            const list = root.querySelector(`[data-oauth-role="${role}"]`);
+            if (list) {
+                const empty = list.querySelector('.oauth-headers-empty');
+                if (empty) empty.remove();
+                const row = document.createElement('div');
+                row.className = 'oauth-header-row';
+                row.innerHTML = `<input type="text" class="oauth-${prefix}-key" placeholder="${esc(keyPh)}" autocomplete="off"><input type="text" class="oauth-${prefix}-value" placeholder="Value" autocomplete="off"><button type="button" class="oauth-${prefix}-remove" title="Remove">×</button>`;
+                list.appendChild(row);
+                row.querySelector(`.oauth-${prefix}-key`).focus();
+            }
+            return;
+        }
+        if (action === 'oauth-header-remove' || action === 'oauth-auth-param-remove') {
+            const role = action === 'oauth-header-remove' ? 'oauth-headers' : 'oauth-auth-params';
+            // Both blocks use the .oauth-header-row row class; the button's
+            // parent is the row.
+            const elRow = btn.parentElement;
+            if (elRow) {
+                elRow.remove();
+                const list = root.querySelector(`[data-oauth-role="${role}"]`);
+                if (list && !list.querySelector('div')) {
+                    list.innerHTML = '<div class="oauth-headers-empty">None</div>';
+                }
+            }
+            // Save after removal.
+            const auth = collectOAuthAuth(root);
+            await autoSaveDownstreamField(id, { auth: auth }, (err) => {
+                if (err) return;
+                if (_currentDownstream.auth) Object.assign(_currentDownstream.auth, auth);
+            });
+            return;
+        }
+        if (action === 'oauth-disconnect') { disconnectOAuth(id); return; }
         if (action === 'fetch-models') { fetchDownstreamModels(id); return; }
         if (action === 'add-model') {
             const row = root.querySelector('[data-role="add-model-row"]');
@@ -1284,7 +1626,7 @@ function refreshDownstreamDetail() {
                 _keyRevealed = false;
                 return;
             }
-            if (!_currentDownstream.api_key) {
+            if (!(_currentDownstream.auth && _currentDownstream.auth.api_key)) {
                 showToast('No API key set yet — type one to add');
                 keyInput.focus();
                 return;
@@ -1341,7 +1683,7 @@ async function autoSaveDownstreamField(id, patch, cb) {
 async function revealApiKey(id) {
     try {
         const full = await api('/downstreams/' + encodeURIComponent(id) + '?reveal=1');
-        return full.api_key || '';
+        return (full.auth && full.auth.api_key) || '';
     } catch (err) {
         showToast('Reveal failed: ' + err.message);
         return '';
@@ -1526,7 +1868,7 @@ async function createNewDownstream() {
             body: JSON.stringify({
                 name: 'New Provider',
                 base_url: 'https://',
-                api_key: '',
+                auth: { type: 'api_key', api_key: '' },
                 api_formats: [],
                 output_model_ids: [],
                 format_urls: {},
@@ -1589,6 +1931,13 @@ function onModalHidden(modal) {
         // modals so their model pickers reflect the freshly-added model
         // IDs. Without this, the alias user has to reload the page.
         loadDownstreamsForAliasSelect().then(refreshOpenAliasModals);
+    } else if (modal.id === 'oauth-device-modal') {
+        // User dismissed the device-code modal — stop polling this login.
+        const dsId = modal.dataset.dsId;
+        if (dsId && _oauthPollTimers[dsId]) {
+            clearInterval(_oauthPollTimers[dsId]);
+            delete _oauthPollTimers[dsId];
+        }
     } else if (modal.id === 'alias-modal' || modal.id === 'new-group-modal') {
         // Drop tracking entries for this modal so we don't refresh a
         // closed dialog. Collect first to avoid mutating-while-iterating.

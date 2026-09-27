@@ -101,8 +101,8 @@ aliases:
 	if cfg.Downstreams[0].ID != "my-provider" {
 		t.Fatalf("expected downstream id my-provider, got %q", cfg.Downstreams[0].ID)
 	}
-	if cfg.Downstreams[0].APIKey != "sk-test-key" {
-		t.Fatalf("expected api_key sk-test-key, got %q", cfg.Downstreams[0].APIKey)
+	if cfg.Downstreams[0].Auth == nil || cfg.Downstreams[0].Auth.APIKey != "sk-test-key" {
+		t.Fatalf("expected legacy api_key folded into Auth, got %+v", cfg.Downstreams[0].Auth)
 	}
 	if len(cfg.Downstreams[0].OutputModelIDs) != 2 {
 		t.Fatalf("expected 2 output model IDs, got %d", len(cfg.Downstreams[0].OutputModelIDs))

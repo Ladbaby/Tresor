@@ -68,6 +68,12 @@ type Engine struct {
 	// content (e.g., empty choices, no text blocks).
 	retryOnEmpty bool
 
+	// tokenManager resolves valid OAuth access tokens for downstreams that
+	// use OAuth auth (downstreams.auth_method = "oauth"). Nil when no OAuth
+	// manager is wired (tests, or a config with no oauth_providers).
+	tokenMu     sync.RWMutex
+	tokenManager TokenResolver
+
 	// statsBufMu guards statsBuf. The buffer accumulates per-request
 	// usage_stats entries that the background flusher drains every
 	// statsFlushInterval (default 60s). This collapses many small writes
@@ -253,6 +259,21 @@ func (e *Engine) SetPayloadStore(s *inspect.Store) {
 // returns an empty response.
 func (e *Engine) SetRetryOnEmpty(enabled bool) {
 	e.retryOnEmpty = enabled
+}
+
+// SetTokenManager wires the OAuth token resolver. Pass nil to disable OAuth
+// support.
+func (e *Engine) SetTokenManager(m TokenResolver) {
+	e.tokenMu.Lock()
+	e.tokenManager = m
+	e.tokenMu.Unlock()
+}
+
+// getTokenManager returns the wired OAuth token resolver (nil if none).
+func (e *Engine) getTokenManager() TokenResolver {
+	e.tokenMu.RLock()
+	defer e.tokenMu.RUnlock()
+	return e.tokenManager
 }
 
 // isResponseEmpty checks if a raw upstream response body contains no useful
@@ -842,16 +863,40 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// Populate downstream info and build pipeline context
 	entry.DownstreamID = result.ds.ID
 	entry.DownstreamName = result.ds.Name
+	isOAuth := result.ds.IsOAuth()
+	dsCopy := &Downstream{
+		ID:         result.ds.ID,
+		Name:       result.ds.Name,
+		BaseURL:    result.ds.BaseURL,
+		APIKey:     result.ds.EffectiveAPIKey(),
+		ApiFormats: result.ds.ApiFormats,
+		FormatURLs: result.ds.FormatURLs,
+		Auth:       result.ds.Auth,
+	}
+	// OAuth downstreams authenticate with a managed token instead of a
+	// static API key. Resolve a currently-valid token (refreshing when
+	// close to expiry) and substitute it for the API key so every existing
+	// auth path (forwardRequest + transformers) works unchanged.
 	ctx := &PipelineContext{
-		TargetDownstream: &Downstream{
-			ID:           result.ds.ID,
-			Name:         result.ds.Name,
-			BaseURL:      result.ds.BaseURL,
-			APIKey:       result.ds.APIKey,
-			ApiFormats:   result.ds.ApiFormats,
-			FormatURLs:   result.ds.FormatURLs,
-		},
-		Variables: make(map[string]interface{}),
+		TargetDownstream: dsCopy,
+		Variables:        make(map[string]interface{}),
+	}
+	if isOAuth {
+		tm := e.getTokenManager()
+		if tm == nil {
+			entry.Duration = DurationMs(time.Since(start))
+			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusUnauthorized, "downstream " + result.ds.ID + " uses oauth but no oauth manager is configured", "provider is configured for OAuth but the daemon has no OAuth support enabled", "oauth not configured", nil})
+			return
+		}
+		token, extraHeaders, terr := tm.ResolveValidToken(result.ds.ID)
+		if terr != nil {
+			msg := "provider not connected — finish the OAuth login in the Tresor dashboard (Downstreams tab)"
+			entry.Duration = DurationMs(time.Since(start))
+			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusUnauthorized, msg, msg, "oauth not connected", terr})
+			return
+		}
+		dsCopy.APIKey = token
+		ctx.OAuthExtraHeaders = extraHeaders
 	}
 
 	// Determine max retries (3 when retryOnEmpty enabled, 0 otherwise)
@@ -1899,6 +1944,12 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 				forwardedReq.Header.Set("Authorization", "Bearer "+ctx.TargetDownstream.APIKey)
 			}
 		}
+	}
+	// Apply provider-specific extra headers (e.g. ChatGPT "originator").
+	// These do not affect auth selection above; they are additive metadata
+	// the OAuth provider requires on LLM requests.
+	for k, v := range ctx.OAuthExtraHeaders {
+		forwardedReq.Header.Set(k, v)
 	}
 	forwardedReq.Header.Set("Host", parsedURL.Host)
 	// Ask the downstream for an uncompressed response. We disable compression

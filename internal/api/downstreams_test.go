@@ -64,7 +64,7 @@ func TestCreateDownstream_Success(t *testing.T) {
 	body := map[string]interface{}{
 		"name":     "test-provider",
 		"base_url": "https://api.test.com",
-		"api_key":  "sk-test-key",
+		"auth":     map[string]interface{}{"type": "api_key", "api_key": "sk-test-key"},
 	}
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
@@ -81,8 +81,8 @@ func TestCreateDownstream_Success(t *testing.T) {
 	if ds.Name != "test-provider" {
 		t.Fatalf("expected name 'test-provider', got %q", ds.Name)
 	}
-	if ds.APIKey != "***" {
-		t.Fatalf("expected masked API key, got %q", ds.APIKey)
+	if ds.Auth == nil || ds.Auth.APIKey != "***" {
+		t.Fatalf("expected masked API key, got %+v", ds.Auth)
 	}
 }
 
@@ -219,7 +219,7 @@ func TestListDownstreams_MasksAPIKeys(t *testing.T) {
 	body := map[string]interface{}{
 		"name":     "key-test",
 		"base_url": "https://key.test.com",
-		"api_key":  "sk-real-secret-key",
+		"auth":     map[string]interface{}{"type": "api_key", "api_key": "sk-real-secret-key"},
 	}
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
@@ -238,7 +238,7 @@ func TestListDownstreams_MasksAPIKeys(t *testing.T) {
 	var dsList []store.Downstream
 	json.NewDecoder(w.Body).Decode(&dsList)
 	for _, d := range dsList {
-		if d.APIKey == "sk-real-secret-key" {
+		if d.Auth != nil && d.Auth.APIKey == "sk-real-secret-key" {
 			t.Fatal("API key was not masked in list response")
 		}
 	}
@@ -479,7 +479,7 @@ func TestUpdateDownstream_MaskedAPIKey_Preserves(t *testing.T) {
 	body := map[string]interface{}{
 		"name":     "key-preserve",
 		"base_url": "https://kp.test",
-		"api_key":  "sk-real-secret",
+		"auth":     map[string]interface{}{"type": "api_key", "api_key": "sk-real-secret"},
 	}
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/downstreams", bytes.NewReader(data))
@@ -492,10 +492,11 @@ func TestUpdateDownstream_MaskedAPIKey_Preserves(t *testing.T) {
 	var ds store.Downstream
 	json.NewDecoder(w.Body).Decode(&ds)
 
-	// Web UI semantics: it sends {api_key: "***"} when the user didn't type
-	// a new value but the field was included in the patch body.
+	// Web UI semantics: it sends {auth:{type:api_key, api_key:"***"}} when
+	// the user didn't type a new value but the field was included in the
+	// patch body.
 	if got := patchDownstream(handler, ds.ID, map[string]interface{}{
-		"api_key": "***",
+		"auth": map[string]interface{}{"type": "api_key", "api_key": "***"},
 	}); got != http.StatusOK {
 		t.Fatalf("expected 200, got %d", got)
 	}
@@ -509,8 +510,8 @@ func TestUpdateDownstream_MaskedAPIKey_Preserves(t *testing.T) {
 	}
 	var revealed store.Downstream
 	json.NewDecoder(revealW.Body).Decode(&revealed)
-	if revealed.APIKey != "sk-real-secret" {
-		t.Fatalf("api_key changed despite *** placeholder, got %q", revealed.APIKey)
+	if revealed.Auth == nil || revealed.Auth.APIKey != "sk-real-secret" {
+		t.Fatalf("api_key changed despite *** placeholder, got %+v", revealed.Auth)
 	}
 }
 
@@ -751,7 +752,7 @@ func TestDownstreamFetchModels_MultiFormat_HTTP(t *testing.T) {
 	createBody := map[string]interface{}{
 		"name":        "Multi",
 		"base_url":    upstream.URL,
-		"api_key":     "sk-test",
+		"auth":        map[string]interface{}{"type": "api_key", "api_key": "sk-test"},
 		"api_formats": []string{"openai", "anthropic"},
 	}
 	data, _ := json.Marshal(createBody)

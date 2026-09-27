@@ -15,6 +15,7 @@ import (
 	"tresor/internal/icons"
 	"tresor/internal/inspect"
 	"tresor/internal/middleware"
+	"tresor/internal/oauth"
 	"tresor/internal/store"
 )
 
@@ -39,6 +40,10 @@ type Router struct {
 	iconFetcher  *icons.Fetcher
 	version      string
 	buildTime    string
+
+	// oauthMgr manages OAuth logins/tokens for downstreams. Nil when no
+	// OAuth providers are configured; all oauth routes degrade gracefully.
+	oauthMgr *oauth.Manager
 
 	// Config write debounce: delays YAML write-back to avoid excessive disk I/O
 	// when multiple mutations occur in rapid succession.
@@ -79,6 +84,12 @@ func NewRouter(s *store.Store, eng *engine.Engine, logger *engine.RequestLogger,
 		version:      version,
 		buildTime:    buildTime,
 	}
+}
+
+// SetOAuthManager wires the OAuth token manager after construction (it needs
+// the store, which is already available). Nil disables OAuth support.
+func (r *Router) SetOAuthManager(m *oauth.Manager) {
+	r.oauthMgr = m
 }
 
 // Stop cleans up background goroutines (rate limiter, debounce timer).
@@ -134,6 +145,11 @@ func (r *Router) Handler() http.Handler {
 	// Public icon endpoint — no auth required, hits in <img> tags. Trailing
 	// slash is required so ServeMux dispatches /api/icons/{modelID} here.
 	mux.HandleFunc("/api/icons/", r.handleIcon)
+
+	// Public OAuth loopback callback — the provider redirects the user's
+	// browser here without a Tresor session cookie, so it must bypass auth.
+	// The PKCE state parameter is the security check.
+	mux.HandleFunc("/api/oauth/callback", r.handleOAuthCallback)
 
 	mux.Handle("/api/log_level", r.authMW.Protect(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodGet {
