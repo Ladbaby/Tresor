@@ -2368,6 +2368,12 @@ html[data-theme="light"] form select {
     transform: translateX(20px);
 }
 
+/* Toggle used inside the Rules table — centered in its cell. */
+td .ds-toggle.rule-toggle {
+    display: flex;
+    justify-content: center;
+}
+
 .toast {
     position: fixed;
     bottom: 1.5rem;

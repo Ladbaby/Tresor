@@ -477,10 +477,14 @@ async function loadRules() {
                     <td>${modelDisplay}</td>
                     <td>${matchCell}</td>
                     <td><span class="pipeline-steps">${esc(shortPipeline(r.pipeline_config))}</span></td>
-                    <td><span class="status-badge ${r.is_enabled ? 'status-enabled' : 'status-disabled'}">${r.is_enabled ? 'ON' : 'OFF'}</span></td>
+                    <td>
+                        <label class="ds-toggle rule-toggle" title="${r.is_enabled ? 'Rule is ON — click to disable' : 'Rule is OFF — click to enable'}">
+                            <input type="checkbox" data-action="toggle-rule" data-id="${esc(r.id)}"${r.is_enabled ? ' checked' : ''}>
+                            <span class="ds-toggle-track"></span>
+                        </label>
+                    </td>
                     <td>
                         <button class="btn-small rule-edit-btn" data-action="edit-rule" data-id="${esc(r.id)}">Edit</button>
-                        <button class="btn-small rule-toggle-btn" data-action="toggle-rule" data-id="${esc(r.id)}" data-enabled="${r.is_enabled ? '0' : '1'}">${r.is_enabled ? 'Disable' : 'Enable'}</button>
                         <button class="btn-danger rule-delete-btn" data-action="delete-rule" data-id="${esc(r.id)}">Delete</button>
                     </td>
                 </tr>`;
@@ -2164,12 +2168,12 @@ function makeHelpIcon(tooltip) {
 
 // Event delegation for rule table buttons (replaces inline onclick)
 document.getElementById('rules-body').addEventListener('click', function (e) {
-    const btn = e.target.closest('.rule-edit-btn, .rule-toggle-btn, .rule-delete-btn');
-    if (!btn) return;
-    const action = btn.dataset.action;
-    const id = btn.dataset.id;
+    const el = e.target.closest('[data-action]');
+    if (!el) return;
+    const action = el.dataset.action;
+    const id = el.dataset.id;
     if (action === 'edit-rule') editRule(id);
-    else if (action === 'toggle-rule') toggleRule(id, btn.dataset.enabled === '1');
+    else if (action === 'toggle-rule') toggleRule(id, el.checked);
     else if (action === 'delete-rule') deleteRule(id);
 });
 
