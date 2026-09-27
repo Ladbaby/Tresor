@@ -1907,6 +1907,46 @@ func isStreamRequest(body []byte) bool {
 	return json.Unmarshal(body, &probe) == nil && probe.Stream
 }
 
+// codexFingerprintBody injects the reference client's Codex request fields
+// into a Responses-API request body:
+//   - store: false — opt out of server-side conversation storage.
+//   - include: ["reasoning.encrypted_content"] and prompt_cache_key (set to
+//     the session id) — only added to a body that is actually a Responses
+//     request (one carrying an "input" array), so a Chat-format body is left
+//     apart from store.
+//
+// Only fields the client did not already set are added, and the input is
+// returned unchanged if it is not a JSON object.
+func codexFingerprintBody(body []byte, sessionID string) []byte {
+	var obj map[string]interface{}
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	changed := false
+	if _, ok := obj["store"]; !ok {
+		obj["store"] = false
+		changed = true
+	}
+	if _, hasInput := obj["input"]; hasInput {
+		if _, ok := obj["include"]; !ok {
+			obj["include"] = []interface{}{"reasoning.encrypted_content"}
+			changed = true
+		}
+		if _, ok := obj["prompt_cache_key"]; !ok {
+			obj["prompt_cache_key"] = sessionID
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // forwardRequest sends the (possibly transformed) request to the target downstream.
 // SSRF validation is not applied here — downstreams are admin-configured via auth-protected API.
 // Returns the response and a cancel function; caller must call cancel after consuming resp.Body.
@@ -1958,17 +1998,37 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		return nil, func() {}, fmt.Errorf("parse target URL: %w", err)
 	}
 
-	// For the ChatGPT/Codex backend, zstd-compress the request body to match
-	// the reference client, which compresses the SSE request (the Codex backend
-	// decodes Content-Encoding: zstd on the SSE endpoint). Only stream requests
-	// are compressed — the reference client only ever sends stream:true to the
-	// Codex backend, so a non-stream request is left as plain JSON. On any
-	// compression failure we fall back to sending the body as-is.
+	// ChatGPT/Codex fingerprint: generate one per-request correlation id and
+	// apply the reference client's request shape. The reference client reuses
+	// the same session id for the session-id / x-client-request-id headers and
+	// the prompt_cache_key body field; a fresh UUID per request is the safe
+	// analogue for a stateless gateway (64-char cap, matching prompt_cache_key).
+	var codexSessionID string
+	if ctx.CodexBackend {
+		codexSessionID = uuid.NewString()
+		if len(codexSessionID) > 64 {
+			codexSessionID = codexSessionID[:64]
+		}
+	}
+
+	// For the ChatGPT/Codex backend, apply the reference client's request-body
+	// fingerprint (store:false, include, prompt_cache_key) and then
+	// zstd-compress the stream request body (level 3, matching the reference —
+	// the Codex backend decodes Content-Encoding: zstd on the SSE endpoint).
+	// Only stream requests are compressed — the reference client only ever
+	// sends stream:true to the Codex backend, so a non-stream request is left
+	// as plain JSON. On any compression failure we fall back to sending the
+	// body as-is.
 	outBody := body
-	if ctx.CodexBackend && zstdEncoder != nil && isStreamRequest(body) {
-		compressed := zstdEncoder.EncodeAll(body, nil)
-		if len(compressed) > 0 && len(compressed) < len(body) {
-			outBody = compressed
+	codexCompressed := false
+	if ctx.CodexBackend {
+		outBody = codexFingerprintBody(outBody, codexSessionID)
+		if zstdEncoder != nil && isStreamRequest(outBody) {
+			compressed := zstdEncoder.EncodeAll(outBody, nil)
+			if len(compressed) > 0 && len(compressed) < len(outBody) {
+				outBody = compressed
+				codexCompressed = true
+			}
 		}
 	}
 
@@ -2044,7 +2104,7 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	// ChatGPT/Codex fingerprint: match the reference client's request so the
 	// subscription traffic does not look like an unknown client.
 	if ctx.CodexBackend {
-		if len(outBody) != len(body) {
+		if codexCompressed {
 			// Body was zstd-compressed above.
 			forwardedReq.Header.Set("Content-Encoding", "zstd")
 			// Drop any explicit Content-Length a transformer set to the
@@ -2057,16 +2117,12 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		if forwardedReq.Header.Get("OpenAI-Beta") == "" {
 			forwardedReq.Header.Set("OpenAI-Beta", "responses=experimental")
 		}
-		// Per-request correlation headers. The reference client reuses the
-		// session id for both; a fresh UUID per request is the safe analogue
-		// for a stateless gateway (64-char cap, same as prompt_cache_key).
+		// Per-request correlation headers. The reference client reuses the same
+		// session id for both (and for prompt_cache_key in the body); we do the
+		// same with the id generated above.
 		if forwardedReq.Header.Get("session-id") == "" {
-			sid := uuid.NewString()
-			if len(sid) > 64 {
-				sid = sid[:64]
-			}
-			forwardedReq.Header.Set("session-id", sid)
-			forwardedReq.Header.Set("x-client-request-id", sid)
+			forwardedReq.Header.Set("session-id", codexSessionID)
+			forwardedReq.Header.Set("x-client-request-id", codexSessionID)
 		}
 	}
 

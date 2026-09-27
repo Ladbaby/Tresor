@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -195,13 +196,13 @@ func TestEngine_CodexBackendFingerprint(t *testing.T) {
 	if err := s.SetDownstreamAuth("ds1", &config.DownstreamAuthCfg{Type: "oauth"}); err != nil {
 		t.Fatalf("set auth: %v", err)
 	}
-	addOutputModelIDs(t, s, "ds1", "gpt-4o")
+	addOutputModelIDs(t, s, "ds1", "gpt-5-codex")
 
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryImpl{})
 	eng.SetTokenManager(&codexTokenManager{})
 
-	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"a somewhat long prompt that is repeated enough to be worth compressing repeated repeated repeated repeated repeated"}]}`
+	body := `{"model":"gpt-5-codex","stream":true,"input":[{"role":"user","content":"a somewhat long prompt that is repeated enough to be worth compressing repeated repeated repeated repeated repeated"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
 	w := httptest.NewRecorder()
 	eng.HandleProxy(w, req)
@@ -221,7 +222,7 @@ func TestEngine_CodexBackendFingerprint(t *testing.T) {
 	if gotEncoding != "zstd" {
 		t.Fatalf("content-encoding = %q, want zstd", gotEncoding)
 	}
-	// The compressed body must decode back to the original JSON.
+	// The compressed body must decode back to a valid JSON object.
 	zr, err := zstd.NewReader(bytes.NewReader(gotBody))
 	if err != nil {
 		t.Fatalf("zstd.NewReader: %v", err)
@@ -231,8 +232,23 @@ func TestEngine_CodexBackendFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("zstd decompress: %v", err)
 	}
-	if string(decompressed) != body {
-		t.Errorf("decompressed body != original\nwant %s\ngot  %s", body, string(decompressed))
+	// The decoded body must preserve the original fields and carry the
+	// reference client's fingerprint fields.
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(decompressed, &decoded); err != nil {
+		t.Fatalf("decompressed body is not JSON: %v (body=%q)", err, string(decompressed))
+	}
+	if got, _ := decoded["model"].(string); got != "gpt-5-codex" {
+		t.Errorf("decoded model = %v, want gpt-5-codex", decoded["model"])
+	}
+	if got, _ := decoded["store"].(bool); got != false {
+		t.Errorf("decoded store = %v, want false", decoded["store"])
+	}
+	if inc, ok := decoded["include"].([]interface{}); !ok || len(inc) != 1 || inc[0] != "reasoning.encrypted_content" {
+		t.Errorf("decoded include = %v, want [reasoning.encrypted_content]", decoded["include"])
+	}
+	if got, _ := decoded["prompt_cache_key"].(string); got != gotSession {
+		t.Errorf("prompt_cache_key = %q, want it to match session-id %q", got, gotSession)
 	}
 }
 
@@ -279,8 +295,18 @@ func TestEngine_CodexNonStreamNotCompressed(t *testing.T) {
 	if gotEncoding != "" {
 		t.Errorf("non-stream request must not be zstd-compressed, got content-encoding %q", gotEncoding)
 	}
-	if string(gotBody) != body {
-		t.Errorf("non-stream body should be plain JSON\nwant %s\ngot  %s", body, gotBody)
+	// Body is plain JSON (not compressed) but still carries the reference
+	// store:false field; include/prompt_cache_key are Responses-only so a
+	// Chat-format body is unchanged apart from that.
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(gotBody, &decoded); err != nil {
+		t.Fatalf("non-stream body should be plain JSON, got: %v (%q)", err, string(gotBody))
+	}
+	if got, _ := decoded["store"].(bool); got != false {
+		t.Errorf("decoded store = %v, want false", decoded["store"])
+	}
+	if _, has := decoded["prompt_cache_key"]; has {
+		t.Errorf("Chat-format (non-Responses) body should not get prompt_cache_key, got %v", decoded["prompt_cache_key"])
 	}
 	if gotBeta != "responses=experimental" {
 		t.Errorf("OpenAI-Beta = %q, want responses=experimental", gotBeta)
