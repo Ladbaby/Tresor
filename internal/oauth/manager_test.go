@@ -538,6 +538,105 @@ func TestDeviceFlow_StringIntervalRegression(t *testing.T) {
 	}
 }
 
+// TestDeviceFlow_OpenAIPendingShapeRegression mirrors the real OpenAI/Codex
+// device flow as implemented by the known-good reference client: early polls
+// return HTTP 403 with a namespaced object error
+// ({"error":{"code":"deviceauth_authorization_pending"}}), which must be
+// treated as pending (not terminal), then an authorized poll returns an
+// authorization_code + code_verifier that is exchanged at the token endpoint.
+// Before the reference alignment, the namespaced code was unrecognized and
+// would fail the login.
+func TestDeviceFlow_OpenAIPendingShapeRegression(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+
+	mu := sync.Mutex{}
+	pollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth":
+			// device-auth request
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"device_auth_id": "da-1",
+				"user_code":      "ABCD-EFGH",
+				"interval":       "1",
+			})
+		case "/poll":
+			mu.Lock()
+			pollCount++
+			n := pollCount
+			mu.Unlock()
+			if n <= 2 {
+				// OpenAI signals "not authorized yet" with a 403 and a
+				// namespaced object error — must keep polling.
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]string{
+						"code":        "deviceauth_authorization_pending",
+						"description": "authorization pending",
+					},
+				})
+				return
+			}
+			// Authorized: ChatGPT returns an authorization code to exchange.
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"authorization_code": "authz-code",
+				"code_verifier":      "poll-verifier",
+			})
+		case "/token":
+			// authorization-code exchange
+			r.ParseForm()
+			if got := r.PostForm.Get("grant_type"); got != "authorization_code" {
+				t.Errorf("token grant_type = %q, want authorization_code", got)
+			}
+			if got := r.PostForm.Get("code"); got != "authz-code" {
+				t.Errorf("token code = %q, want authz-code", got)
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "final-device-tok",
+				"refresh_token": "rt-1",
+				"expires_in":    3600,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	bindOAuth(t, s, ds, &config.DownstreamAuthCfg{
+		Type:            "oauth",
+		Flow:            FlowDevice,
+		ClientID:        "app_test",
+		TokenURL:        server.URL + "/token",
+		DeviceAuthURL:   server.URL + "/auth",
+		DeviceTokenURL:  server.URL + "/poll",
+		DeviceVerifyURL: "https://auth.openai.com/codex/device",
+	})
+
+	if _, err := m.StartLogin(ds.ID); err != nil {
+		t.Fatalf("start device login: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, _ := m.Status(ds.ID)
+		if st.Connected {
+			break
+		}
+		if st.Status == "failed" {
+			t.Fatalf("login failed (deviceauth_authorization_pending should be pending): %s", st.Error)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for device login")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	tok, err := s.GetOAuthToken(ds.ID)
+	if err != nil || tok == nil || tok.AccessToken != "final-device-tok" {
+		t.Fatalf("device token: %+v err=%v", tok, err)
+	}
+}
+
 // TestDeviceFlow_ObjectErrorRegression locks in the fix for a provider
 // (ChatGPT) that nests the device-poll "error" as an object
 // (e.g. {"error":{"code":"authorization_pending",...}}) rather than a plain

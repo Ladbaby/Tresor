@@ -268,6 +268,15 @@ func (m *Manager) devicePoll(p *Provider, pl *pendingLogin) (*tokenResponse, err
 		return nil, err, false
 	}
 
+	// Reference alignment: OpenAI signals "not authorized yet" with a 403 or
+	// 404 on the device-token endpoint, without a meaningful body. Treat those
+	// as pending unconditionally — this matches the known-good client, which
+	// checks the status code before inspecting the body. Every other status
+	// falls through to the body-driven state machine below.
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+		return nil, nil, false
+	}
+
 	var dr struct {
 		Error             flexError `json:"error"`
 		ErrorMessage      string    `json:"error_description"`
@@ -297,7 +306,10 @@ func (m *Manager) devicePoll(p *Provider, pl *pendingLogin) (*tokenResponse, err
 		pl.AuthorizedCode = dr.AuthorizationCode
 		pl.PollVerifier = dr.CodeVerifier
 		return &tokenResponse{}, nil, true
-	case errCode == "authorization_pending":
+	// "authorization_pending" is the RFC 8628 code; OpenAI's device flow
+	// uses the namespaced "deviceauth_authorization_pending". Both keep
+	// polling — the reference client treats the namespaced one as pending.
+	case errCode == "authorization_pending" || errCode == "deviceauth_authorization_pending":
 		return nil, nil, false
 	case errCode == "slow_down":
 		// RFC 8628: signal pollDevice to increase the poll interval.
@@ -333,21 +345,22 @@ func deviceExchangeForm(p *Provider, pl *pendingLogin, tr *tokenResponse) url.Va
 }
 
 // isTerminalDeviceError reports whether a device-poll error should abort the
-// login rather than keep polling. Only the two known non-terminal states
-// (authorization_pending, slow_down) keep polling; every other error is
-// treated as terminal. In particular, a provider error code that is neither
-// of those (e.g. access_denied, or any novel code) fails the login with the
-// provider's message rather than silently polling until the device-code
-// deadline — that is strictly better than the prior behavior, in which an
-// object-shaped error broke parsing and killed the login with a confusing
-// "cannot unmarshal" message.
+// login rather than keep polling. Only the known non-terminal states
+// (authorization_pending and OpenAI's namespaced
+// deviceauth_authorization_pending, plus slow_down) keep polling; every other
+// error is treated as terminal. In particular, a provider error code that is
+// neither of those (e.g. access_denied, or any novel code) fails the login
+// with the provider's message rather than silently polling until the
+// device-code deadline — that is strictly better than the prior behavior, in
+// which an object-shaped error broke parsing and killed the login with a
+// confusing "cannot unmarshal" message.
 func isTerminalDeviceError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
 	switch msg {
-	case "authorization_pending", "slow_down":
+	case "authorization_pending", "deviceauth_authorization_pending", "slow_down":
 		return false
 	}
 	return true
