@@ -42,7 +42,14 @@ type PipelineContext struct {
 	// provider (e.g. originator, user-agent). Applied in forwardRequest
 	// after the standard auth header is set.
 	OAuthExtraHeaders map[string]string
-	Variables        map[string]interface{}
+	// CodexBackend is true when this downstream is the ChatGPT/Codex OAuth
+	// backend (detected from the chatgpt-account-id extra header). Such
+	// requests are fingerprinted to match the reference client — OpenAI-Beta
+	// header, zstd-compressed body, per-request session headers — and are
+	// never replayed by retry-on-empty (replaying a generation on a real
+	// account creates duplicate response objects).
+	CodexBackend bool
+	Variables    map[string]interface{}
 }
 
 // TokenResolver resolves a currently-valid OAuth access token for a

@@ -19,6 +19,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/klauspost/compress/zstd"
+
 	"tresor/internal/inspect"
 	"tresor/internal/middleware"
 	"tresor/internal/proxy"
@@ -911,11 +914,23 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		dsCopy.APIKey = token
 		ctx.OAuthExtraHeaders = extraHeaders
+		// The chatgpt-account-id extra header (injected by the OAuth manager
+		// when the token carries a chatgpt_account_id claim) identifies the
+		// real ChatGPT/Codex backend. Flag it so forwardRequest applies the
+		// reference-client fingerprint and retry-on-empty skips replaying it.
+		if _, ok := extraHeaders["chatgpt-account-id"]; ok {
+			ctx.CodexBackend = true
+		}
 	}
 
-	// Determine max retries (3 when retryOnEmpty enabled, 0 otherwise)
+	// Determine max retries (3 when retryOnEmpty enabled, 0 otherwise).
+	// The ChatGPT/Codex backend is never replayed: re-sending a generation
+	// that already started (or completed) on a real account creates duplicate
+	// response objects and is the one retry behavior most likely to trip
+	// account-protection heuristics. Empty responses there are just surfaced
+	// to the client instead.
 	maxRetries := 0
-	if e.retryOnEmpty {
+	if e.retryOnEmpty && !ctx.CodexBackend {
 		maxRetries = retryMaxCount
 	}
 	// downstreamFormat is the API format the downstream will actually return.
@@ -991,7 +1006,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			// retried transparently by holding the terminal [DONE]
 			// marker until end-of-stream.
 			hw := newHeaderDelayWriter(cw)
-			outcome := e.handleStreamingResponse(hw, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty, inputFormat, downstreamFormat)
+			outcome := e.handleStreamingResponse(hw, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty && !ctx.CodexBackend, inputFormat, downstreamFormat)
 
 			// An explicit error event is a definitive answer, never an empty
 			// response — do not retry it.
@@ -1065,7 +1080,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		// legitimately return 200 with bodies that look "empty" to the
 		// parser (e.g. {"input_tokens":7802}); retrying them produces a
 		// spurious 502.
-		if e.retryOnEmpty && e.shouldRetry(resp, respBody, downstreamFormat, r.URL.Path) {
+		if !ctx.CodexBackend && e.retryOnEmpty && e.shouldRetry(resp, respBody, downstreamFormat, r.URL.Path) {
 			if attempt >= maxRetries {
 				entry.Status = resp.StatusCode
 				entry.Duration = DurationMs(time.Since(start))
@@ -1868,6 +1883,30 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	return finish()
 }
 
+// zstdEncoder compresses ChatGPT/Codex request bodies to match the reference
+// client (the Codex backend accepts Content-Encoding: zstd on the SSE endpoint).
+// Built once and reused; klauspost's zstd Encoder is safe for concurrent Use.
+var zstdEncoder = newZstdEncoder()
+
+func newZstdEncoder() *zstd.Encoder {
+	// SpeedDefault maps to zstd level 3, the level the reference client uses.
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		return nil
+	}
+	return enc
+}
+
+// isStreamRequest reports whether the request body is a JSON object carrying
+// "stream": true. It is a best-effort parse: anything that is not a parseable
+// object with a boolean stream field is treated as non-streaming.
+func isStreamRequest(body []byte) bool {
+	var probe struct {
+		Stream bool `json:"stream"`
+	}
+	return json.Unmarshal(body, &probe) == nil && probe.Stream
+}
+
 // forwardRequest sends the (possibly transformed) request to the target downstream.
 // SSRF validation is not applied here — downstreams are admin-configured via auth-protected API.
 // Returns the response and a cancel function; caller must call cancel after consuming resp.Body.
@@ -1919,10 +1958,24 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		return nil, func() {}, fmt.Errorf("parse target URL: %w", err)
 	}
 
+	// For the ChatGPT/Codex backend, zstd-compress the request body to match
+	// the reference client, which compresses the SSE request (the Codex backend
+	// decodes Content-Encoding: zstd on the SSE endpoint). Only stream requests
+	// are compressed — the reference client only ever sends stream:true to the
+	// Codex backend, so a non-stream request is left as plain JSON. On any
+	// compression failure we fall back to sending the body as-is.
+	outBody := body
+	if ctx.CodexBackend && zstdEncoder != nil && isStreamRequest(body) {
+		compressed := zstdEncoder.EncodeAll(body, nil)
+		if len(compressed) > 0 && len(compressed) < len(body) {
+			outBody = compressed
+		}
+	}
+
 	// Build forwarded request. Use a detached context so the downstream connection
 	// isn't killed if the client disconnects (common with long-running SSE streams).
 	forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	forwardedReq, err := http.NewRequestWithContext(forwardCtx, original.Method, targetURL, bytes.NewReader(body))
+	forwardedReq, err := http.NewRequestWithContext(forwardCtx, original.Method, targetURL, bytes.NewReader(outBody))
 	if err != nil {
 		forwardCancel()
 		return nil, func() {}, fmt.Errorf("create forwarded request: %w", err)
@@ -1987,6 +2040,35 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	// compressed, our SSE handler will surface garbled bytes; the per-request
 	// fix can be added when that becomes a real problem.
 	forwardedReq.Header.Set("Accept-Encoding", "identity")
+
+	// ChatGPT/Codex fingerprint: match the reference client's request so the
+	// subscription traffic does not look like an unknown client.
+	if ctx.CodexBackend {
+		if len(outBody) != len(body) {
+			// Body was zstd-compressed above.
+			forwardedReq.Header.Set("Content-Encoding", "zstd")
+			// Drop any explicit Content-Length a transformer set to the
+			// uncompressed size so the transport recomputes it from the actual
+			// (compressed) body.
+			forwardedReq.Header.Del("Content-Length")
+		}
+		// Experimental Responses-API opt-in the reference client sends on the
+		// SSE path.
+		if forwardedReq.Header.Get("OpenAI-Beta") == "" {
+			forwardedReq.Header.Set("OpenAI-Beta", "responses=experimental")
+		}
+		// Per-request correlation headers. The reference client reuses the
+		// session id for both; a fresh UUID per request is the safe analogue
+		// for a stateless gateway (64-char cap, same as prompt_cache_key).
+		if forwardedReq.Header.Get("session-id") == "" {
+			sid := uuid.NewString()
+			if len(sid) > 64 {
+				sid = sid[:64]
+			}
+			forwardedReq.Header.Set("session-id", sid)
+			forwardedReq.Header.Set("x-client-request-id", sid)
+		}
+	}
 
 	resp, err := e.client.Do(forwardedReq)
 	if err != nil {

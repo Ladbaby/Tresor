@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
 	"tresor/internal/config"
 )
 
@@ -147,3 +148,182 @@ func TestEngine_APIKeyDownstreamUnaffectedByTokenManager(t *testing.T) {
 		t.Errorf("expected Bearer sk-secret, got %q", gotAuth)
 	}
 }
+
+// codexTokenManager is a fake TokenResolver whose extra headers carry the
+// chatgpt-account-id marker the OAuth manager injects for a real ChatGPT/Codex
+// token, so the engine treats the downstream as the Codex backend.
+type codexTokenManager struct{ calls int }
+
+func (f *codexTokenManager) ResolveValidToken(string) (string, map[string]string, error) {
+	f.calls++
+	return "codex-token", map[string]string{
+		"chatgpt-account-id": "acct-123",
+		"originator":         "pi",
+		"User-Agent":         "pi (win32) ",
+	}, nil
+}
+
+// TestEngine_CodexBackendFingerprint verifies a real ChatGPT/Codex request is
+// fingerprinted like the reference client: OpenAI-Beta set, matching
+// session-id / x-client-request-id, and a zstd-compressed body (decodes back
+// to the original JSON) with a matching content-encoding header.
+func TestEngine_CodexBackendFingerprint(t *testing.T) {
+	s := newTestStore(t)
+
+	var (
+		gotBeta        string
+		gotSession     string
+		gotClientReqID string
+		gotEncoding    string
+		gotAccountID   string
+		gotBody        []byte
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBeta = r.Header.Get("OpenAI-Beta")
+		gotSession = r.Header.Get("session-id")
+		gotClientReqID = r.Header.Get("x-client-request-id")
+		gotEncoding = r.Header.Get("Content-Encoding")
+		gotAccountID = r.Header.Get("chatgpt-account-id")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		io.WriteString(w, `{"choices":[{"message":{"content":"hi"}}]}`)
+	}))
+	defer ts.Close()
+
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "", "openai")
+	if err := s.SetDownstreamAuth("ds1", &config.DownstreamAuthCfg{Type: "oauth"}); err != nil {
+		t.Fatalf("set auth: %v", err)
+	}
+	addOutputModelIDs(t, s, "ds1", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetTokenManager(&codexTokenManager{})
+
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"a somewhat long prompt that is repeated enough to be worth compressing repeated repeated repeated repeated repeated"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	if gotBeta != "responses=experimental" {
+		t.Errorf("OpenAI-Beta = %q, want responses=experimental", gotBeta)
+	}
+	if gotSession == "" || gotSession != gotClientReqID {
+		t.Errorf("session-id=%q x-client-request-id=%q — want non-empty and equal", gotSession, gotClientReqID)
+	}
+	if gotAccountID != "acct-123" {
+		t.Errorf("chatgpt-account-id = %q, want acct-123", gotAccountID)
+	}
+	if gotEncoding != "zstd" {
+		t.Fatalf("content-encoding = %q, want zstd", gotEncoding)
+	}
+	// The compressed body must decode back to the original JSON.
+	zr, err := zstd.NewReader(bytes.NewReader(gotBody))
+	if err != nil {
+		t.Fatalf("zstd.NewReader: %v", err)
+	}
+	defer zr.Close()
+	decompressed, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("zstd decompress: %v", err)
+	}
+	if string(decompressed) != body {
+		t.Errorf("decompressed body != original\nwant %s\ngot  %s", body, string(decompressed))
+	}
+}
+
+// TestEngine_CodexNonStreamNotCompressed verifies the reference-client parity
+// scope: zstd compression is applied only to stream requests, so a non-stream
+// ChatGPT/Codex request keeps a plain JSON body (no content-encoding), while
+// still carrying the fingerprint headers.
+func TestEngine_CodexNonStreamNotCompressed(t *testing.T) {
+	s := newTestStore(t)
+
+	var (
+		gotEncoding string
+		gotBeta     string
+		gotBody     []byte
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding = r.Header.Get("Content-Encoding")
+		gotBeta = r.Header.Get("OpenAI-Beta")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		io.WriteString(w, `{"choices":[{"message":{"content":"hi"}}]}`)
+	}))
+	defer ts.Close()
+
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "", "openai")
+	if err := s.SetDownstreamAuth("ds1", &config.DownstreamAuthCfg{Type: "oauth"}); err != nil {
+		t.Fatalf("set auth: %v", err)
+	}
+	addOutputModelIDs(t, s, "ds1", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetTokenManager(&codexTokenManager{})
+
+	body := `{"model":"gpt-4o","stream":false,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	if gotEncoding != "" {
+		t.Errorf("non-stream request must not be zstd-compressed, got content-encoding %q", gotEncoding)
+	}
+	if string(gotBody) != body {
+		t.Errorf("non-stream body should be plain JSON\nwant %s\ngot  %s", body, gotBody)
+	}
+	if gotBeta != "responses=experimental" {
+		t.Errorf("OpenAI-Beta = %q, want responses=experimental", gotBeta)
+	}
+}
+
+func TestEngine_CodexBackendNoRetryOnEmpty(t *testing.T) {
+	s := newTestStore(t)
+
+	var attempts int
+	var attemptsMu sync.Mutex
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attemptsMu.Lock()
+		attempts++
+		attemptsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		// An empty OpenAI Chat response.
+		io.WriteString(w, `{"choices":[]}`)
+	}))
+	defer ts.Close()
+
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "", "openai")
+	if err := s.SetDownstreamAuth("ds1", &config.DownstreamAuthCfg{Type: "oauth"}); err != nil {
+		t.Fatalf("set auth: %v", err)
+	}
+	addOutputModelIDs(t, s, "ds1", "gpt-4o")
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetTokenManager(&codexTokenManager{})
+	eng.SetRetryOnEmpty(true)
+
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	attemptsMu.Lock()
+	n := attempts
+	attemptsMu.Unlock()
+	if n != 1 {
+		t.Fatalf("Codex backend must not be replayed: got %d upstream calls, want 1", n)
+	}
+}
+
