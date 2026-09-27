@@ -69,7 +69,7 @@ downstreams:
   - id: xai
     name: Grok subscription
     api_formats: [openai]
-    base_url: https://api.x.ai/v1
+    base_url: https://cli-chat-proxy.grok.com/v1
     auth:
       type: oauth
       flow: auth_code
@@ -87,8 +87,8 @@ downstreams:
       flow: auth_code
       authorization_url: https://accounts.google.com/o/oauth2/auth
       token_url: https://oauth2.googleapis.com/token
-      client_id: xxx.apps.googleusercontent.com
-      client_secret: gxxx
+      client_id: YOUR-client-id.apps.googleusercontent.com
+      client_secret: YOUR-client-secret
       scopes: "https://www.googleapis.com/auth/generative-language"
       extra_authorize_params:
         access_type: offline

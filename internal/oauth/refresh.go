@@ -56,7 +56,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 
 	// Fast path: still valid
 	if exp := tokenExpiry(t.AccessToken, t.ExpiresAt); exp.IsZero() || time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp) {
-		return t.AccessToken, finalizeOAuthHeaders(extra, t.AccessToken), nil
+		return t.AccessToken, finalizeOAuthHeaders(extra, t.AccessToken, p), nil
 	}
 
 	// Needs a refresh
@@ -71,7 +71,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	}
 	if t2 != nil && !t2.NeedsLogin {
 		if exp := tokenExpiry(t2.AccessToken, t2.ExpiresAt); exp.IsZero() || time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp) {
-			return t2.AccessToken, finalizeOAuthHeaders(extra, t2.AccessToken), nil
+			return t2.AccessToken, finalizeOAuthHeaders(extra, t2.AccessToken, p), nil
 		}
 		t = t2
 	}
@@ -107,26 +107,31 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	if err := m.store.SaveOAuthToken(nt); err != nil {
 		return "", nil, err
 	}
-	return nt.AccessToken, finalizeOAuthHeaders(extra, nt.AccessToken), nil
+	return nt.AccessToken, finalizeOAuthHeaders(extra, nt.AccessToken, p), nil
 }
 
-// finalizeOAuthHeaders layers the ChatGPT/Codex identity headers onto a
-// provider's base extra headers, derived from the FINAL access token about to
-// be sent. The Codex backend binds the OAuth JWT to a specific account via the
-// chatgpt-account-id header and fingerprints the client with originator +
-// User-Agent; when the token carries the chatgpt_account_id claim we send all
-// three, matching the reference clients (pi / litellm). Non-ChatGPT tokens
-// have no such claim, so this is a no-op for every other provider.
-// Operator-supplied extra_headers (already merged into base) take precedence.
+// finalizeOAuthHeaders layers provider identity headers onto the base extra
+// headers, derived from the FINAL access token about to be sent. Two providers
+// get special-cased so Tresor's subscription traffic fingerprints like the
+// official CLI instead of an unknown client (the goal is to avoid the account
+// being flagged):
 //
-// It must run against the final token — not the pre-refresh one — because a
-// refresh can rotate in a token whose account claim differs (or was absent
-// before).
-func finalizeOAuthHeaders(base map[string]string, accessToken string) map[string]string {
+//   - ChatGPT/Codex: when the access token carries the chatgpt_account_id
+//     claim, send chatgpt-account-id, originator, and a pi User-Agent (matching
+//     the pi / litellm reference clients).
+//   - Grok (xAI): when the provider's scopes include "grok-cli:access" (the
+//     xAI Grok CLI's client), send the grok-shell User-Agent and the
+//     x-grok-client-identifier header (matching xai-org/grok-build).
+//
+// Operator-supplied extra_headers (already merged into base) always take
+// precedence. It must run against the final token — not the pre-refresh one —
+// because a refresh can rotate in a token whose account claim differs.
+func finalizeOAuthHeaders(base map[string]string, accessToken string, p *Provider) map[string]string {
 	out := make(map[string]string, len(base)+3)
 	for k, v := range base {
 		out[k] = v
 	}
+	// ChatGPT/Codex identity.
 	if acct := jwtChatGPTAccountID(accessToken); acct != "" {
 		if _, ok := out["chatgpt-account-id"]; !ok {
 			out["chatgpt-account-id"] = acct
@@ -138,7 +143,23 @@ func finalizeOAuthHeaders(base map[string]string, accessToken string) map[string
 			out["User-Agent"] = codexUserAgent()
 		}
 	}
+	// Grok (xAI) identity.
+	if p != nil && isGrokProvider(p) {
+		if _, ok := out["User-Agent"]; !ok {
+			out["User-Agent"] = grokUserAgent()
+		}
+		if _, ok := out["x-grok-client-identifier"]; !ok {
+			out["x-grok-client-identifier"] = "grok-shell"
+		}
+	}
 	return out
+}
+
+// isGrokProvider reports whether an OAuth provider is xAI's Grok CLI client.
+// The "grok-cli:access" scope is unique to the Grok CLI's registered client,
+// so its presence is a reliable signal even if other fields are customized.
+func isGrokProvider(p *Provider) bool {
+	return strings.Contains(p.Scopes, "grok-cli:access")
 }
 
 // refreshToken performs a grant_type=refresh_token exchange.
@@ -236,4 +257,47 @@ func osRelease() string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// grokUserAgent returns the User-Agent shape the xAI Grok CLI sends,
+// "grok-shell/<version> (<os>; <arch>)". The OS/arch use the Grok CLI's own
+// naming (macos/aarch64). Memoized because it is built on every request.
+const grokShellVersion = "1.0.0"
+
+var (
+	grokUAOnce sync.Once
+	grokUA     string
+)
+
+func grokUserAgent() string {
+	grokUAOnce.Do(func() {
+		grokUA = "grok-shell/" + grokShellVersion + " (" + grokOS() + "; " + grokArch() + ")"
+	})
+	return grokUA
+}
+
+// grokOS maps the Go OS name to the Grok CLI's OS token.
+func grokOS() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "macos"
+	case "linux":
+		return "linux"
+	case "windows":
+		return "windows"
+	default:
+		return runtime.GOOS
+	}
+}
+
+// grokArch maps the Go arch to the Grok CLI's arch token (Rust-style aarch64).
+func grokArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "amd64"
+	case "arm64":
+		return "aarch64"
+	default:
+		return runtime.GOARCH
+	}
 }

@@ -567,6 +567,82 @@ func TestResolveValidToken_ChatGPTHeadersAfterRefresh(t *testing.T) {
 	}
 }
 
+// TestResolveValidToken_GrokHeaders verifies that an xAI Grok subscription
+// (scopes include "grok-cli:access") gets the grok-shell identity headers
+// injected, matching the official Grok CLI.
+func TestResolveValidToken_GrokHeaders(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+	bindOAuth(t, s, ds, &config.DownstreamAuthCfg{
+		Type:             "oauth",
+		Flow:             FlowAuthCode,
+		AuthorizationURL: "https://a.test/auth",
+		TokenURL:         "https://t.test/token",
+		Scopes:           "openid profile email offline_access grok-cli:access api:access",
+	})
+
+	// A plain (non-ChatGPT) token — Grok is detected by scopes, not a claim.
+	tok := makeChatGPTJWT(t, "", time.Now().Add(time.Hour))
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  tok,
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, extra, err := m.ResolveValidToken(ds.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got := extra["x-grok-client-identifier"]; got != "grok-shell" {
+		t.Fatalf("x-grok-client-identifier = %q, want grok-shell", got)
+	}
+	if got := extra["User-Agent"]; !strings.HasPrefix(got, "grok-shell/") {
+		t.Fatalf("User-Agent = %q, want prefix 'grok-shell/'", got)
+	}
+	// Grok tokens have no chatgpt claim, so no chatgpt-account-id header.
+	if _, ok := extra["chatgpt-account-id"]; ok {
+		t.Fatal("chatgpt-account-id should not be set for a Grok token")
+	}
+}
+
+// TestResolveValidToken_GrokHeadersOperatorOverride verifies operator
+// extra_headers win over the injected grok-shell identity.
+func TestResolveValidToken_GrokHeadersOperatorOverride(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+	bindOAuth(t, s, ds, &config.DownstreamAuthCfg{
+		Type:             "oauth",
+		Flow:             FlowAuthCode,
+		AuthorizationURL: "https://a.test/auth",
+		TokenURL:         "https://t.test/token",
+		Scopes:           "grok-cli:access",
+		ExtraHeaders:     map[string]string{"x-grok-client-identifier": "mytool"},
+	})
+
+	tok := makeChatGPTJWT(t, "", time.Now().Add(time.Hour))
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  tok,
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, extra, err := m.ResolveValidToken(ds.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got := extra["x-grok-client-identifier"]; got != "mytool" {
+		t.Fatalf("x-grok-client-identifier = %q, want operator override mytool", got)
+	}
+}
+
 // TestResolveValidToken_ChatGPTHeaders verifies that when the access token is
 // a ChatGPT/Codex token, the chatgpt-account-id, originator and User-Agent
 // headers are injected (matching the pi reference client).
