@@ -3,9 +3,9 @@ package plugins
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"tresor/internal/engine"
 )
@@ -116,8 +116,10 @@ func assistantRole(format string) string {
 	return "assistant"
 }
 
-// assistantTurns extracts the normalized text of every assistant turn in the
-// conversation, in order.
+// assistantTurns extracts a canonical fingerprint of every assistant turn in
+// the conversation, in order. A fingerprint covers both the textual content
+// and any tool calls (name + arguments), so that a sequence of tool calls
+// with different arguments is never mistaken for a verbatim repeat.
 func assistantTurns(body []byte, format string) []string {
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -142,18 +144,23 @@ func assistantTurns(body []byte, format string) []string {
 			}
 			parts, ok := msg["parts"].([]interface{})
 			if !ok {
-				out = append(out, "")
+				out = append(out, canonicalFingerprint(nil))
 				continue
 			}
-			var texts []string
+			var pieces []interface{}
 			for _, p := range parts {
-				if pm, ok := p.(map[string]interface{}); ok {
-					if t, ok := pm["text"].(string); ok {
-						texts = append(texts, t)
-					}
+				pm, ok := p.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if t, ok := pm["text"].(string); ok {
+					pieces = append(pieces, t)
+				}
+				if fc, ok := pm["functionCall"].(map[string]interface{}); ok {
+					pieces = append(pieces, toolCallPiece(fc["name"], fc["args"]))
 				}
 			}
-			out = append(out, strings.Join(texts, "\n"))
+			out = append(out, canonicalFingerprint(pieces))
 		}
 	case "openai_responses":
 		items, ok := payload["input"].([]interface{})
@@ -166,10 +173,36 @@ func assistantTurns(body []byte, format string) []string {
 			if !ok {
 				continue
 			}
-			if msg["role"] != role {
-				continue
+			typ, _ := msg["type"].(string)
+			switch {
+			case typ == "reasoning":
+				// Reasoning items carry their content in "summary" blocks.
+				// Without them, consecutive reasoning-only turns would all
+				// fingerprint as empty and false-trigger.
+				var pieces []interface{}
+				if sum, ok := msg["summary"].([]interface{}); ok {
+					for _, s := range sum {
+						if sm, ok := s.(map[string]interface{}); ok {
+							if t, ok := sm["text"].(string); ok {
+								pieces = append(pieces, t)
+							}
+						}
+					}
+				}
+				out = append(out, canonicalFingerprint(pieces))
+			case msg["role"] == role:
+				out = append(out, canonicalFingerprint(
+					[]interface{}{extractStringContent(msg["content"])}))
+			case typ == "function_call" || typ == "tool_call" || typ == "custom_tool_call":
+				var args interface{}
+				if typ == "custom_tool_call" {
+					args = msg["input"]
+				} else {
+					args = msg["arguments"]
+				}
+				out = append(out, canonicalFingerprint(
+					[]interface{}{toolCallPiece(msg["name"], args)}))
 			}
-			out = append(out, extractStringContent(msg["content"]))
 		}
 	default: // "openai" and "anthropic" share the "messages" field
 		msgs, ok := payload["messages"].([]interface{})
@@ -184,10 +217,83 @@ func assistantTurns(body []byte, format string) []string {
 			if msg["role"] != role {
 				continue
 			}
-			out = append(out, extractStringContent(msg["content"]))
+			pieces := []interface{}{extractStringContent(msg["content"])}
+			// OpenAI-style tool_calls live in a sibling field.
+			if tcs, ok := msg["tool_calls"].([]interface{}); ok {
+				for _, tc := range tcs {
+					tcm, ok := tc.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					fn, _ := tcm["function"].(map[string]interface{})
+					if fn == nil {
+						continue
+					}
+					pieces = append(pieces, toolCallPiece(fn["name"], fn["arguments"]))
+				}
+			}
+			// Anthropic-style tool_use and thinking blocks live inside the
+			// content array. Thinking blocks are included so that consecutive
+			// reasoning turns are not all fingerprinted as empty.
+			if arr, ok := msg["content"].([]interface{}); ok {
+				for _, b := range arr {
+					bm, ok := b.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					switch bm["type"] {
+					case "tool_use":
+						pieces = append(pieces, toolCallPiece(bm["name"], bm["input"]))
+					case "thinking":
+						pieces = append(pieces, map[string]interface{}{"thinking": bm["thinking"]})
+					case "redacted_thinking":
+						pieces = append(pieces, map[string]interface{}{"redacted_thinking": bm["data"]})
+					}
+				}
+			}
+			out = append(out, canonicalFingerprint(pieces))
 		}
 	}
 	return out
+}
+
+// toolCallPiece builds a normalized piece representing a single tool call so
+// that calls differing in name or arguments produce distinct fingerprints.
+// Non-deterministic fields (call IDs, etc.) are deliberately excluded.
+func toolCallPiece(name, args interface{}) interface{} {
+	return map[string]interface{}{
+		"tool":  canonicalScalar(name),
+		"args":  canonicalScalar(args),
+	}
+}
+
+// canonicalScalar renders a scalar (string / number / bool / nil) as a plain
+// string so that JSON-string arguments and native objects are each stable
+// across turns. Note: a JSON-string arg and the equivalent native object are
+// kept distinct, which is fine in practice because a given request uses one
+// representation per field consistently.
+func canonicalScalar(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(raw)
+}
+
+// canonicalFingerprint renders turn pieces as a deterministic string used for
+// repeat comparison.
+func canonicalFingerprint(pieces []interface{}) string {
+	raw, err := json.Marshal(pieces)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 // appendReminder returns a new body with a user reminder message appended in

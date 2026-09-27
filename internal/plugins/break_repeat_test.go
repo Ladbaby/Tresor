@@ -3,6 +3,7 @@ package plugins
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -224,6 +225,187 @@ func TestBreakRepeat_Gemini_Trigger(t *testing.T) {
 	parts := last["parts"].([]interface{})
 	if parts[0].(map[string]interface{})["text"] != repeatReminder {
 		t.Fatalf("unexpected reminder part")
+	}
+}
+
+func TestBreakRepeat_OpenAI_DistinctToolCallsNoTrigger(t *testing.T) {
+	p, _ := NewBreakRepeatPlugin(nil)
+	toolCall := func(id, pattern string) map[string]interface{} {
+		return map[string]interface{}{
+			"id":   id,
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":      "grep",
+				"arguments": fmt.Sprintf(`{"pattern":%q,"path":"."}`, pattern),
+			},
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"model": "small-model",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "find the bugs"},
+			map[string]interface{}{"role": "assistant", "content": "", "tool_calls": []interface{}{toolCall("c1", "foo")}},
+			map[string]interface{}{"role": "user", "content": "tool results"},
+			map[string]interface{}{"role": "assistant", "content": "", "tool_calls": []interface{}{toolCall("c2", "bar")}},
+			map[string]interface{}{"role": "user", "content": "tool results"},
+			map[string]interface{}{"role": "assistant", "content": "", "tool_calls": []interface{}{toolCall("c3", "baz")}},
+		},
+	})
+	_, newBody, err := p.TransformRequest(newBreakRepeatRequest(t, body), body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if !bytes.Equal(newBody, body) {
+		t.Fatalf("distinct tool calls must not be treated as a repeat")
+	}
+}
+
+func TestBreakRepeat_OpenAI_IgnoredCallIdsTrigger(t *testing.T) {
+	p, _ := NewBreakRepeatPlugin(nil)
+	toolCall := func(id, pattern string) map[string]interface{} {
+		return map[string]interface{}{
+			"id":   id,
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":      "grep",
+				"arguments": fmt.Sprintf(`{"pattern":%q,"path":"."}`, pattern),
+			},
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"model": "small-model",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "assistant", "tool_calls": []interface{}{toolCall("c1", "foo")}},
+			map[string]interface{}{"role": "assistant", "tool_calls": []interface{}{toolCall("c2", "foo")}},
+			map[string]interface{}{"role": "assistant", "tool_calls": []interface{}{toolCall("c3", "foo")}},
+		},
+	})
+	_, newBody, err := p.TransformRequest(newBreakRepeatRequest(t, body), body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if bytes.Equal(newBody, body) {
+		t.Fatalf("three identical tool calls (only ids differ) should trigger the reminder")
+	}
+}
+
+func TestBreakRepeat_Anthropic_DistinctToolCallsNoTrigger(t *testing.T) {
+	p, _ := NewBreakRepeatPlugin(nil)
+	toolUse := func(name, input interface{}) interface{} {
+		return map[string]interface{}{
+			"type": "tool_use",
+			"id":   fmt.Sprintf("toolu_%v", input),
+			"name": name,
+			"input": input,
+		}
+	}
+	assistant := func(input interface{}) interface{} {
+		return map[string]interface{}{
+			"role":    "assistant",
+			"content": []interface{}{toolUse("Grep", map[string]interface{}{"pattern": input})},
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"model": "claude-x",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":    "user",
+				"content": []interface{}{map[string]interface{}{"type": "text", "text": "search"}},
+			},
+			assistant("foo"),
+			assistant("bar"),
+			assistant("baz"),
+		},
+	})
+	_, newBody, err := p.TransformRequest(newBreakRepeatRequest(t, body), body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if !bytes.Equal(newBody, body) {
+		t.Fatalf("distinct Anthropic tool_use blocks must not be treated as a repeat")
+	}
+}
+
+func TestBreakRepeat_OpenAIResponses_DistinctToolCallsNoTrigger(t *testing.T) {
+	p, _ := NewBreakRepeatPlugin(nil)
+	fnCall := func(name, args string) interface{} {
+		return map[string]interface{}{
+			"type":      "function_call",
+			"call_id":   "call_x",
+			"name":      name,
+			"arguments": args,
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"model": "gpt-4o",
+		"input": []interface{}{
+			map[string]interface{}{"role": "user", "content": "search"},
+			fnCall("Grep", `{"pattern":"foo"}`),
+			fnCall("Grep", `{"pattern":"bar"}`),
+			fnCall("Grep", `{"pattern":"baz"}`),
+		},
+	})
+	_, newBody, err := p.TransformRequest(newBreakRepeatRequest(t, body), body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if !bytes.Equal(newBody, body) {
+		t.Fatalf("distinct Responses function_calls must not be treated as a repeat")
+	}
+}
+
+func TestBreakRepeat_Anthropic_DistinctThinkingBlocksNoTrigger(t *testing.T) {
+	p, _ := NewBreakRepeatPlugin(nil)
+	thinkingAssistant := func(thinking string) interface{} {
+		return map[string]interface{}{
+			"role": "assistant",
+			"content": []interface{}{
+				map[string]interface{}{"type": "thinking", "thinking": thinking},
+			},
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"model": "claude-x",
+		"messages": []interface{}{
+			thinkingAssistant("hmm, let me think about foo"),
+			thinkingAssistant("hmm, let me think about bar"),
+			thinkingAssistant("hmm, let me think about baz"),
+		},
+	})
+	_, newBody, err := p.TransformRequest(newBreakRepeatRequest(t, body), body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if !bytes.Equal(newBody, body) {
+		t.Fatalf("distinct thinking blocks must not be treated as a repeat")
+	}
+}
+
+func TestBreakRepeat_OpenAIResponses_DistinctReasoningNoTrigger(t *testing.T) {
+	p, _ := NewBreakRepeatPlugin(nil)
+	reasoning := func(text string) interface{} {
+		return map[string]interface{}{
+			"type": "reasoning",
+			"role": "assistant",
+			"summary": []interface{}{
+				map[string]interface{}{"type": "summary_text", "text": text},
+			},
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"model": "gpt-4o",
+		"input": []interface{}{
+			reasoning("thinking about foo"),
+			reasoning("thinking about bar"),
+			reasoning("thinking about baz"),
+		},
+	})
+	_, newBody, err := p.TransformRequest(newBreakRepeatRequest(t, body), body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if !bytes.Equal(newBody, body) {
+		t.Fatalf("distinct reasoning items must not be treated as a repeat")
 	}
 }
 
