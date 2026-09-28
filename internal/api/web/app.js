@@ -1153,6 +1153,10 @@ function renderOAuthEditor(auth) {
         rows.push(oauthFieldRow('device_token_url', 'Device Token URL', auth.device_token_url, 'https://provider/oauth/token', 'url'));
         rows.push(oauthFieldRow('device_verify_url', 'Verify URL', auth.device_verify_url, 'https://provider/activate', 'url'));
         rows.push(oauthFieldRow('device_redirect_uri', 'Device Redirect URI', auth.device_redirect_uri, 'optional', 'url'));
+        // Token URL is where the device flow exchanges its authorization code
+        // (e.g. ChatGPT/Codex). It is distinct from the device token URL above
+        // and is required when the poll returns a code to exchange.
+        rows.push(oauthFieldRow('token_url', 'Token URL (code exchange)', auth.token_url, 'https://provider/oauth/token — required to exchange the device code', 'url'));
     }
 
     rows.push(oauthFieldRow('client_id', 'Client ID', auth.client_id, 'optional for public clients'));
