@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -310,6 +311,101 @@ func TestEngine_CodexNonStreamNotCompressed(t *testing.T) {
 	}
 	if gotBeta != "responses=experimental" {
 		t.Errorf("OpenAI-Beta = %q, want responses=experimental", gotBeta)
+	}
+}
+
+// crashyAnthropic2Responses mimics the real anthropic2responses transformer
+// for the Codex SSE routing bug: its non-streaming TransformResponse cannot
+// parse a Codex SSE body (it starts with "event:"), so it errors — while its
+// streaming TransformStreamChunk handles the events fine. Using this in the
+// test makes the engine's streaming-vs-buffering routing observable: if the
+// SSE response is (wrongly) routed through TransformResponse it 502s; if it
+// is (correctly) routed through the stream path, TransformResponse is never
+// called and the events pass through.
+type crashyAnthropic2Responses struct{}
+
+func (m *crashyAnthropic2Responses) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	req.Header.Set("X-Auto-Translated", "anthropic2responses")
+	return req, body, nil
+}
+
+func (m *crashyAnthropic2Responses) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	// Simulates the real "failed to parse responses response: invalid
+	// character 'e' looking for beginning of value".
+	return nil, fmt.Errorf("failed to parse responses response: invalid character 'e' looking for beginning of value")
+}
+
+func (m *crashyAnthropic2Responses) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	return chunk, nil
+}
+
+// codexSSERegistry is the mock registry with anthropic2responses swapped for
+// the crashy variant, so the engine's response-routing is observable.
+type codexSSERegistry struct{}
+
+func (m *codexSSERegistry) CreatePlugin(pluginID string, cfg map[string]interface{}) (interface{}, error) {
+	if pluginID == "anthropic2responses" {
+		return &crashyAnthropic2Responses{}, nil
+	}
+	return (&mockRegistryImpl{}).CreatePlugin(pluginID, cfg)
+}
+
+func (m *codexSSERegistry) ListPlugins() []PluginInfo {
+	return nil
+}
+
+// TestEngine_CodexSSEWithNonSSEContentType verifies the fix for the
+// "Anthropic client + ChatGPT subscription → 502 response pipeline error:
+// invalid character 'e'" bug. The Codex backend returns an SSE body for a
+// streaming request, but with a Content-Type that is not text/event-stream.
+// The engine must treat the response as a stream (as the reference client
+// does, which always parses Codex responses as SSE) rather than buffering it
+// and handing the "event:"-prefixed body to the transformer's JSON parser.
+func TestEngine_CodexSSEWithNonSSEContentType(t *testing.T) {
+	s := newTestStore(t)
+
+	// codex-sse-registry routes auto-translation to the crashy
+	// anthropic2responses so the response path taken is observable.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Serve the SSE body under a NON event-stream content type — this is
+		// the exact condition that triggered the 502.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "event: response.created\n"+
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-6-luna"}}`+"\n\n"+
+			"event: response.output_text.delta\n"+
+			`data: {"type":"response.output_text.delta","delta":"hi"}`+"\n\n"+
+			"event: response.completed\n"+
+			`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-6-luna","status":"completed"}}`+"\n\n")
+	}))
+	defer ts.Close()
+
+	// Anthropic (Claude Code) client → openai_responses (Codex) downstream,
+	// so auto-translation inserts anthropic2responses.
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "", "openai_responses")
+	if err := s.SetDownstreamAuth("ds1", &config.DownstreamAuthCfg{Type: "oauth"}); err != nil {
+		t.Fatalf("set auth: %v", err)
+	}
+	addOutputModelIDs(t, s, "ds1", "gpt-6-luna")
+
+	eng := New(s)
+	eng.SetRegistry(&codexSSERegistry{})
+	eng.SetTokenManager(&codexTokenManager{})
+
+	// Claude Code streaming request.
+	body := `{"model":"gpt-6-luna","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 (SSE routed through stream path), got %d — body=%q", w.Code, w.Body.String())
+	}
+	out := w.Body.String()
+	// The stream path must pass the Codex SSE events through; if the response
+	// had been buffered and sent to TransformResponse we'd have a 502, not this.
+	if !strings.Contains(out, "response.output_text.delta") {
+		t.Errorf("expected the SSE events to be streamed to the client, got: %q", out)
 	}
 }
 

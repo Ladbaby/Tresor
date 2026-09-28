@@ -992,8 +992,19 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		cancelFn = cancel
 
-		// Handle streaming response
-		if isEventStream(resp.Header.Get("Content-Type")) {
+		// Handle streaming response. A response is streamed when the downstream
+		// marks it as an event stream, OR when the ChatGPT/Codex backend returns
+		// to a streaming request: the reference client always reads Codex
+		// responses as SSE (it hardcodes stream:true and never trusts the
+		// response Content-Type), and Codex can return the SSE body under a
+		// Content-Type that is not text/event-stream. Routing that body through
+		// the non-streaming path would hand an "event:"-prefixed payload to the
+		// transformer's JSON parser and 502 ("invalid character 'e'").
+		streamed := isEventStream(resp.Header.Get("Content-Type"))
+		if !streamed && ctx.CodexBackend && isStreamRequest(currentBody) {
+			streamed = true
+		}
+		if streamed {
 			// Streaming responses always go through a headerDelayWriter so the
 			// HTTP status stays uncommitted until the first bytes are released.
 			// This is what lets the gateway replace a downstream's 200 with a
@@ -1007,7 +1018,6 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			// marker until end-of-stream.
 			hw := newHeaderDelayWriter(cw)
 			outcome := e.handleStreamingResponse(hw, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty && !ctx.CodexBackend, inputFormat, downstreamFormat)
-
 			// An explicit error event is a definitive answer, never an empty
 			// response — do not retry it.
 			if outcome.streamErr != nil {
