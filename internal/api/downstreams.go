@@ -504,9 +504,16 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 		if r.oauthMgr == nil {
 			return nil, fmt.Errorf("OAuth support is not enabled on this daemon")
 		}
-		token, _, err := r.oauthMgr.ResolveValidToken(ds.ID)
+		token, extraHeaders, err := r.oauthMgr.ResolveValidToken(ds.ID)
 		if err != nil {
 			return nil, fmt.Errorf("provider not connected — finish the OAuth login in the Downstreams tab")
+		}
+		// The ChatGPT/Codex backend (identified by the chatgpt-account-id
+		// header the OAuth manager injects) does not expose an OpenAI-style
+		// /models endpoint, so there is nothing to probe. Surface a clear,
+		// accurate message instead of a misleading "check the API key".
+		if _, ok := extraHeaders["chatgpt-account-id"]; ok {
+			return nil, fmt.Errorf("the ChatGPT/Codex backend has no models endpoint — add model IDs manually (e.g. gpt-6-luna) instead of fetching them")
 		}
 		return fetchModelsByCreds(baseURL, token, ds.ApiFormats)
 	}

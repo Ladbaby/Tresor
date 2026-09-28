@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"tresor/internal/oauth"
 	"tresor/internal/proxy"
+	"tresor/internal/store"
 )
 
 // validOAuthPatch returns a valid auth_code oauth auth block for PUT/POST.
@@ -215,5 +218,58 @@ func TestClientSecret_MaskedAndPreserved(t *testing.T) {
 	stored, _ := r.store.GetDownstream(ds.ID)
 	if stored.Auth == nil || stored.Auth.ClientSecret != "real-secret" {
 		t.Fatalf("client_secret changed despite *** placeholder, got %+v", stored.Auth)
+	}
+}
+
+// TestFetchModels_CodexBackend_NoModelsEndpoint verifies the ChatGPT/Codex
+// backend — which has no OpenAI-style /models endpoint — returns a clear,
+// accurate "no models endpoint" message instead of probing and misreporting
+// "authentication failed — check the API key".
+func TestFetchModels_CodexBackend_NoModelsEndpoint(t *testing.T) {
+	r := newOAuthTestRouter(t)
+	handler := r.Handler()
+
+	ds := createDownstreamViaAPI(t, handler, "codex-ds", "https://chatgpt.com/backend-api/codex")
+	if code := putDownstream(t, handler, ds.ID, map[string]interface{}{
+		"auth": map[string]interface{}{
+			"type":     "oauth",
+			"flow":     "device",
+			"client_id": "app_test",
+			"device_auth_url":   "https://auth.test/usercode",
+			"device_token_url":  "https://auth.test/token",
+			"device_verify_url": "https://auth.test/verify",
+			"token_url":         "https://auth.test/oauth/token",
+		},
+	}); code != http.StatusOK {
+		t.Fatalf("expected 200 switching to oauth device, got %d", code)
+	}
+	got, _ := r.store.GetDownstream(ds.ID)
+	if !got.IsOAuth() {
+		t.Fatalf("expected downstream to be oauth, got %+v", got.Auth)
+	}
+
+	// Seed a token whose extra map carries chatgpt-account-id — the header the
+	// OAuth manager surfaces for the real Codex backend — so ResolveValidToken
+	// returns it without a refresh.
+	if err := r.store.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "codex",
+		Flow:         "device",
+		AccessToken:  "fake-access-token",
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+		Extra:        map[string]interface{}{"chatgpt-account-id": "acct-test"},
+	}); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	_, err := r.fetchModels(got)
+	if err == nil {
+		t.Fatal("expected an error for a Codex backend with no models endpoint")
+	}
+	if strings.Contains(err.Error(), "authentication failed") || strings.Contains(err.Error(), "check the API key") {
+		t.Fatalf("misleading auth error for a Codex backend: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "no models endpoint") {
+		t.Fatalf("expected a 'no models endpoint' message, got %q", err.Error())
 	}
 }
