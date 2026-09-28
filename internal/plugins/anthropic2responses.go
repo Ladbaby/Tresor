@@ -152,27 +152,34 @@ func (t *Anthropic2Responses) TransformRequest(req *http.Request, body []byte, c
 	}
 	respBody["input"] = inputItems
 
-	// Tools: Anthropic format → OpenAI format
+	// Tools: Anthropic format → Responses-API flat format.
+	// The Responses API (what the Codex backend speaks) expects tools in the
+	// FLAT shape — name/description/parameters at the top level, not wrapped in
+	// a `function` envelope:
+	//   {type:"function", name:"...", description:"...", parameters:{...}, strict:false}
+	// (see responses2openai.go: convertResponsesToolsToChatCompletions describes
+	// the reverse direction and notes the envelope is Chat-Completions-only.)
 	if tools, ok := anthropicReq["tools"].([]interface{}); ok && len(tools) > 0 {
-		openaiTools := make([]map[string]interface{}, 0, len(tools))
+		respTools := make([]map[string]interface{}, 0, len(tools))
 		for _, tool := range tools {
 			t, ok := tool.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			openaiTools = append(openaiTools, map[string]interface{}{
-				"type": "function",
-				"function": map[string]interface{}{
-					"name":        t["name"],
-					"description": t["description"],
-					"parameters":  t["input_schema"],
-				},
+			respTools = append(respTools, map[string]interface{}{
+				"type":        "function",
+				"name":        t["name"],
+				"description": t["description"],
+				"parameters":  t["input_schema"],
+				"strict":      false,
 			})
 		}
-		respBody["tools"] = openaiTools
+		respBody["tools"] = respTools
 	}
 
-	// Tool choice: Anthropic format → OpenAI format
+	// Tool choice: Anthropic format → Responses-API format.
+	// Responses uses the flat {type:"function", name:"..."} object (name at the
+	// top level), not the Chat-Completions {function:{name}} envelope.
 	if tc, ok := anthropicReq["tool_choice"].(map[string]interface{}); ok {
 		tcType, _ := tc["type"].(string)
 		switch tcType {
@@ -184,9 +191,7 @@ func (t *Anthropic2Responses) TransformRequest(req *http.Request, body []byte, c
 			if name, ok := tc["name"].(string); ok {
 				respBody["tool_choice"] = map[string]interface{}{
 					"type": "function",
-					"function": map[string]interface{}{
-						"name": name,
-					},
+					"name": name,
 				}
 			}
 		}

@@ -4664,6 +4664,64 @@ func TestAnthropic2Responses_TransformRequest_ToolCall(t *testing.T) {
 	}
 }
 
+// Regression: the Codex backend speaks the Responses API, which requires
+// tools in the FLAT shape (name/parameters at the top level), not the
+// Chat-Completions `function:{name}` envelope. The previous envelope form
+// made Codex reject the request with 400
+// "Missing required parameter: 'tools[0].name'".
+func TestAnthropic2Responses_ToolsAreResponsesFlatShape(t *testing.T) {
+	p := &Anthropic2Responses{}
+	body := []byte(`{
+		"model": "gpt-5.6-luna",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{"name": "Read", "description": "Read a file",
+			 "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}}
+		],
+		"tool_choice": {"type": "tool", "name": "Read"},
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/messages", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	tools, ok := result["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %#v", result["tools"])
+	}
+	tool := tools[0].(map[string]interface{})
+	if _, hasFn := tool["function"]; hasFn {
+		t.Fatalf("tool must be flat, not wrapped in a function envelope: %v", tool)
+	}
+	if tool["name"] != "Read" {
+		t.Fatalf("expected top-level name 'Read', got %v", tool["name"])
+	}
+	if tool["parameters"] == nil {
+		t.Fatal("expected top-level parameters, got nil")
+	}
+	if tool["type"] != "function" {
+		t.Fatalf("expected type 'function', got %v", tool["type"])
+	}
+
+	// tool_choice for a named tool must also be flat: {type:"function",name}
+	tc, ok := result["tool_choice"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected object tool_choice, got %v", result["tool_choice"])
+	}
+	if _, hasFn := tc["function"]; hasFn {
+		t.Fatalf("tool_choice must be flat, not wrapped: %v", tc)
+	}
+	if tc["name"] != "Read" {
+		t.Fatalf("expected tool_choice.name 'Read', got %v", tc["name"])
+	}
+}
+
 func TestAnthropic2Responses_TransformRequest_Thinking(t *testing.T) {
 	p := &Anthropic2Responses{}
 	body := []byte(`{
