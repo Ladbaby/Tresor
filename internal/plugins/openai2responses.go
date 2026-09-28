@@ -117,12 +117,19 @@ func (t *OpenAI2Responses) TransformRequest(req *http.Request, body []byte, ctx 
 	}
 	respBody["input"] = inputItems
 
-	// Passthrough tools and tool_choice
+	// Tools / tool_choice: Chat Completions uses a `function:{...}` envelope
+	// (name nested), but the Responses API (Codex, OpenAI Responses) requires
+	// the FLAT shape — name/parameters at the top level. Passing the envelope
+	// through verbatim makes Codex reject the request with 400
+	// "Missing required parameter: 'tools[0].name'". Convert (idempotently:
+	// already-flat tools are preserved).
 	if tools, ok := request["tools"]; ok {
-		respBody["tools"] = tools
+		if converted := convertChatCompletionsToolsToResponses(tools); converted != nil {
+			respBody["tools"] = converted
+		}
 	}
 	if tc, ok := request["tool_choice"]; ok {
-		respBody["tool_choice"] = tc
+		respBody["tool_choice"] = convertChatCompletionsToolChoiceToResponses(tc)
 	}
 
 	// Map reasoning_effort → reasoning.effort
@@ -624,6 +631,108 @@ func extractImagePart(imageURL interface{}) map[string]interface{} {
 		}
 	}
 	return part
+}
+
+// convertChatCompletionsToolsToResponses converts Chat-Completions tools
+// (the `function:{name,...}` envelope) into the flat Responses-API shape
+// (`name`/`description`/`parameters` at the top level). Already-flat tools
+// (with a top-level `name` and no `function` wrapper) are preserved, so this
+// is idempotent. Tools that are neither a function envelope nor a recognized
+// flat function — Codex-internal `type:"custom"`/`namespace`/`tool_search` —
+// are dropped: the Responses backend has no equivalent for them here and
+// rejecting them avoids a 400 on a shape it doesn't understand.
+func convertChatCompletionsToolsToResponses(tools interface{}) interface{} {
+	arr, ok := tools.([]interface{})
+	if !ok {
+		return tools // not an array — pass through unchanged
+	}
+	out := make([]map[string]interface{}, 0, len(arr))
+	for _, tool := range arr {
+		t, ok := tool.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if converted, keep := convertChatCompletionsToolToResponses(t); keep {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+// convertChatCompletionsToolToResponses converts a single tool. Returns the
+// flat Responses shape, or reports !keep when the tool cannot be represented
+// in the Responses API and should be dropped.
+func convertChatCompletionsToolToResponses(tool map[string]interface{}) (map[string]interface{}, bool) {
+	toolType, _ := tool["type"].(string)
+	if toolType != "" && toolType != "function" {
+		return nil, false // non-function tool — no Responses equivalent here
+	}
+
+	// Already flat (Responses shape): top-level name, no function wrapper.
+	if _, hasFn := tool["function"]; !hasFn {
+		if _, hasName := tool["name"]; hasName {
+			flat := map[string]interface{}{"type": "function", "name": tool["name"]}
+			if desc, ok := tool["description"]; ok {
+				flat["description"] = desc
+			}
+			if params, ok := tool["parameters"]; ok {
+				flat["parameters"] = params
+			}
+			// Only forward an explicit strict:true; false is the default.
+			if strict, ok := tool["strict"]; ok {
+				if b, isBool := strict.(bool); isBool && b {
+					flat["strict"] = true
+				}
+			}
+			return flat, true
+		}
+		// No name, no function — not a usable tool.
+		return nil, false
+	}
+
+	// Chat-Completions envelope: unwrap function:{...}.
+	fn, ok := tool["function"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	if _, hasName := fn["name"]; !hasName {
+		return nil, false
+	}
+	flat := map[string]interface{}{"type": "function", "name": fn["name"]}
+	if desc, ok := fn["description"]; ok {
+		flat["description"] = desc
+	}
+	if params, ok := fn["parameters"]; ok {
+		flat["parameters"] = params
+	}
+	if strict, ok := fn["strict"]; ok {
+		if b, isBool := strict.(bool); isBool && b {
+			flat["strict"] = true
+		}
+	}
+	return flat, true
+}
+
+// convertChatCompletionsToolChoiceToResponses converts a Chat-Completions
+// tool_choice value to the flat Responses-API shape. String forms ("auto",
+// "required", "none") are identical in both APIs and pass through. The named
+// object form differs — Chat Completions nests the name under `function`,
+// Responses puts it at the top level.
+func convertChatCompletionsToolChoiceToResponses(tc interface{}) interface{} {
+	obj, ok := tc.(map[string]interface{})
+	if !ok {
+		return tc // string form or other — pass through
+	}
+	if _, ok := obj["name"]; ok {
+		// Already flat.
+		return obj
+	}
+	if fn, ok := obj["function"].(map[string]interface{}); ok {
+		if name, ok := fn["name"]; ok {
+			return map[string]interface{}{"type": "function", "name": name}
+		}
+	}
+	return obj
 }
 
 // Interface compliance checks.

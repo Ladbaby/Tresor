@@ -4374,6 +4374,63 @@ func TestOpenAI2Responses_TransformRequest_ToolCall(t *testing.T) {
 	}
 }
 
+// Regression: a Chat-Completions client (tools in the `function:{name}`
+// envelope) pointed at a Responses/Codex backend must have its tools
+// flattened to the Responses shape. The old passthrough forwarded the
+// envelope verbatim, which Codex rejects with 400
+// "Missing required parameter: 'tools[0].name'".
+func TestOpenAI2Responses_ToolsFlattenedToResponsesShape(t *testing.T) {
+	p := &OpenAI2Responses{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{"type": "function", "function": {"name": "get_weather", "description": "Weather",
+			 "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}
+		],
+		"tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	tools, ok := result["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %#v", result["tools"])
+	}
+	tool := tools[0].(map[string]interface{})
+	if _, hasFn := tool["function"]; hasFn {
+		t.Fatalf("tool must be flattened, not an envelope: %v", tool)
+	}
+	if tool["name"] != "get_weather" {
+		t.Fatalf("expected top-level name get_weather, got %v", tool["name"])
+	}
+	if tool["parameters"] == nil {
+		t.Fatal("expected top-level parameters, got nil")
+	}
+	if tool["type"] != "function" {
+		t.Fatalf("expected type function, got %v", tool["type"])
+	}
+
+	tc, ok := result["tool_choice"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected object tool_choice, got %v", result["tool_choice"])
+	}
+	if _, hasFn := tc["function"]; hasFn {
+		t.Fatalf("tool_choice must be flattened, got %v", tc)
+	}
+	if tc["name"] != "get_weather" {
+		t.Fatalf("expected tool_choice.name get_weather, got %v", tc["name"])
+	}
+}
+
 func TestOpenAI2Responses_TransformRequest_Reasoning(t *testing.T) {
 	p := &OpenAI2Responses{}
 	body := []byte(`{
@@ -4719,6 +4776,33 @@ func TestAnthropic2Responses_ToolsAreResponsesFlatShape(t *testing.T) {
 	}
 	if tc["name"] != "Read" {
 		t.Fatalf("expected tool_choice.name 'Read', got %v", tc["name"])
+	}
+}
+
+// Anthropic tool_choice {"type":"none"} disables tools — it must map to the
+// Responses "none" string, not be silently dropped (which would default to
+// auto). Regression test.
+func TestAnthropic2Responses_ToolChoiceNone(t *testing.T) {
+	p := &Anthropic2Responses{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+		"tool_choice": {"type": "none"},
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/messages", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if result["tool_choice"] != "none" {
+		t.Fatalf("expected tool_choice 'none', got %v", result["tool_choice"])
 	}
 }
 

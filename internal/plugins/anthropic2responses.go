@@ -187,6 +187,10 @@ func (t *Anthropic2Responses) TransformRequest(req *http.Request, body []byte, c
 			respBody["tool_choice"] = "auto"
 		case "any":
 			respBody["tool_choice"] = "required"
+		case "none":
+			// Anthropic "none" disables tools — map to the Responses "none"
+			// string form rather than dropping it (which would default to auto).
+			respBody["tool_choice"] = "none"
 		case "tool":
 			if name, ok := tc["name"].(string); ok {
 				respBody["tool_choice"] = map[string]interface{}{
