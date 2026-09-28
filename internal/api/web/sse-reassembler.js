@@ -63,6 +63,8 @@
         const cached = u.cache_read_input_tokens != null ? u.cache_read_input_tokens
                     : u.cached_tokens != null ? u.cached_tokens
                     : u.cachedContentTokenCount != null ? u.cachedContentTokenCount
+                    : isDict(u.input_tokens_details) && u.input_tokens_details.cached_tokens != null ? u.input_tokens_details.cached_tokens
+                    : isDict(u.prompt_tokens_details) && u.prompt_tokens_details.cached_tokens != null ? u.prompt_tokens_details.cached_tokens
                     : 0;
         if (input == null && output == null) return null;
         const out = { input_tokens: input || 0, output_tokens: output || 0, cache_read_input_tokens: cached };

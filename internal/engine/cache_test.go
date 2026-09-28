@@ -233,6 +233,40 @@ func absDiff(a, b float64) float64 {
 	return b - a
 }
 
+// TestUsageFromResponseBody_ResponsesAPIStream is a regression for a real
+// ChatGPT/Codex response: the Responses-API `response.completed` SSE event
+// wraps the usage under `response.usage` (not at the top level), and the
+// cached count lives in the NESTED `input_tokens_details.cached_tokens`
+// (not a top-level `cached_tokens`). input_tokens is the total prompt
+// (cached included). Both locations must be recognised or the cache info
+// is silently dropped.
+func TestUsageFromResponseBody_ResponsesAPIStream(t *testing.T) {
+	data := []byte(`{"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":19370,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":15872},"output_tokens":108,"output_tokens_details":{"reasoning_tokens":54},"total_tokens":19478}}}`)
+	u, ok := UsageFromResponseBody(data)
+	if !ok || u == nil {
+		t.Fatalf("expected usage block from response.completed event")
+	}
+	if u.InputTokens == nil || *u.InputTokens != 19370 {
+		t.Errorf("input_tokens: got %v, want 19370", u.InputTokens)
+	}
+	if u.OutputTokens == nil || *u.OutputTokens != 108 {
+		t.Errorf("output_tokens: got %v, want 108", u.OutputTokens)
+	}
+	if u.CachedTokens == nil || *u.CachedTokens != 15872 {
+		t.Errorf("cached_tokens (from input_tokens_details): got %v, want 15872", u.CachedTokens)
+	}
+	// input_tokens is the total prompt (cached is a subset), so the hit rate
+	// is cached / total = 15872 / 19370.
+	rate, present := u.CacheHitRate()
+	if !present || rate == nil {
+		t.Fatalf("expected a cache hit rate, got %v", present)
+	}
+	want := 15872.0 / 19370.0
+	if abs(*rate-want) > 0.0001 {
+		t.Errorf("cache hit rate: got %v, want %v", *rate, want)
+	}
+}
+
 // abs and contains are shared helpers used across the engine test
 // suite, including the cache_integration_test.go file that imports
 // them transitively.

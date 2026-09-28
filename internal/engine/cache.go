@@ -56,6 +56,14 @@ func locateUsageBlock(doc map[string]interface{}) (map[string]interface{}, bool)
 			return u, true
 		}
 	}
+	// Responses API SSE events (e.g. response.completed) wrap the usage under
+	// `response.usage` rather than at the top level — the whole event is
+	// `{"type":"response.completed","response":{...,"usage":{...}}}`.
+	if r, ok := doc["response"].(map[string]interface{}); ok {
+		if u, ok := r["usage"].(map[string]interface{}); ok && looksLikeUsage(u) {
+			return u, true
+		}
+	}
 	if u, ok := doc["usageMetadata"].(map[string]interface{}); ok && looksLikeUsage(u) {
 		return u, true
 	}
@@ -109,6 +117,15 @@ func usageFromMap(m map[string]interface{}) *UsageBlock {
 	}
 	// Also accept the nested prompt_tokens_details.cached_tokens shape.
 	if details, ok := m["prompt_tokens_details"].(map[string]interface{}); ok {
+		if v, ok := details["cached_tokens"]; ok {
+			u.CachedTokens = ptrInt(asInt64(v))
+		}
+	}
+	// Responses API (e.g. ChatGPT/Codex) puts the cached count under
+	// input_tokens_details.cached_tokens. input_tokens is the total prompt
+	// (cached included), so CachedTokens here is a subset — same convention
+	// as the OpenAI Chat Completions shape above.
+	if details, ok := m["input_tokens_details"].(map[string]interface{}); ok {
 		if v, ok := details["cached_tokens"]; ok {
 			u.CachedTokens = ptrInt(asInt64(v))
 		}
