@@ -504,6 +504,61 @@ function eq(name, got, want) {
     eq('norm-resp-responses-json: text', t && t.text, 'Done.');
 }
 
+// --- OpenAI Responses: reasoning item with readable summary text ---
+//
+// A reasoning output item with a plaintext summary (what a non-encrypted
+// provider returns) must surface as a collapsible thinking block rather
+// than being silently dropped from the Parsed view.
+
+{
+    const body = {
+        id: 'r', object: 'response', status: 'completed',
+        output: [
+            { type: 'reasoning', content: [], encrypted_content: '',
+              summary: [{ type: 'summary_text', text: 'Step 1: ...' },
+                        { type: 'summary_text', text: 'Step 2: ...' }] },
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const norm = normalizeResponse(body, '/v1/responses');
+    const think = norm && norm.content && norm.content.find(b => b.type === 'thinking');
+    check('norm-resp-resp-reasoning-readable: thinking block present', !!think,
+        'content=' + JSON.stringify(norm && norm.content));
+    eq('norm-resp-resp-reasoning-readable: summary text merged',
+        think && think.thinking, 'Step 1: ...\nStep 2: ...');
+    const text = norm && norm.content && norm.content.find(b => b.type === 'text');
+    eq('norm-resp-resp-reasoning-readable: text preserved', text && text.text, 'answer');
+}
+
+// --- OpenAI Responses: reasoning item returned as encrypted_content only ---
+//
+// ChatGPT/Codex requests use include:["reasoning.encrypted_content"], so the
+// reasoning item carries an encrypted blob and empty summary/content. The
+// inspector must still show that reasoning happened (a placeholder naming the
+// blob size) instead of dropping the item entirely.
+
+{
+    const body = {
+        id: 'r', object: 'response', status: 'completed',
+        output: [
+            { type: 'reasoning', content: [], encrypted_content: 'gAAAAAB', summary: [] },
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const norm = normalizeResponse(body, '/v1/responses');
+    const think = norm && norm.content && norm.content.find(b => b.type === 'thinking');
+    check('norm-resp-resp-reasoning-encrypted: placeholder present',
+        !!think && /encrypted reasoning/i.test(think.thinking),
+        'content=' + JSON.stringify(norm && norm.content));
+    check('norm-resp-resp-reasoning-encrypted: names KB size',
+        !!think && /KB\)/.test(think.thinking),
+        'content=' + JSON.stringify(norm && norm.content));
+    const text = norm && norm.content && norm.content.find(b => b.type === 'text');
+    eq('norm-resp-resp-reasoning-encrypted: text preserved', text && text.text, 'answer');
+}
+
 // --- Gemini: streaming SSE response ---
 
 {

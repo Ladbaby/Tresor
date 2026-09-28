@@ -961,6 +961,35 @@
                     input = item.arguments;
                 }
                 blocks.push({ type: 'tool_use', id: item.id || item.call_id || '', name: item.name || 'tool_use', input });
+            } else if (item.type === 'reasoning') {
+                // Responses API keeps the model's reasoning in a separate
+                // `reasoning` output item. Surface it so the inspector shows
+                // that reasoning happened rather than silently dropping the
+                // item. Readable text lives in `summary[].text` (or `content[]`
+                // when the provider returns plaintext); ChatGPT/Codex requests
+                // use include:["reasoning.encrypted_content"] so only an
+                // `encrypted_content` blob is returned — in that case we show
+                // an explicit placeholder naming the size so the user can see
+                // reasoning was produced even though it is not readable.
+                let text = '';
+                if (Array.isArray(item.summary)) {
+                    for (const s of item.summary) {
+                        if (isDict(s) && typeof s.text === 'string') text += (text ? '\n' : '') + s.text;
+                    }
+                }
+                if (!text && Array.isArray(item.content)) {
+                    for (const p of item.content) {
+                        if (isDict(p) && typeof p.text === 'string') text += (text ? '\n' : '') + p.text;
+                    }
+                }
+                if (!text) {
+                    const enc = typeof item.encrypted_content === 'string' ? item.encrypted_content : '';
+                    if (enc) {
+                        const kb = (enc.length / 1024).toFixed(1);
+                        text = '(encrypted reasoning — ' + kb + ' KB)';
+                    }
+                }
+                if (text) blocks.push({ type: 'thinking', thinking: text });
             }
         }
         return {
