@@ -22,7 +22,7 @@ type a2rStreamState struct {
 	Model           string
 	ContentBlockIdx int
 	sentStart       bool
-	pendingTextCBS  bool // whether we've sent content_block_start for current text block
+	pendingTextCBS  bool                         // whether we've sent content_block_start for current text block
 	toolCallBlocks  map[string]*a2rToolCallBlock // output_id -> tool call block
 
 	// Reasoning tracking. When the upstream emits a reasoning output item
@@ -41,6 +41,20 @@ type a2rToolCallBlock struct {
 	Name      string
 	BlockIdx  int
 	startSent bool
+}
+
+// a2rResponsesUsage mirrors the parts of the Responses usage object that can be
+// represented in Anthropic's streaming usage blocks. ChatGPT/Codex reports
+// input_tokens as the total prompt size and cached_tokens as a subset of it.
+// Anthropic instead reports fresh input_tokens separately from
+// cache_read_input_tokens, so the translation subtracts the cached portion
+// before emitting the Anthropic value.
+type a2rResponsesUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	InputDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
 }
 
 // PluginName returns the stable type name for deduplication.
@@ -338,7 +352,7 @@ func (t *Anthropic2Responses) TransformResponse(resp *http.Response, body []byte
 		StopReason: stopReason,
 	}
 
-	var inputTokens, outputTokens int
+	var inputTokens, outputTokens, cachedTokens int
 	if usage, ok := respMap["usage"].(map[string]any); ok {
 		if it, ok := usage["input_tokens"].(float64); ok {
 			inputTokens = int(it)
@@ -346,7 +360,16 @@ func (t *Anthropic2Responses) TransformResponse(resp *http.Response, body []byte
 		if ot, ok := usage["output_tokens"].(float64); ok {
 			outputTokens = int(ot)
 		}
+		if details, ok := usage["input_tokens_details"].(map[string]any); ok {
+			if cached, ok := details["cached_tokens"].(float64); ok && cached > 0 {
+				cachedTokens = int(cached)
+			}
+		}
 	}
+	if cachedTokens > inputTokens {
+		cachedTokens = inputTokens
+	}
+	inputTokens -= cachedTokens
 	response.Usage.InputTokens = inputTokens
 	response.Usage.OutputTokens = outputTokens
 
@@ -358,8 +381,10 @@ func (t *Anthropic2Responses) TransformResponse(resp *http.Response, body []byte
 		"model":       response.Model,
 		"stop_reason": response.StopReason,
 		"usage": map[string]any{
-			"input_tokens":  response.Usage.InputTokens,
-			"output_tokens": response.Usage.OutputTokens,
+			"input_tokens":                response.Usage.InputTokens,
+			"cache_read_input_tokens":     cachedTokens,
+			"cache_creation_input_tokens": 0,
+			"output_tokens":               response.Usage.OutputTokens,
 		},
 	}
 	if out["stop_reason"] == "" {
@@ -416,12 +441,12 @@ func (t *Anthropic2Responses) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 		writeSSE("message_start", map[string]interface{}{
 			"type": "message_start",
 			"message": map[string]interface{}{
-				"id":      evt.Response.ID,
-				"type":    "message",
-				"role":    "assistant",
-				"content": []interface{}{},
-				"model":   evt.Response.Model,
-				"stop_reason": nil,
+				"id":            evt.Response.ID,
+				"type":          "message",
+				"role":          "assistant",
+				"content":       []interface{}{},
+				"model":         evt.Response.Model,
+				"stop_reason":   nil,
 				"stop_sequence": nil,
 				"usage": map[string]interface{}{
 					"input_tokens":  0,
@@ -646,8 +671,8 @@ func (t *Anthropic2Responses) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 	case "response.completed":
 		var evt struct {
 			Response struct {
-				Status string         `json:"status"`
-				Usage  *responsesUsage `json:"usage"`
+				Status string             `json:"status"`
+				Usage  *a2rResponsesUsage `json:"usage"`
 			} `json:"response"`
 		}
 		json.Unmarshal(chunk.Data, &evt)
@@ -693,6 +718,24 @@ func (t *Anthropic2Responses) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 			"output_tokens": 0,
 		}
 		if evt.Response.Usage != nil {
+			// Responses input_tokens includes the cached portion, whereas
+			// Anthropic input_tokens excludes cache reads. Preserve the
+			// complete accounting by splitting the total into fresh and
+			// cached tokens. Clamp defensively for malformed upstream data.
+			cached := evt.Response.Usage.InputDetails.CachedTokens
+			if cached < 0 {
+				cached = 0
+			}
+			if cached > evt.Response.Usage.InputTokens {
+				cached = evt.Response.Usage.InputTokens
+			}
+			input := evt.Response.Usage.InputTokens - cached
+			if input < 0 {
+				input = 0
+			}
+			usage["input_tokens"] = input
+			usage["cache_read_input_tokens"] = cached
+			usage["cache_creation_input_tokens"] = 0
 			usage["output_tokens"] = evt.Response.Usage.OutputTokens
 		}
 		writeSSE("message_delta", map[string]interface{}{

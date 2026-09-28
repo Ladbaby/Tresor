@@ -49,7 +49,7 @@ func TestOpenAI2Anthropic_TransformRequest_Basic(t *testing.T) {
 	p := &OpenAI2Anthropic{}
 
 	openAIReq := map[string]interface{}{
-		"model":    "gpt-4o",
+		"model": "gpt-4o",
 		"messages": []interface{}{
 			map[string]interface{}{"role": "system", "content": "You are helpful"},
 			map[string]interface{}{"role": "user", "content": "Hello"},
@@ -250,8 +250,8 @@ func TestOpenAI2Anthropic_TransformRequest_MaxCompletionTokensBeatsMaxTokens(t *
 		"messages": []interface{}{
 			map[string]interface{}{"role": "user", "content": "hi"},
 		},
-		"max_tokens":             100,
-		"max_completion_tokens":  500,
+		"max_tokens":            100,
+		"max_completion_tokens": 500,
 	}
 	body, _ := json.Marshal(openAIReq)
 
@@ -631,8 +631,8 @@ func TestOpenAI2Anthropic_TransformResponse_Thinking(t *testing.T) {
 		"model": "MiniMax-M2.5",
 		"content": []interface{}{
 			map[string]interface{}{
-				"type":     "thinking",
-				"thinking": "The user asked for PONG. I should reply with exactly PONG.",
+				"type":      "thinking",
+				"thinking":  "The user asked for PONG. I should reply with exactly PONG.",
 				"signature": "abcd",
 			},
 		},
@@ -2247,7 +2247,7 @@ func TestOpenAI2Anthropic_TransformRequest_ContentBlocks(t *testing.T) {
 	p := &Anthropic2OpenAI{}
 
 	anthropicReq := map[string]interface{}{
-		"model":    "claude-sonnet-4-20250514",
+		"model":      "claude-sonnet-4-20250514",
 		"max_tokens": 200,
 		"messages": []interface{}{
 			map[string]interface{}{"role": "user", "content": []interface{}{
@@ -2304,7 +2304,7 @@ func TestAnthropic2OpenAI_TransformRequest_MixedContent(t *testing.T) {
 	p := &Anthropic2OpenAI{}
 
 	anthropicReq := map[string]interface{}{
-		"model":    "claude-sonnet-4-20250514",
+		"model":      "claude-sonnet-4-20250514",
 		"max_tokens": 200,
 		"messages": []interface{}{
 			map[string]interface{}{"role": "user", "content": "Hello"},
@@ -2335,10 +2335,10 @@ func TestAnthropic2OpenAI_TransformRequest_MixedContent(t *testing.T) {
 func TestOpenAI2Anthropic_ResponseNonStreaming(t *testing.T) {
 	p := &OpenAI2Anthropic{}
 	anthropicResp := map[string]interface{}{
-		"id":      "msg_123",
-		"model":   "claude-sonnet-4-20250514",
-		"content": []interface{}{map[string]interface{}{"type": "text", "text": "Hello!"}},
-		"usage":   map[string]interface{}{"input_tokens": 10, "output_tokens": 5},
+		"id":          "msg_123",
+		"model":       "claude-sonnet-4-20250514",
+		"content":     []interface{}{map[string]interface{}{"type": "text", "text": "Hello!"}},
+		"usage":       map[string]interface{}{"input_tokens": 10, "output_tokens": 5},
 		"stop_reason": "end_turn",
 	}
 	body, _ := json.Marshal(anthropicResp)
@@ -4564,7 +4564,6 @@ func TestResponses2Anthropic_TransformResponse_NonStreaming_Thinking(t *testing.
 	}
 }
 
-
 // ----- OpenAI2Responses tests -----
 
 func TestOpenAI2Responses_TransformRequest_Basic(t *testing.T) {
@@ -5239,9 +5238,33 @@ func TestAnthropic2Responses_TransformResponse_NonStreaming(t *testing.T) {
 	if len(content) != 1 {
 		t.Fatalf("expected 1 content block, got %d", len(content))
 	}
-	block := content[0].(map[string]interface{})
-	if block["type"] != "text" || block["text"] != "Hello there" {
-		t.Fatalf("expected text block 'Hello there', got %v", block)
+	usage := result["usage"].(map[string]interface{})
+	if got := usage["input_tokens"].(float64); got != 10 {
+		t.Errorf("input_tokens = %v, want 10", got)
+	}
+	if got := usage["cache_read_input_tokens"].(float64); got != 0 {
+		t.Errorf("cache_read_input_tokens = %v, want 0", got)
+	}
+}
+
+func TestAnthropic2Responses_TransformResponse_MapsCacheUsage(t *testing.T) {
+	p := &Anthropic2Responses{}
+	respBody := []byte(`{"id":"resp_123","status":"completed","model":"gpt-6","output":[],"usage":{"input_tokens":27429,"input_tokens_details":{"cached_tokens":22528},"output_tokens":186}}`)
+	transformed, err := p.TransformResponse(&http.Response{Header: http.Header{}}, respBody, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Usage map[string]int `json:"usage"`
+	}
+	if err := json.Unmarshal(transformed, &result); err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Usage["input_tokens"]; got != 4901 {
+		t.Errorf("input_tokens = %d, want 4901", got)
+	}
+	if got := result.Usage["cache_read_input_tokens"]; got != 22528 {
+		t.Errorf("cache_read_input_tokens = %d, want 22528", got)
 	}
 }
 
@@ -5283,5 +5306,46 @@ func TestAnthropic2Responses_TransformStreamChunk_TextDelta(t *testing.T) {
 	output := string(result.Data)
 	if !strings.Contains(output, "content_block_delta") && !strings.Contains(output, "content_block_start") {
 		t.Fatal("expected content_block_delta or content_block_start event, got:", output)
+	}
+}
+
+func TestAnthropic2Responses_TransformStreamChunk_MapsCacheUsage(t *testing.T) {
+	p := &Anthropic2Responses{}
+	ctx := &engine.PipelineContext{Variables: make(map[string]interface{})}
+
+	result, err := p.TransformStreamChunk(engine.SSEChunk{
+		EventType: "response.completed",
+		Data:      []byte(`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":27429,"input_tokens_details":{"cached_tokens":22528},"output_tokens":186}}}`),
+	}, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var payload struct {
+		Usage map[string]int `json:"usage"`
+	}
+	for _, event := range strings.Split(string(result.Data), "\n\n") {
+		if !strings.Contains(event, "event: message_delta") {
+			continue
+		}
+		for _, line := range strings.Split(event, "\n") {
+			if strings.HasPrefix(line, "data: ") {
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if got := payload.Usage["input_tokens"]; got != 4901 {
+		t.Errorf("input_tokens = %d, want fresh input total 4901", got)
+	}
+	if got := payload.Usage["cache_read_input_tokens"]; got != 22528 {
+		t.Errorf("cache_read_input_tokens = %d, want 22528", got)
+	}
+	if got := payload.Usage["cache_creation_input_tokens"]; got != 0 {
+		t.Errorf("cache_creation_input_tokens = %d, want 0", got)
+	}
+	if got := payload.Usage["output_tokens"]; got != 186 {
+		t.Errorf("output_tokens = %d, want 186", got)
 	}
 }

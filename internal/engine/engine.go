@@ -74,7 +74,7 @@ type Engine struct {
 	// tokenManager resolves valid OAuth access tokens for downstreams that
 	// use OAuth auth (downstreams.auth_method = "oauth"). Nil when no OAuth
 	// manager is wired (tests, or a config with no oauth_providers).
-	tokenMu     sync.RWMutex
+	tokenMu      sync.RWMutex
 	tokenManager TokenResolver
 
 	// statsBufMu guards statsBuf. The buffer accumulates per-request
@@ -298,12 +298,12 @@ func (e *Engine) isResponseEmpty(body []byte, downstreamFormat string) bool {
 
 // shouldRetry determines whether the gateway should retry a failed request.
 // Returns true only if the response meets ALL retry conditions:
-// - HTTP status is 200 (OK)
-// - The request path is a generation endpoint (retry_on_empty is
-//   generation-only; utility endpoints like /v1/messages/count_tokens
-//   serve structured data that lacks a `content` field and must not be
-//   classified as empty — see count-tokens-trigger-empty-response.txt)
-// - The response body is empty for the downstream's API format
+//   - HTTP status is 200 (OK)
+//   - The request path is a generation endpoint (retry_on_empty is
+//     generation-only; utility endpoints like /v1/messages/count_tokens
+//     serve structured data that lacks a `content` field and must not be
+//     classified as empty — see count-tokens-trigger-empty-response.txt)
+//   - The response body is empty for the downstream's API format
 //
 // Non-200 responses are never retried — LLM client apps handle their own
 // retries for HTTP errors (4xx client errors, 5xx server errors), and
@@ -1962,9 +1962,11 @@ func codexFingerprintBody(body []byte, sessionID string) []byte {
 			obj["include"] = []interface{}{"reasoning.encrypted_content"}
 			changed = true
 		}
-		if _, ok := obj["prompt_cache_key"]; !ok {
-			obj["prompt_cache_key"] = sessionID
-			changed = true
+		if sessionID != "" {
+			if _, ok := obj["prompt_cache_key"]; !ok {
+				obj["prompt_cache_key"] = sessionID
+				changed = true
+			}
 		}
 	}
 	if !changed {
@@ -1977,7 +1979,19 @@ func codexFingerprintBody(body []byte, sessionID string) []byte {
 	return out
 }
 
-// forwardRequest sends the (possibly transformed) request to the target downstream.
+// codexCacheKey returns the stable, client-supplied conversation identity for
+// the Codex cache key. A stateless gateway cannot safely invent a durable
+// conversation identity: content-derived keys would merge unrelated clients
+// with equivalent prompts, while a random key would change every turn. When
+// no identity is supplied, return an empty string so the downstream's own
+// cache matching remains authoritative.
+func codexCacheKey(original *http.Request) string {
+	if sessionID := original.Header.Get("session-id"); sessionID != "" {
+		return sessionID
+	}
+	return original.Header.Get("x-client-request-id")
+}
+
 // SSRF validation is not applied here — downstreams are admin-configured via auth-protected API.
 // Returns the response and a cancel function; caller must call cancel after consuming resp.Body.
 func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *PipelineContext) (*http.Response, context.CancelFunc, error) {
@@ -2028,17 +2042,19 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		return nil, func() {}, fmt.Errorf("parse target URL: %w", err)
 	}
 
-	// ChatGPT/Codex fingerprint: generate one per-request correlation id and
-	// apply the reference client's request shape. The reference client reuses
-	// the same session id for the session-id / x-client-request-id headers and
-	// the prompt_cache_key body field; a fresh UUID per request is the safe
-	// analogue for a stateless gateway (64-char cap, matching prompt_cache_key).
-	var codexSessionID string
+	// ChatGPT/Codex fingerprint: preserve a client-provided stable conversation
+	// id for session-id, x-client-request-id, and prompt_cache_key. For clients
+	// without one, generate one per request to retain the reference client's
+	// required correlation headers without incorrectly sharing cache affinity
+	// between independent stateless conversations.
+	codexSessionID := ""
 	if ctx.CodexBackend {
-		codexSessionID = uuid.NewString()
-		if len(codexSessionID) > 64 {
-			codexSessionID = codexSessionID[:64]
-		}
+		codexSessionID = codexCacheKey(original)
+	}
+	codexCorrelationID := codexSessionID
+	if ctx.CodexBackend && codexCorrelationID == "" {
+		codexCorrelationID = uuid.NewString()
+		codexSessionID = codexCorrelationID
 	}
 
 	// For the ChatGPT/Codex backend, apply the reference client's request-body
@@ -2147,13 +2163,11 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		if forwardedReq.Header.Get("OpenAI-Beta") == "" {
 			forwardedReq.Header.Set("OpenAI-Beta", "responses=experimental")
 		}
-		// Per-request correlation headers. The reference client reuses the same
-		// session id for both (and for prompt_cache_key in the body); we do the
-		// same with the id generated above.
-		if forwardedReq.Header.Get("session-id") == "" {
-			forwardedReq.Header.Set("session-id", codexSessionID)
-			forwardedReq.Header.Set("x-client-request-id", codexSessionID)
-		}
+		// Correlation headers are required by the reference client. Preserve the
+		// caller's stable identity when supplied, otherwise use the per-request
+		// UUID without adding it as prompt_cache_key.
+		forwardedReq.Header.Set("session-id", codexCorrelationID)
+		forwardedReq.Header.Set("x-client-request-id", codexCorrelationID)
 	}
 
 	resp, err := e.client.Do(forwardedReq)
@@ -2186,10 +2200,12 @@ func extractModel(body []byte, pathFallback string) string {
 
 // geminiModelFromPath extracts the model segment from a Gemini path.
 // Examples:
-//   /v1beta/models                              → ""
-//   /v1beta/models/gemini-2.5-pro               → "gemini-2.5-pro"
-//   /v1beta/models/gemini-2.5-pro:generateContent          → "gemini-2.5-pro"
-//   /v1beta/models/qwen3.5:9b-mtp:instruct:streamGenerateContent → "qwen3.5:9b-mtp:instruct"
+//
+//	/v1beta/models                              → ""
+//	/v1beta/models/gemini-2.5-pro               → "gemini-2.5-pro"
+//	/v1beta/models/gemini-2.5-pro:generateContent          → "gemini-2.5-pro"
+//	/v1beta/models/qwen3.5:9b-mtp:instruct:streamGenerateContent → "qwen3.5:9b-mtp:instruct"
+//
 // Returns "" for non-Gemini paths.
 //
 // Model names may legitimately contain colons (e.g. self-hosted models like
@@ -2440,8 +2456,8 @@ type geminiModelRecord struct {
 // Query parameters honored:
 //   - pageSize:  cap on returned entries (default 1000, max 1000 to match Google's behavior)
 //   - pageToken: opaque cursor returned in the previous response; we don't paginate
-//                (all results fit in one page unless the catalog grows huge), so we
-//                accept and ignore it but never emit one.
+//     (all results fit in one page unless the catalog grows huge), so we
+//     accept and ignore it but never emit one.
 //
 // Proxy auth is validated by HandleProxy before reaching this function.
 func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {

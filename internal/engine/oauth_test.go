@@ -253,7 +253,53 @@ func TestEngine_CodexBackendFingerprint(t *testing.T) {
 	}
 }
 
-// TestEngine_CodexNonStreamNotCompressed verifies the reference-client parity
+func TestEngine_CodexCacheKeyUsesClientSessionID(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request.Header.Set("session-id", "client-conversation-42")
+
+	if got := codexCacheKey(request); got != "client-conversation-42" {
+		t.Errorf("codexCacheKey() = %q, want client session id", got)
+	}
+}
+
+func TestEngine_CodexCacheKeyUsesClientRequestID(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request.Header.Set("x-client-request-id", "client-conversation-42")
+
+	if got := codexCacheKey(request); got != "client-conversation-42" {
+		t.Errorf("codexCacheKey() = %q, want client request id", got)
+	}
+}
+
+func TestEngine_CodexCacheKeyIsEmptyWithoutClientIdentity(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	if got := codexCacheKey(request); got != "" {
+		t.Errorf("codexCacheKey() = %q, want empty string", got)
+	}
+}
+
+func TestEngine_CodexCacheKeyIsStableAcrossTurns(t *testing.T) {
+	first := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	second := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	first.Header.Set("session-id", "client-conversation-42")
+	second.Header.Set("session-id", "client-conversation-42")
+
+	if firstKey, secondKey := codexCacheKey(first), codexCacheKey(second); firstKey != secondKey {
+		t.Errorf("codexCacheKey changed across turns: first=%q second=%q", firstKey, secondKey)
+	}
+}
+
+func TestEngine_CodexCacheKeySeparatesConversations(t *testing.T) {
+	first := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	second := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	first.Header.Set("session-id", "first-conversation")
+	second.Header.Set("session-id", "second-conversation")
+
+	if firstKey, secondKey := codexCacheKey(first), codexCacheKey(second); firstKey == secondKey {
+		t.Errorf("codexCacheKey must differ for distinct client identities: %q", firstKey)
+	}
+}
+
 // scope: zstd compression is applied only to stream requests, so a non-stream
 // ChatGPT/Codex request keeps a plain JSON body (no content-encoding), while
 // still carrying the fingerprint headers.
@@ -448,4 +494,3 @@ func TestEngine_CodexBackendNoRetryOnEmpty(t *testing.T) {
 		t.Fatalf("Codex backend must not be replayed: got %d upstream calls, want 1", n)
 	}
 }
-
