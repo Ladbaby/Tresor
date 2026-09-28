@@ -509,15 +509,105 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 			return nil, fmt.Errorf("provider not connected — finish the OAuth login in the Downstreams tab")
 		}
 		// The ChatGPT/Codex backend (identified by the chatgpt-account-id
-		// header the OAuth manager injects) does not expose an OpenAI-style
-		// /models endpoint, so there is nothing to probe. Surface a clear,
-		// accurate message instead of a misleading "check the API key".
+		// header the OAuth manager injects) serves a Codex models manifest at
+		// {base}/models, not an OpenAI-style /models. Fetch it with the Codex
+		// client identity + version headers the endpoint requires.
 		if _, ok := extraHeaders["chatgpt-account-id"]; ok {
-			return nil, fmt.Errorf("the ChatGPT/Codex backend has no models endpoint — add model IDs manually (e.g. gpt-6-luna) instead of fetching them")
+			return fetchCodexModels(baseURL, token, extraHeaders["chatgpt-account-id"])
 		}
 		return fetchModelsByCreds(baseURL, token, ds.ApiFormats)
 	}
 	return fetchModelsByCreds(baseURL, ds.EffectiveAPIKey(), ds.ApiFormats)
+}
+
+// Codex models-manifest client identity. The ChatGPT Codex backend serves a
+// models manifest (not an OpenAI-style /models) and only accepts it under the
+// official Codex CLI identity, with a client version at or above an upstream
+// floor — below that the endpoint 404s. These values mirror the known-good
+// sub2api recipe, which has been verified against the live backend. Package
+// vars so tests can pin them.
+var (
+	codexModelsOriginator = "codex-tui"
+	codexModelsVersion    = "0.146.0"
+	codexModelsUserAgent  = "codex-tui/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color"
+)
+
+// fetchCodexModels lists the models a ChatGPT/Codex OAuth account can serve.
+// It GETs {base}/models with the Codex CLI identity headers (Originator,
+// User-Agent, Version) and a client_version query param, then parses the
+// manifest envelope { "models": [ { "slug": "gpt-6-luna", ... }, ... ] }.
+func fetchCodexModels(baseURL, token, accountID string) ([]string, error) {
+	if token == "" {
+		return nil, fmt.Errorf("no access token — finish the ChatGPT login in the Downstreams tab")
+	}
+	endpoint := strings.TrimSuffix(baseURL, "/") + "/models"
+
+	q := url.Values{}
+	q.Set("client_version", codexModelsVersion)
+	endpoint = endpoint + "?" + q.Encode()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build codex models request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if accountID != "" {
+		req.Header.Set("chatgpt-account-id", accountID)
+	}
+	req.Header.Set("Originator", codexModelsOriginator)
+	req.Header.Set("User-Agent", codexModelsUserAgent)
+	req.Header.Set("Version", codexModelsVersion)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch codex models: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return nil, fmt.Errorf("codex backend rejected the token while listing models (HTTP %d) — the login may have expired, reconnect in the Downstreams tab", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("codex models endpoint returned HTTP %d", resp.StatusCode)
+	}
+
+	// The manifest is a Codex envelope; the model id lives under each entry's
+	// "slug" (e.g. "gpt-6-luna"). Fall back to "id" in case the shape drifts.
+	var envelope struct {
+		Models []struct {
+			Slug string `json:"slug"`
+			ID   string `json:"id"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("parse codex models response: %w", err)
+	}
+	models := make([]string, 0, len(envelope.Models))
+	seen := make(map[string]struct{}, len(envelope.Models))
+	for _, m := range envelope.Models {
+		id := m.Slug
+		if id == "" {
+			id = m.ID
+		}
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		models = append(models, id)
+	}
+	if len(models) == 0 {
+		return nil, fmt.Errorf("codex models endpoint returned no models")
+	}
+	return models, nil
 }
 
 // fetchModelsByCreds fetches models given raw credentials (used for both existing

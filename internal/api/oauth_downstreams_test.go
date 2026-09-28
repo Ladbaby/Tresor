@@ -3,15 +3,14 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"tresor/internal/oauth"
 	"tresor/internal/proxy"
-	"tresor/internal/store"
 )
 
 // validOAuthPatch returns a valid auth_code oauth auth block for PUT/POST.
@@ -221,55 +220,66 @@ func TestClientSecret_MaskedAndPreserved(t *testing.T) {
 	}
 }
 
-// TestFetchModels_CodexBackend_NoModelsEndpoint verifies the ChatGPT/Codex
-// backend — which has no OpenAI-style /models endpoint — returns a clear,
-// accurate "no models endpoint" message instead of probing and misreporting
-// "authentication failed — check the API key".
-func TestFetchModels_CodexBackend_NoModelsEndpoint(t *testing.T) {
-	r := newOAuthTestRouter(t)
-	handler := r.Handler()
+// TestFetchCodexModels verifies the ChatGPT/Codex models manifest fetch: it
+// GETs {base}/models?client_version=... with the Codex CLI identity headers
+// (Originator, Version, chatgpt-account-id) and parses the {models:[{slug}]}
+// envelope.
+func TestFetchCodexModels(t *testing.T) {
+	var gotOriginator, gotVersion, gotAccount, gotAuth, gotClientVersion, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOriginator = r.Header.Get("Originator")
+		gotVersion = r.Header.Get("Version")
+		gotAccount = r.Header.Get("chatgpt-account-id")
+		gotAuth = r.Header.Get("Authorization")
+		gotClientVersion = r.URL.Query().Get("client_version")
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"models":[{"slug":"gpt-6-luna","id":"x1"},{"slug":"gpt-6-astra","id":"x2"},{"slug":"gpt-6-luna","id":"dup"}]}`)
+	}))
+	defer server.Close()
 
-	ds := createDownstreamViaAPI(t, handler, "codex-ds", "https://chatgpt.com/backend-api/codex")
-	if code := putDownstream(t, handler, ds.ID, map[string]interface{}{
-		"auth": map[string]interface{}{
-			"type":     "oauth",
-			"flow":     "device",
-			"client_id": "app_test",
-			"device_auth_url":   "https://auth.test/usercode",
-			"device_token_url":  "https://auth.test/token",
-			"device_verify_url": "https://auth.test/verify",
-			"token_url":         "https://auth.test/oauth/token",
-		},
-	}); code != http.StatusOK {
-		t.Fatalf("expected 200 switching to oauth device, got %d", code)
+	models, err := fetchCodexModels(server.URL, "tok-123", "acct-9")
+	if err != nil {
+		t.Fatalf("fetchCodexModels returned error: %v", err)
 	}
-	got, _ := r.store.GetDownstream(ds.ID)
-	if !got.IsOAuth() {
-		t.Fatalf("expected downstream to be oauth, got %+v", got.Auth)
+	// Duplicate slug collapsed.
+	want := []string{"gpt-6-luna", "gpt-6-astra"}
+	if len(models) != len(want) || models[0] != want[0] || models[1] != want[1] {
+		t.Fatalf("unexpected models: %v", models)
 	}
+	if gotPath != "/models" {
+		t.Errorf("expected /models path, got %q", gotPath)
+	}
+	if gotOriginator != codexModelsOriginator {
+		t.Errorf("Originator = %q, want %q", gotOriginator, codexModelsOriginator)
+	}
+	if gotVersion != codexModelsVersion {
+		t.Errorf("Version = %q, want %q", gotVersion, codexModelsVersion)
+	}
+	if gotClientVersion != codexModelsVersion {
+		t.Errorf("client_version query = %q, want %q", gotClientVersion, codexModelsVersion)
+	}
+	if gotAccount != "acct-9" {
+		t.Errorf("chatgpt-account-id = %q, want acct-9", gotAccount)
+	}
+	if gotAuth != "Bearer tok-123" {
+		t.Errorf("Authorization = %q, want Bearer tok-123", gotAuth)
+	}
+}
 
-	// Seed a token whose extra map carries chatgpt-account-id — the header the
-	// OAuth manager surfaces for the real Codex backend — so ResolveValidToken
-	// returns it without a refresh.
-	if err := r.store.SaveOAuthToken(&store.OAuthToken{
-		DownstreamID: ds.ID,
-		Provider:     "codex",
-		Flow:         "device",
-		AccessToken:  "fake-access-token",
-		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
-		Extra:        map[string]interface{}{"chatgpt-account-id": "acct-test"},
-	}); err != nil {
-		t.Fatalf("save token: %v", err)
-	}
+// TestFetchCodexModels_AuthFailure verifies a 401 from the manifest endpoint
+// yields a clear "reconnect" message rather than a misleading auth-error.
+func TestFetchCodexModels_AuthFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
 
-	_, err := r.fetchModels(got)
+	_, err := fetchCodexModels(server.URL, "tok", "acct")
 	if err == nil {
-		t.Fatal("expected an error for a Codex backend with no models endpoint")
+		t.Fatal("expected an error for a 401 manifest response")
 	}
-	if strings.Contains(err.Error(), "authentication failed") || strings.Contains(err.Error(), "check the API key") {
-		t.Fatalf("misleading auth error for a Codex backend: %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "no models endpoint") {
-		t.Fatalf("expected a 'no models endpoint' message, got %q", err.Error())
+	if !strings.Contains(err.Error(), "rejected the token") {
+		t.Fatalf("expected a token-expired message, got %q", err.Error())
 	}
 }
