@@ -170,6 +170,7 @@ type StatusInfo struct {
 	Status     string    `json:"status"` // "idle" | "pending" | "failed" | "connected"
 	Error      string    `json:"error,omitempty"`
 	NeedsLogin bool      `json:"needs_login"`
+	HasToken   bool      `json:"has_token"`
 	ExpiresAt  time.Time `json:"expires_at,omitempty"`
 	Provider   string    `json:"provider,omitempty"`
 	Flow       string    `json:"flow,omitempty"`
@@ -194,6 +195,7 @@ func (m *Manager) Status(downstreamID string) (StatusInfo, error) {
 	if t != nil {
 		info.Provider = t.Provider
 		info.Flow = t.Flow
+		info.HasToken = true
 		info.NeedsLogin = t.NeedsLogin
 		if exp := tokenExpiry(t.AccessToken, t.ExpiresAt); !exp.IsZero() {
 			info.ExpiresAt = exp

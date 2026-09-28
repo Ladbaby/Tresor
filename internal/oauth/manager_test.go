@@ -86,6 +86,58 @@ func TestResolveValidToken_ReturnsStoredToken(t *testing.T) {
 	}
 }
 
+// TestStatus_HasToken verifies the status reports has_token for both a live
+// token and a stale/needs-login token (so the UI can show Disconnect), and
+// false when no token row exists.
+func TestStatus_HasToken(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+	bindOAuth(t, s, ds, authCodeAuth("https://t.test/token"))
+
+	// No token yet.
+	st, err := m.Status(ds.ID)
+	if err != nil {
+		t.Fatalf("status (no token): %v", err)
+	}
+	if st.HasToken {
+		t.Fatalf("has_token should be false with no token, got %+v", st)
+	}
+
+	// Live token.
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  "tok-1",
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = m.Status(ds.ID)
+	if !st.Connected || !st.HasToken {
+		t.Fatalf("live token should be connected+has_token, got %+v", st)
+	}
+
+	// Stale token that can't refresh → needs_login; still has a token row.
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  "expired",
+		RefreshToken: "old-rt",
+		NeedsLogin:   true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = m.Status(ds.ID)
+	if !st.HasToken {
+		t.Fatalf("stale token should still report has_token, got %+v", st)
+	}
+	if !st.NeedsLogin {
+		t.Fatalf("stale token should report needs_login, got %+v", st)
+	}
+}
+
 // TestResolveValidToken_NotConnected returns ErrNotConnected when no token
 // row exists.
 func TestResolveValidToken_NotConnected(t *testing.T) {

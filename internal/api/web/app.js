@@ -1243,9 +1243,9 @@ function renderDownstreamDetail(ds) {
         ? `
             <div class="oauth-panel">
                 ${renderOAuthEditor(auth)}
-                <div class="oauth-panel-row oauth-actions-row">
+                <div class="oauth-panel-row oauth-actions-row" id="oauth-actions-row">
                     <button type="button" class="btn-small btn-primary" data-action="oauth-connect" ${oauthState && oauthState.status === 'pending' ? 'disabled' : ''}>Connect</button>
-                    ${oauthState && oauthState.connected ? '<button type="button" class="btn-small" data-action="oauth-disconnect">Disconnect</button>' : ''}
+                    ${oauthState && (oauthState.connected || oauthState.has_token) ? '<button type="button" class="btn-small" data-action="oauth-disconnect">Disconnect</button>' : ''}
                 </div>
                 <div class="oauth-status-line" id="oauth-status-line">
                     ${renderOAuthStatusLine(oauthState)}
@@ -1307,13 +1307,12 @@ let _oauthPollTimers = {};
 function renderOAuthStatusLine(st) {
     if (!st) return '';
     if (st.connected) {
-        let exp = '';
-        if (st.expires_at) {
-            const mins = Math.max(0, Math.round((new Date(st.expires_at) - Date.now()) / 60000));
-            exp = ` (token refreshes in ~${mins} min)`;
-        }
+        // No "token refreshes in ~X min" hint: tokens are refreshed
+        // automatically in the background, so the user never has to act, and
+        // the access-token expiry (what expires_at reflects) is not a useful
+        // signal to surface. Just confirm the connection is live.
         const flowLabel = st.flow === 'device' ? ' via device code' : '';
-        return `<span class="oauth-status ok">Connected${flowLabel}${exp}</span>`;
+        return `<span class="oauth-status ok">Connected${flowLabel}</span>`;
     }
     if (st.status === 'pending') {
         return '<span class="oauth-status pending">Waiting for you to complete the login in the other tab…</span>';
@@ -1325,6 +1324,33 @@ function renderOAuthStatusLine(st) {
         return '<span class="oauth-status error">Token expired — click Connect to sign in again</span>';
     }
     return '';
+}
+
+// Rebuild just the Connect/Disconnect buttons in the detail pane once the
+// oauth status is known. renderDownstreamDetail renders the buttons from a
+// cache that is empty on first load (the status fetch is async), so the
+// Disconnect button is absent until we patch it in here. Only runs when the
+// pane is still showing this downstream.
+function updateOAuthActionButtons(id, st) {
+    if (!_currentDownstream || _currentDownstream.id !== id) return;
+    const row = document.getElementById('oauth-actions-row');
+    if (!row) return;
+    const connected = !!(st && st.connected);
+    const hasToken = !!(st && (st.connected || st.has_token));
+    const pending = !!(st && st.status === 'pending');
+    const connectBtn = row.querySelector('[data-action="oauth-connect"]');
+    if (connectBtn) connectBtn.disabled = pending;
+    const existing = row.querySelector('[data-action="oauth-disconnect"]');
+    if (hasToken && !existing) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn-small';
+        b.dataset.action = 'oauth-disconnect';
+        b.textContent = 'Disconnect';
+        row.appendChild(b);
+    } else if (!hasToken && existing) {
+        existing.remove();
+    }
 }
 
 async function refreshOAuthStatus(id, opts) {
@@ -1364,6 +1390,7 @@ async function refreshOAuthStatus(id, opts) {
                 if (!silent && st.connected) showToast('OAuth connected');
             }
         }
+        updateOAuthActionButtons(id, st);
         return st;
     } catch (err) {
         if (!silent) showToast('Status check failed: ' + err.message);
