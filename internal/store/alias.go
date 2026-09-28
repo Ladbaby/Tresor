@@ -462,6 +462,56 @@ func findActiveAliasExact(db *sql.DB, inputModelID string) (*Alias, error) {
 	return &a, nil
 }
 
+// findActiveAliasExactFiltered is findActiveAliasExact with an is_regex filter,
+// so callers can distinguish a concrete (non-regex) alias from a catch-all
+// regex one whose pattern happens to equal the model string.
+func findActiveAliasExactFiltered(db *sql.DB, inputModelID string, regexFilter bool) (*Alias, error) {
+	var a Alias
+	var active, isRegex, groupOrder int
+	want := 0
+	if regexFilter {
+		want = 1
+	}
+	err := db.QueryRow(
+		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at
+		 FROM aliases WHERE input_model_id = ? AND is_active = 1 AND is_regex = ?
+		 LIMIT 1`, inputModelID, want).
+		Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find active alias %s: %w", inputModelID, err)
+	}
+	a.IsActive = active == 1
+	a.IsRegex = isRegex == 1
+	a.GroupOrder = groupOrder
+	return &a, nil
+}
+
+// FindActiveNonRegexAlias returns the active alias whose input_model_id exactly
+// equals model and that is not a regex (catch-all) alias. This is the
+// highest-priority routing tier: a deliberately-named override that beats both
+// downstream model names and regex aliases.
+func (s *Store) FindActiveNonRegexAlias(model string) (*Alias, error) {
+	return findActiveAliasExactFiltered(s.db, model, false)
+}
+
+// FindActiveRegexAlias returns the active regex (catch-all) alias for model: an
+// announced name of a regex group, or a match against a regex group's pattern.
+// This is the lowest-priority routing tier — it applies only when neither a
+// non-regex alias nor a downstream claims the model exactly.
+func (s *Store) FindActiveRegexAlias(model string) (*Alias, error) {
+	a, err := s.FindActiveAliasByAnnouncedName(model)
+	if err != nil {
+		return nil, err
+	}
+	if a != nil {
+		return a, nil
+	}
+	return s.findActiveAliasRegexCached(model)
+}
+
 // ListGroups returns aliases grouped by InputModelID.
 func (s *Store) ListGroups() ([]AliasGroup, error) {
 	aliases, err := s.ListAliases()

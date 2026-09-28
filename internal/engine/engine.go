@@ -618,48 +618,68 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 		return &modelResult{body: body}, &gatewayError{http.StatusBadRequest, "request body missing model", "request body missing model", "missing model", nil}
 	}
 
-	// Step 1: Try active alias
-	alias, err := e.store.FindActiveAlias(model)
+	// Model resolution follows a strict priority (most specific first):
+	//   1. Non-regex alias — a deliberately-named override for an exact model
+	//      name. Wins over everything.
+	//   2. Downstream model — the model is listed exactly in a downstream's
+	//      output_model_ids. Wins over catch-all regex aliases.
+	//   3. Regex alias — an announced name of a regex group, or a match against
+	//      a regex group's catch-all pattern (e.g. "gpt-.*"). The fallback.
+	// This ordering means a concrete name (whether a downstream model or a
+	// named alias) is never shadowed by a broad regex catch-all, matching
+	// sub2api's "exact key beats wildcard" and pi's disjoint exact/glob paths.
+
+	// Tier 1: non-regex (exact) alias.
+	alias, err := e.store.FindActiveNonRegexAlias(model)
 	if err != nil {
 		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up alias for model %s", model), "internal error", "alias lookup error", err}
 	}
-
-	aliasDS := (*store.Downstream)(nil)
 	if alias != nil {
-		ds, err := e.store.GetDownstream(alias.DownstreamID)
-		if err != nil {
+		ds, derr := e.store.GetDownstream(alias.DownstreamID)
+		if derr != nil {
 			return &modelResult{model: model, body: body}, &gatewayError{http.StatusBadGateway, fmt.Sprintf("error getting downstream %s for alias %s", alias.DownstreamID, alias.ID),
-				fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), "alias downstream missing", err}
+				fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), "alias downstream missing", derr}
 		}
 		// A disabled downstream behaves "as if deleted": ignore the alias and
-		// fall through to direct resolution (which also skips disabled rows, so
-		// the request ultimately 404s if only a disabled downstream claims it).
-		if !ds.IsEnabled {
-			e.logger.Debug("alias match skipped: downstream %q is disabled", ds.ID)
-			alias = nil
-		} else {
-			aliasDS = ds
+		// fall through to the other tiers.
+		if ds.IsEnabled {
+			e.logger.Debug("alias match (exact): model %q → alias %q → downstream %q (%s)", model, alias.ID, ds.ID, alias.OutputModelID)
+			return &modelResult{ds: ds, alias: alias, model: model, resolvedModel: alias.OutputModelID, body: rewriteModelInBody(body, alias.OutputModelID)}, nil
 		}
+		e.logger.Debug("exact alias match skipped: downstream %q is disabled", ds.ID)
 	}
 
-	if alias != nil {
-		e.logger.Debug("alias match: model %q → alias %q → downstream %q (%s)", model, alias.ID, aliasDS.ID, alias.OutputModelID)
-		return &modelResult{ds: aliasDS, alias: alias, model: model, resolvedModel: alias.OutputModelID, body: rewriteModelInBody(body, alias.OutputModelID)}, nil
-	}
-
-	// Step 2: no usable alias — try direct downstream by output_model_ids
+	// Tier 2: direct downstream by exact output_model_id.
 	ds, err := e.store.FindDownstreamByOutputModel(model)
 	if err != nil {
 		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up downstream for model %s", model), "internal error", "downstream lookup error", err}
 	}
-	if ds == nil {
-		msg := fmt.Sprintf("unknown model %q", model)
-		e.logger.Debug("model %q did not match any alias or downstream output_model_ids", model)
-		return &modelResult{model: model, body: body}, &gatewayError{http.StatusNotFound, msg, msg, "unknown model", nil}
+	if ds != nil {
+		e.logger.Debug("direct resolution: model %q → downstream %q (%s)", model, ds.ID, ds.Name)
+		return &modelResult{ds: ds, model: model, resolvedModel: model, body: body}, nil
 	}
 
-	e.logger.Debug("direct resolution: model %q → downstream %q (%s)", model, ds.ID, ds.Name)
-	return &modelResult{ds: ds, model: model, resolvedModel: model, body: body}, nil
+	// Tier 3: regex (catch-all) alias.
+	alias, err = e.store.FindActiveRegexAlias(model)
+	if err != nil {
+		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up regex alias for model %s", model), "internal error", "alias lookup error", err}
+	}
+	if alias != nil {
+		rds, derr := e.store.GetDownstream(alias.DownstreamID)
+		if derr != nil {
+			return &modelResult{model: model, body: body}, &gatewayError{http.StatusBadGateway, fmt.Sprintf("error getting downstream %s for alias %s", alias.DownstreamID, alias.ID),
+				fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), "alias downstream missing", derr}
+		}
+		if rds.IsEnabled {
+			e.logger.Debug("alias match (regex %q): model %q → downstream %q (%s)", alias.InputModelID, model, rds.ID, alias.OutputModelID)
+			return &modelResult{ds: rds, alias: alias, model: model, resolvedModel: alias.OutputModelID, body: rewriteModelInBody(body, alias.OutputModelID)}, nil
+		}
+		e.logger.Debug("regex alias match skipped: downstream %q is disabled", rds.ID)
+	}
+
+	msg := fmt.Sprintf("unknown model %q", model)
+	e.logger.Debug("model %q did not match any alias or downstream output_model_ids", model)
+	return &modelResult{model: model, body: body}, &gatewayError{http.StatusNotFound, msg, msg, "unknown model", nil}
 }
 
 // buildPipeline constructs the transformation pipeline from matching rules and

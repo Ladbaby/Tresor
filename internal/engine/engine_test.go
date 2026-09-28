@@ -754,6 +754,122 @@ func TestEngine_HandleProxy_AliasRewritesModel(t *testing.T) {
 	}
 }
 
+// TestEngine_HandleProxy_ExactDownstreamBeatsRegexAlias verifies that a model a
+// downstream lists exactly wins over a broad (regex / catch-all) alias. This is
+// the fix for: "after adding gpt-6-luna to a downstream AND a regex alias
+// gpt-.*, a request for gpt-6-luna was routed by the regex alias instead of the
+// exact downstream model". A non-regex alias is a deliberate per-name override
+// and still wins — this test targets the regex/catch-all case only.
+func TestEngine_HandleProxy_ExactDownstreamBeatsRegexAlias(t *testing.T) {
+	s := newTestStore(t)
+
+	var exactAuth, aliasAuth string
+	exactServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exactAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"from":"exact"}`))
+	}))
+	defer exactServer.Close()
+	aliasServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		aliasAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"from":"alias"}`))
+	}))
+	defer aliasServer.Close()
+
+	// exact-ds lists gpt-6-luna exactly.
+	addDownstream(t, s, "exact-ds", "ExactDS", exactServer.URL, "key-exact")
+	addOutputModelIDs(t, s, "exact-ds", "gpt-6-luna")
+	// alias-ds backs a catch-all regex alias gpt-.*
+	addDownstream(t, s, "alias-ds", "AliasDS", aliasServer.URL, "key-alias")
+
+	// Active regex alias that would match gpt-6-luna.
+	if err := s.CreateAlias(&store.Alias{
+		InputModelID: "gpt-.*", DownstreamID: "alias-ds", OutputModelID: "some-gpt",
+		IsRegex: true, IsActive: true,
+	}); err != nil {
+		t.Fatalf("create regex alias: %v", err)
+	}
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"gpt-6-luna","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	// The exact downstream must win over the catch-all regex alias.
+	if string(respBody) != `{"from":"exact"}` {
+		t.Fatalf("expected exact downstream to win, got: %s", string(respBody))
+	}
+	if exactAuth != "Bearer key-exact" {
+		t.Fatalf("expected request routed to exact-ds (key-exact), got %q", exactAuth)
+	}
+	if aliasAuth != "" {
+		t.Fatalf("regex-alias downstream must NOT receive the request, but got %q", aliasAuth)
+	}
+}
+
+// TestEngine_HandleProxy_NonRegexAliasStillOverrides verifies the precedence fix
+// is scoped to regex/catch-all aliases only: a non-regex (exact-name) alias is a
+// deliberate per-name override and still wins over a downstream that lists the
+// same model.
+func TestEngine_HandleProxy_NonRegexAliasStillOverrides(t *testing.T) {
+	s := newTestStore(t)
+
+	var exactAuth, aliasAuth string
+	exactServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exactAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"from":"exact"}`))
+	}))
+	defer exactServer.Close()
+	aliasServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		aliasAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"from":"alias"}`))
+	}))
+	defer aliasServer.Close()
+
+	addDownstream(t, s, "exact-ds", "ExactDS", exactServer.URL, "key-exact")
+	addOutputModelIDs(t, s, "exact-ds", "gpt-4o")
+	addDownstream(t, s, "alias-ds", "AliasDS", aliasServer.URL, "key-alias")
+	// Non-regex alias for the exact model gpt-4o.
+	addAlias(t, s, "gpt-4o", "alias-ds", "claude-sonnet", true)
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	resp := w.Result()
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+	// The non-regex alias is a deliberate override and must win.
+	if string(respBody) != `{"from":"alias"}` {
+		t.Fatalf("expected non-regex alias to win, got: %s", string(respBody))
+	}
+	if aliasAuth != "Bearer key-alias" {
+		t.Fatalf("expected request routed to alias-ds (key-alias), got %q", aliasAuth)
+	}
+	if exactAuth != "" {
+		t.Fatalf("exact downstream must NOT receive the request when a non-regex alias overrides, but got %q", exactAuth)
+	}
+}
+
 func TestEngine_HandleProxy_NoAlias_UsesRuleDownstream(t *testing.T) {
 	s := newTestStore(t)
 
