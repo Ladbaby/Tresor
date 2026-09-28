@@ -85,7 +85,7 @@ func TestUsageFromResponseBody_AnthropicStreamingMessageStart(t *testing.T) {
 // omits them.
 func TestUsageBlock_Merge_StreamingSparsely(t *testing.T) {
 	first := &UsageBlock{
-		InputTokens:    ptrInt(29),
+		InputTokens:     ptrInt(29),
 		CacheReadTokens: ptrInt(9),
 	}
 	second := &UsageBlock{
@@ -116,7 +116,7 @@ func TestUsageBlock_CacheHitRate_Anthropic(t *testing.T) {
 		{
 			name: "9 of 38 are cached → 24%",
 			block: &UsageBlock{
-				InputTokens:    ptrInt(29),
+				InputTokens:     ptrInt(29),
 				CacheReadTokens: ptrInt(9),
 			},
 			want: 9.0 / 38.0,
@@ -134,7 +134,7 @@ func TestUsageBlock_CacheHitRate_Anthropic(t *testing.T) {
 		{
 			name: "0% cached (but info present)",
 			block: &UsageBlock{
-				InputTokens:    ptrInt(100),
+				InputTokens:     ptrInt(100),
 				CacheReadTokens: ptrInt(0),
 			},
 			want: 0.0,
@@ -205,7 +205,7 @@ func TestRequestLogEntry_UsageJSONMarshaling(t *testing.T) {
 
 	// Inspector on, with usage.
 	e.Usage = &UsageBlock{
-		InputTokens:    ptrInt(29),
+		InputTokens:     ptrInt(29),
 		CacheReadTokens: ptrInt(9),
 	}
 	data = mustMarshal(t, e)
@@ -238,25 +238,25 @@ func absDiff(a, b float64) float64 {
 // wraps the usage under `response.usage` (not at the top level), and the
 // cached count lives in the NESTED `input_tokens_details.cached_tokens`
 // (not a top-level `cached_tokens`). input_tokens is the total prompt
-// (cached included). Both locations must be recognised or the cache info
-// is silently dropped.
+// (cached included), but Tresor normalizes it to fresh input so its aggregate
+// dashboard accounting follows Anthropic semantics.
 func TestUsageFromResponseBody_ResponsesAPIStream(t *testing.T) {
 	data := []byte(`{"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":19370,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":15872},"output_tokens":108,"output_tokens_details":{"reasoning_tokens":54},"total_tokens":19478}}}`)
 	u, ok := UsageFromResponseBody(data)
 	if !ok || u == nil {
 		t.Fatalf("expected usage block from response.completed event")
 	}
-	if u.InputTokens == nil || *u.InputTokens != 19370 {
-		t.Errorf("input_tokens: got %v, want 19370", u.InputTokens)
+	if u.InputTokens == nil || *u.InputTokens != 3498 {
+		t.Errorf("input_tokens: got %v, want fresh total 3498", u.InputTokens)
 	}
 	if u.OutputTokens == nil || *u.OutputTokens != 108 {
 		t.Errorf("output_tokens: got %v, want 108", u.OutputTokens)
 	}
-	if u.CachedTokens == nil || *u.CachedTokens != 15872 {
-		t.Errorf("cached_tokens (from input_tokens_details): got %v, want 15872", u.CachedTokens)
+	if u.CacheReadTokens == nil || *u.CacheReadTokens != 15872 {
+		t.Errorf("cache_read_input_tokens (from input_tokens_details): got %v, want 15872", u.CacheReadTokens)
 	}
-	// input_tokens is the total prompt (cached is a subset), so the hit rate
-	// is cached / total = 15872 / 19370.
+	// Tresor has normalized Responses usage to the Anthropic convention:
+	// cache hit rate is cached / (fresh + cached).
 	rate, present := u.CacheHitRate()
 	if !present || rate == nil {
 		t.Fatalf("expected a cache hit rate, got %v", present)
@@ -264,6 +264,20 @@ func TestUsageFromResponseBody_ResponsesAPIStream(t *testing.T) {
 	want := 15872.0 / 19370.0
 	if abs(*rate-want) > 0.0001 {
 		t.Errorf("cache hit rate: got %v, want %v", *rate, want)
+	}
+}
+
+func TestUsageFromResponseBody_ResponsesAPIMalformedCacheCount(t *testing.T) {
+	data := []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":101},"output_tokens":1}}}`)
+	u, ok := UsageFromResponseBody(data)
+	if !ok || u == nil {
+		t.Fatal("expected usage block")
+	}
+	if u.InputTokens == nil || *u.InputTokens != 100 {
+		t.Errorf("input_tokens: got %v, want unmodified total 100 for malformed cache count", u.InputTokens)
+	}
+	if u.CacheReadTokens == nil || *u.CacheReadTokens != 101 {
+		t.Errorf("cache_read_input_tokens: got %v, want 101", u.CacheReadTokens)
 	}
 }
 

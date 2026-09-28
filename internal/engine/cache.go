@@ -122,12 +122,23 @@ func usageFromMap(m map[string]interface{}) *UsageBlock {
 		}
 	}
 	// Responses API (e.g. ChatGPT/Codex) puts the cached count under
-	// input_tokens_details.cached_tokens. input_tokens is the total prompt
-	// (cached included), so CachedTokens here is a subset — same convention
-	// as the OpenAI Chat Completions shape above.
+	// input_tokens_details.cached_tokens. Its input_tokens is the total prompt
+	// size (including cache reads), while Tresor normalizes all formats to
+	// Anthropic semantics: InputTokens is only newly processed input and
+	// CachedTokens is kept separately. Do not subtract malformed counts where
+	// cached exceeds total — preserving the reported input is safer than
+	// recording a negative fresh-input value.
 	if details, ok := m["input_tokens_details"].(map[string]interface{}); ok {
 		if v, ok := details["cached_tokens"]; ok {
-			u.CachedTokens = ptrInt(asInt64(v))
+			cached := asInt64(v)
+			// Convert the Responses-specific field to the canonical cache-read
+			// field. This makes persisted stats and the web UI use the same
+			// Anthropic-style fresh-input convention.
+			u.CacheReadTokens = ptrInt(cached)
+			if u.InputTokens != nil && cached >= 0 && cached <= *u.InputTokens {
+				fresh := *u.InputTokens - cached
+				u.InputTokens = ptrInt(fresh)
+			}
 		}
 	}
 	// Gemini: usageMetadata field names are camelCase.
