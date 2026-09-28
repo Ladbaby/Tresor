@@ -528,9 +528,81 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 // vars so tests can pin them.
 var (
 	codexModelsOriginator = "codex-tui"
-	codexModelsVersion    = "0.146.0"
-	codexModelsUserAgent  = "codex-tui/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color"
+	// codexModelsVersion is the FALLBACK client version used when the GitHub
+	// release lookup (below) fails. The Codex backend gates the manifest on an
+	// upper bound, and returns different model catalogs per version, so we
+	// prefer the newest released version and only fall back here.
+	codexModelsVersion = "0.146.0"
+	// codexLatestReleaseURL points at the GitHub releases API for the newest
+	// openai/codex release. Overridable in tests.
+	codexLatestReleaseURL = "https://api.github.com/repos/openai/codex/releases/latest"
+	// codexVersionLookup discovers the newest codex version. Tests override
+	// this to keep the fetch offline and deterministic.
+	codexVersionLookup = latestCodexVersion
 )
+
+// codexUserAgent builds the Codex CLI User-Agent for a given client version.
+func codexUserAgent(version string) string {
+	return "codex-tui/" + version + " (Ubuntu 22.4.0; x86_64) xterm-256color"
+}
+
+// latestCodexVersion queries the GitHub releases API for the newest
+// openai/codex release and returns its clean version string — the release
+// "name" (e.g. "0.157.1"), which is the semver without the "rust-v" tag
+// prefix. Returns "" on any failure (network error, non-200, unparseable or
+// non-numeric version) so the caller falls back to codexModelsVersion.
+func latestCodexVersion(ctx context.Context) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexLatestReleaseURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var rel struct {
+		Name string `json:"name"`
+		Tag  string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
+		return ""
+	}
+	v := strings.TrimSpace(rel.Name)
+	if v == "" {
+		// Fall back to the tag name, stripping the codex "rust-v" prefix and
+		// a leading "v" if present.
+		v = strings.TrimPrefix(strings.TrimSpace(rel.Tag), "rust-v")
+		v = strings.TrimPrefix(v, "v")
+	}
+	if !isCodexVersion(v) {
+		return ""
+	}
+	return v
+}
+
+// isCodexVersion loosely validates that v looks like a dotted numeric version
+// (e.g. "0.157.1"), guarding against garbage from the API.
+func isCodexVersion(v string) bool {
+	if v == "" {
+		return false
+	}
+	for _, part := range strings.Split(v, ".") {
+		if part == "" {
+			return false
+		}
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // fetchCodexModels lists the models a ChatGPT/Codex OAuth account can serve.
 // It GETs {base}/models with the Codex CLI identity headers (Originator,
@@ -540,14 +612,21 @@ func fetchCodexModels(baseURL, token, accountID string) ([]string, error) {
 	if token == "" {
 		return nil, fmt.Errorf("no access token — finish the ChatGPT login in the Downstreams tab")
 	}
-	endpoint := strings.TrimSuffix(baseURL, "/") + "/models"
-
-	q := url.Values{}
-	q.Set("client_version", codexModelsVersion)
-	endpoint = endpoint + "?" + q.Encode()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+
+	// Prefer the newest released codex version (the manifest catalog is
+	// version-gated and differs per release); fall back to the pinned version
+	// if the GitHub lookup is unavailable.
+	version := codexVersionLookup(ctx)
+	if version == "" {
+		version = codexModelsVersion
+	}
+
+	endpoint := strings.TrimSuffix(baseURL, "/") + "/models"
+	q := url.Values{}
+	q.Set("client_version", version)
+	endpoint = endpoint + "?" + q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -558,8 +637,8 @@ func fetchCodexModels(baseURL, token, accountID string) ([]string, error) {
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 	req.Header.Set("Originator", codexModelsOriginator)
-	req.Header.Set("User-Agent", codexModelsUserAgent)
-	req.Header.Set("Version", codexModelsVersion)
+	req.Header.Set("User-Agent", codexUserAgent(version))
+	req.Header.Set("Version", version)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)

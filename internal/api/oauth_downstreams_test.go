@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -225,6 +226,11 @@ func TestClientSecret_MaskedAndPreserved(t *testing.T) {
 // (Originator, Version, chatgpt-account-id) and parses the {models:[{slug}]}
 // envelope.
 func TestFetchCodexModels(t *testing.T) {
+	// Pin the version lookup so the test is offline and deterministic.
+	origLookup := codexVersionLookup
+	t.Cleanup(func() { codexVersionLookup = origLookup })
+	codexVersionLookup = func(ctx context.Context) string { return "0.999.0" }
+
 	var gotOriginator, gotVersion, gotAccount, gotAuth, gotClientVersion, gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotOriginator = r.Header.Get("Originator")
@@ -253,11 +259,12 @@ func TestFetchCodexModels(t *testing.T) {
 	if gotOriginator != codexModelsOriginator {
 		t.Errorf("Originator = %q, want %q", gotOriginator, codexModelsOriginator)
 	}
-	if gotVersion != codexModelsVersion {
-		t.Errorf("Version = %q, want %q", gotVersion, codexModelsVersion)
+	// The resolved (latest) version drives both the query and the Version header.
+	if gotVersion != "0.999.0" {
+		t.Errorf("Version = %q, want %q", gotVersion, "0.999.0")
 	}
-	if gotClientVersion != codexModelsVersion {
-		t.Errorf("client_version query = %q, want %q", gotClientVersion, codexModelsVersion)
+	if gotClientVersion != "0.999.0" {
+		t.Errorf("client_version query = %q, want %q", gotClientVersion, "0.999.0")
 	}
 	if gotAccount != "acct-9" {
 		t.Errorf("chatgpt-account-id = %q, want acct-9", gotAccount)
@@ -267,9 +274,107 @@ func TestFetchCodexModels(t *testing.T) {
 	}
 }
 
+// TestFetchCodexModels_VersionFallback verifies that when the GitHub release
+// lookup returns nothing (offline), the pinned fallback version is used.
+func TestFetchCodexModels_VersionFallback(t *testing.T) {
+	origLookup := codexVersionLookup
+	t.Cleanup(func() { codexVersionLookup = origLookup })
+	codexVersionLookup = func(ctx context.Context) string { return "" }
+
+	var gotVersion, gotClientVersion, gotUA string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVersion = r.Header.Get("Version")
+		gotClientVersion = r.URL.Query().Get("client_version")
+		gotUA = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"models":[{"slug":"gpt-6-luna"}]}`)
+	}))
+	defer server.Close()
+
+	if _, err := fetchCodexModels(server.URL, "tok", "acct"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotVersion != codexModelsVersion {
+		t.Errorf("Version = %q, want fallback %q", gotVersion, codexModelsVersion)
+	}
+	if gotClientVersion != codexModelsVersion {
+		t.Errorf("client_version = %q, want fallback %q", gotClientVersion, codexModelsVersion)
+	}
+	if want := codexUserAgent(codexModelsVersion); gotUA != want {
+		t.Errorf("User-Agent = %q, want %q", gotUA, want)
+	}
+}
+
+// TestLatestCodexVersion_ParsesName verifies the release "name" (clean semver,
+// no "rust-v" prefix) is returned even though the tag carries the prefix.
+func TestLatestCodexVersion_ParsesName(t *testing.T) {
+	origURL := codexLatestReleaseURL
+	t.Cleanup(func() { codexLatestReleaseURL = origURL })
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"name":"0.157.1","tag_name":"rust-v0.157.1"}`)
+	}))
+	defer gh.Close()
+	codexLatestReleaseURL = gh.URL
+
+	if got := latestCodexVersion(context.Background()); got != "0.157.1" {
+		t.Fatalf("latestCodexVersion = %q, want 0.157.1", got)
+	}
+}
+
+// TestLatestCodexVersion_FallsBackToTag covers a payload missing "name".
+func TestLatestCodexVersion_FallsBackToTag(t *testing.T) {
+	origURL := codexLatestReleaseURL
+	t.Cleanup(func() { codexLatestReleaseURL = origURL })
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"tag_name":"rust-v0.200.5"}`)
+	}))
+	defer gh.Close()
+	codexLatestReleaseURL = gh.URL
+
+	if got := latestCodexVersion(context.Background()); got != "0.200.5" {
+		t.Fatalf("latestCodexVersion = %q, want 0.200.5 (from tag)", got)
+	}
+}
+
+// TestLatestCodexVersion_ReturnsEmptyOnFailure ensures any failure (non-200,
+// unparseable, non-numeric version) yields "" so the caller uses the fallback.
+func TestLatestCodexVersion_ReturnsEmptyOnFailure(t *testing.T) {
+	origURL := codexLatestReleaseURL
+	t.Cleanup(func() { codexLatestReleaseURL = origURL })
+
+	cases := map[string]struct {
+		status int
+		body   string
+	}{
+		"non-200":        {status: 404, body: `{"message":"not found"}`},
+		"unparseable":    {status: 200, body: `not json`},
+		"non-numeric":    {status: 200, body: `{"name":"latest"}`},
+		"empty-name-tag": {status: 200, body: `{"name":"","tag_name":""}`},
+	}
+	for name, c := range cases {
+		gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(c.status)
+			_, _ = io.WriteString(w, c.body)
+		}))
+		codexLatestReleaseURL = gh.URL
+		if got := latestCodexVersion(context.Background()); got != "" {
+			t.Errorf("%s: latestCodexVersion = %q, want empty", name, got)
+		}
+		gh.Close()
+	}
+}
+
 // TestFetchCodexModels_AuthFailure verifies a 401 from the manifest endpoint
 // yields a clear "reconnect" message rather than a misleading auth-error.
 func TestFetchCodexModels_AuthFailure(t *testing.T) {
+	origLookup := codexVersionLookup
+	t.Cleanup(func() { codexVersionLookup = origLookup })
+	codexVersionLookup = func(ctx context.Context) string { return "" }
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
