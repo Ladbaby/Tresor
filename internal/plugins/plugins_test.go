@@ -4374,6 +4374,117 @@ func TestOpenAI2Responses_TransformRequest_ToolCall(t *testing.T) {
 	}
 }
 
+// Regression: a Chat-Completions `tool` message whose content is a
+// multimodal array carrying an image_url must, when converted to the
+// Responses API, have its `function_call_output.output` promoted to an
+// array of input_text / input_image parts. The previous text-only
+// `extractStringContent` silently dropped the image, so a Responses/Codex
+// backend never received the image bytes.
+func TestOpenAI2Responses_ToolResultImagePromotedToInputImage(t *testing.T) {
+	p := &OpenAI2Responses{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "What is in this file?"},
+			{"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"chart.png\"}"}}]},
+			{"role": "tool", "tool_call_id": "call_1", "content": [
+				{"type": "text", "text": "(see attached image)"},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64,Y2hhcnQtZGF0YQ=="}}
+			]}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	input := result["input"].([]interface{})
+
+	// Locate the function_call_output item.
+	var out interface{}
+	found := false
+	for _, item := range input {
+		im, _ := item.(map[string]interface{})
+		if im["type"] == "function_call_output" {
+			out = im["output"]
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no function_call_output item in input")
+	}
+
+	// Must be an array, not a plain string — otherwise the image is dropped.
+	parts, ok := out.([]interface{})
+	if !ok {
+		t.Fatalf("expected output to be an array when the tool result has an image, got %T: %v", out, out)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts (text + image), got %d: %v", len(parts), parts)
+	}
+	textPart := parts[0].(map[string]interface{})
+	if textPart["type"] != "input_text" || textPart["text"] != "(see attached image)" {
+		t.Fatalf("expected first part input_text, got %v", textPart)
+	}
+	imgPart := parts[1].(map[string]interface{})
+	if imgPart["type"] != "input_image" {
+		t.Fatalf("expected second part input_image, got %v", imgPart)
+	}
+	if imgPart["image_url"] != "data:image/png;base64,Y2hhcnQtZGF0YQ==" {
+		t.Fatalf("expected data url, got %v", imgPart["image_url"])
+	}
+}
+
+// Regression: a text-only Chat-Completions `tool` message must still produce
+// a plain-string function_call_output.output (no spurious array), preserving
+// the prior behavior for the common case.
+func TestOpenAI2Responses_ToolResultTextOnlyStaysString(t *testing.T) {
+	p := &OpenAI2Responses{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Weather?"},
+			{"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}]},
+			{"role": "tool", "tool_call_id": "call_1", "content": [
+				{"type": "text", "text": "22°C"}
+			]}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	input := result["input"].([]interface{})
+	for _, item := range input {
+		im, _ := item.(map[string]interface{})
+		if im["type"] == "function_call_output" {
+			out, ok := im["output"].(string)
+			if !ok {
+				t.Fatalf("expected text-only tool output to stay a string, got %T", im["output"])
+			}
+			if out != "22°C" {
+				t.Fatalf("expected output '22°C', got %q", out)
+			}
+			return
+		}
+	}
+	t.Fatalf("no function_call_output item in input")
+}
+
 // Regression: a Chat-Completions client (tools in the `function:{name}`
 // envelope) pointed at a Responses/Codex backend must have its tools
 // flattened to the Responses shape. The old passthrough forwarded the

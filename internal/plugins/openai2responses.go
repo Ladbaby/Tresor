@@ -106,7 +106,7 @@ func (t *OpenAI2Responses) TransformRequest(req *http.Request, body []byte, ctx 
 				inputItems = append(inputItems, map[string]interface{}{
 					"type":    "function_call_output",
 					"call_id": m["tool_call_id"],
-					"output":  extractStringContent(m["content"]),
+					"output":  buildResponsesToolOutput(m["content"]),
 				})
 			}
 		}
@@ -616,6 +616,50 @@ func extractStringContent(content interface{}) string {
 			}
 		}
 		return strings.Join(parts, "\n")
+	}
+	return ""
+}
+
+// buildResponsesToolOutput converts a Chat-Completions `tool` message's
+// content into the Responses-API `function_call_output.output` value. A
+// plain-string result stays a string, and a text-only content array
+// collapses to a joined string (preserving the prior behavior). When the
+// content carries image_url parts, the Responses API cannot hold an image
+// inside a string, so — matching the reference pi client — we promote the
+// result to an array of input_text / input_image parts; that is the only
+// shape in which the Responses backend receives the image bytes.
+func buildResponsesToolOutput(content interface{}) interface{} {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var textParts []string
+		var imageParts []map[string]interface{}
+		for _, part := range v {
+			p, ok := part.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch p["type"] {
+			case "text":
+				if t, ok := p["text"].(string); ok {
+					textParts = append(textParts, t)
+				}
+			case "image_url":
+				imageParts = append(imageParts, extractImagePart(p["image_url"]))
+			}
+		}
+		if len(imageParts) == 0 {
+			return strings.Join(textParts, "\n")
+		}
+		parts := make([]interface{}, 0, len(imageParts)+1)
+		if text := strings.Join(textParts, "\n"); text != "" {
+			parts = append(parts, map[string]interface{}{"type": "input_text", "text": text})
+		}
+		for _, img := range imageParts {
+			parts = append(parts, img)
+		}
+		return parts
 	}
 	return ""
 }

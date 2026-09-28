@@ -133,12 +133,11 @@ func (t *Anthropic2Responses) TransformRequest(req *http.Request, body []byte, c
 							"arguments": serializeInput(b["input"]),
 						})
 					case "tool_result":
-						toolResult := map[string]interface{}{
+						inputItems = append(inputItems, map[string]interface{}{
 							"type":    "function_call_output",
 							"call_id": b["tool_use_id"],
-							"output":  extractToolResultContent(b["content"]),
-						}
-						inputItems = append(inputItems, toolResult)
+							"output":  buildToolResultOutput(b["content"]),
+						})
 					}
 				}
 				if len(textParts) > 0 {
@@ -755,23 +754,54 @@ func buildAnthropicImageContent(b map[string]interface{}) []map[string]interface
 	return result
 }
 
-func extractToolResultContent(content interface{}) string {
-	if content == nil {
-		return ""
-	}
+// buildToolResultOutput converts an Anthropic tool_result's inner content
+// into the Responses-API `function_call_output.output` value. A plain-string
+// result stays a string, and a text-only content array collapses to a joined
+// string. When the result carries image blocks (e.g. the `read` tool
+// returning a screenshot), the Responses API cannot hold an image inside a
+// string, so — matching the reference pi client — we promote the result to
+// an array of input_text / input_image parts. That is the only shape in
+// which ChatGPT actually receives the image bytes.
+func buildToolResultOutput(content interface{}) interface{} {
 	switch v := content.(type) {
 	case string:
 		return v
 	case []interface{}:
-		var parts []string
+		var textParts []string
+		var imageParts []map[string]interface{}
 		for _, block := range v {
-			if b, ok := block.(map[string]interface{}); ok {
-				if text, ok := b["text"].(string); ok {
-					parts = append(parts, text)
+			b, ok := block.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch b["type"] {
+			case "text":
+				if t, ok := b["text"].(string); ok {
+					textParts = append(textParts, t)
 				}
+			case "image":
+				img := map[string]interface{}{"type": "input_image", "detail": "auto"}
+				if source, ok := b["source"].(map[string]interface{}); ok {
+					mediaType, _ := source["media_type"].(string)
+					data, _ := source["data"].(string)
+					if data != "" {
+						img["image_url"] = fmt.Sprintf("data:%s;base64,%s", mediaType, data)
+					}
+				}
+				imageParts = append(imageParts, img)
 			}
 		}
-		return strings.Join(parts, "\n")
+		if len(imageParts) == 0 {
+			return strings.Join(textParts, "\n")
+		}
+		parts := make([]interface{}, 0, len(imageParts)+1)
+		if text := strings.Join(textParts, "\n"); text != "" {
+			parts = append(parts, map[string]interface{}{"type": "input_text", "text": text})
+		}
+		for _, img := range imageParts {
+			parts = append(parts, img)
+		}
+		return parts
 	}
 	return ""
 }
