@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"tresor/internal/engine"
@@ -57,7 +58,38 @@ type responsesInputItemRaw struct {
 	// value (Anthropic Messages) parse the bytes themselves.
 	Args             json.RawMessage `json:"arguments,omitempty"`
 	Output           string          `json:"output,omitempty"`
+	outputRaw        json.RawMessage
 	EncryptedContent string          `json:"encrypted_content,omitempty"`
+}
+
+// UnmarshalJSON makes the `output` field of a function_call_output item
+// polymorphic: a plain JSON string populates Output, while an array or
+// object (the multi-part form that carries input_image parts) is kept in
+// outputRaw and mirrored into Output as raw text. Without this, a single
+// multi-part tool result poisons the whole input-array unmarshal and every
+// message in the request is silently dropped. Mirrors the reference pi /
+// sub2api handling of Responses tool output.
+func (i *responsesInputItemRaw) UnmarshalJSON(data []byte) error {
+	type alias responsesInputItemRaw
+	var wire struct {
+		*alias
+		Output json.RawMessage `json:"output"`
+	}
+	*i = responsesInputItemRaw{}
+	wire.alias = (*alias)(i)
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	output := bytes.TrimSpace(wire.Output)
+	if len(output) == 0 || bytes.Equal(output, []byte("null")) {
+		return nil
+	}
+	if err := json.Unmarshal(output, &i.Output); err == nil {
+		return nil
+	}
+	i.outputRaw = append(i.outputRaw[:0], output...)
+	i.Output = string(output)
+	return nil
 }
 
 type responsesContentPart struct {
@@ -143,6 +175,12 @@ func (t *Responses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 	oaiBody["max_tokens"] = 4096
 
 	messages := make([]map[string]interface{}, 0)
+
+	// mediaByCallID accumulates image parts lifted out of multi-part
+	// function_call_output items (Responses tool results that carry
+	// input_image). They are re-emitted as a follow-up user message after
+	// the assistant turn that made the call, matching the reference client.
+	mediaByCallID := make(map[string][]map[string]interface{})
 
 	// Instructions → system message (prepended)
 	if respReq.Instructions != "" {
@@ -232,10 +270,17 @@ func (t *Responses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 					pendingToolCalls = append(pendingToolCalls, tc)
 				} else if item.Type == "function_call_output" {
 					flushToolCalls()
+					outputContent := item.Output
+					if text, media, changed := extractResponsesToolOutputMedia(item); changed {
+						if item.CallID != "" {
+							mediaByCallID[item.CallID] = media
+						}
+						outputContent = text
+					}
 					messages = append(messages, map[string]interface{}{
 						"role":         "tool",
 						"tool_call_id": item.CallID,
-						"content":      item.Output,
+						"content":      outputContent,
 					})
 				}
 			}
@@ -250,6 +295,10 @@ func (t *Responses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 				})
 			}
 		}
+	}
+
+	if len(mediaByCallID) > 0 {
+		messages = normalizeChatMessagesWithToolOutputMedia(messages, mediaByCallID)
 	}
 
 	if len(messages) > 0 {
@@ -302,6 +351,274 @@ func (t *Responses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 	}
 
 	return newReq, newBody, nil
+}
+
+// --- Tool-output media lifting (Responses function_call_output → Chat Completions) ---
+
+// When a Responses function_call_output carries a multi-part array with
+// input_image parts, the Chat Completions `tool` role cannot hold those
+// images inline (it accepts a string). Mirroring the reference pi / sub2api
+// client, each image is lifted out of the tool result into a follow-up
+// `user` message, leaving a text marker where the image used to be.
+const (
+	toolOutputMediaMarker      = "[Tool output media moved to the following user message]"
+	toolOutputMediaAttribution = "[Tool output media for call %s]"
+)
+
+// extractResponsesToolOutputMedia inspects a function_call_output item for
+// embedded image media. It returns (text, media, changed): text is the tool
+// content to keep (the marker, or the rewritten payload with markers), media
+// is the lifted image parts, and changed reports whether any media was found.
+func extractResponsesToolOutputMedia(item responsesInputItemRaw) (string, []map[string]interface{}, bool) {
+	// Plain-string output (outputRaw empty).
+	if len(item.outputRaw) == 0 {
+		text := item.Output
+		if isToolOutputImageDataURL(text) {
+			return toolOutputMediaMarker, []map[string]interface{}{toolOutputImagePart(text)}, true
+		}
+		// A JSON-encoded string whose content is itself a media-bearing
+		// object/array.
+		if nested, ok := decodeToolOutputJSON([]byte(text)); ok {
+			rewritten, media, changed := rewriteToolOutputMediaValue(nested)
+			if !changed {
+				return "", nil, false
+			}
+			if encoded, err := json.Marshal(rewritten); err == nil {
+				return string(encoded), media, true
+			}
+		}
+		return "", nil, false
+	}
+
+	// Array / object output.
+	value, ok := decodeToolOutputJSON(item.outputRaw)
+	if !ok {
+		return "", nil, false
+	}
+	rewritten, media, changed := rewriteToolOutputMediaValue(value)
+	if !changed {
+		return "", nil, false
+	}
+	encoded, err := json.Marshal(rewritten)
+	if err != nil {
+		return "", nil, false
+	}
+	return string(encoded), media, true
+}
+
+func decodeToolOutputJSON(raw []byte) (any, bool) {
+	if !json.Valid(raw) {
+		return nil, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false
+	}
+	return value, true
+}
+
+// rewriteToolOutputMediaValue walks a decoded tool-output value and replaces
+// any recognized image part with a text marker, collecting the image parts
+// for re-emission. Returns (rewritten, media, changed).
+func rewriteToolOutputMediaValue(value any) (any, []map[string]interface{}, bool) {
+	switch typed := value.(type) {
+	case []any:
+		var media []map[string]interface{}
+		changed := false
+		for i, elem := range typed {
+			rewritten, itemMedia, itemChanged := rewriteToolOutputMediaValue(elem)
+			if !itemChanged {
+				continue
+			}
+			typed[i] = rewritten
+			media = append(media, itemMedia...)
+			changed = true
+		}
+		return typed, media, changed
+	case map[string]any:
+		if imageURL, ok := recognizedToolOutputImageURL(typed); ok {
+			return map[string]any{
+				"type": "input_text",
+				"text": toolOutputMediaMarker,
+			}, []map[string]interface{}{toolOutputImagePart(imageURL)}, true
+		}
+		content, ok := typed["content"]
+		if !ok {
+			return typed, nil, false
+		}
+		rewritten, media, changed := rewriteToolOutputMediaValue(content)
+		if !changed {
+			return typed, nil, false
+		}
+		typed["content"] = rewritten
+		return typed, media, true
+	default:
+		return value, nil, false
+	}
+}
+
+func recognizedToolOutputImageURL(value map[string]any) (string, bool) {
+	partType, _ := value["type"].(string)
+	if partType != "input_image" && partType != "image_url" {
+		return "", false
+	}
+	switch imageURL := value["image_url"].(type) {
+	case string:
+		return imageURL, strings.TrimSpace(imageURL) != ""
+	case map[string]any:
+		url, _ := imageURL["url"].(string)
+		return url, strings.TrimSpace(url) != ""
+	default:
+		return "", false
+	}
+}
+
+func isToolOutputImageDataURL(value string) bool {
+	const prefix = "data:image/"
+	const separator = ";base64,"
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	separatorIndex := strings.Index(value[len(prefix):], separator)
+	if separatorIndex <= 0 {
+		return false
+	}
+	payloadIndex := len(prefix) + separatorIndex + len(separator)
+	return payloadIndex < len(value)
+}
+
+func toolOutputImagePart(imageURL string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":      "image_url",
+		"image_url": map[string]interface{}{"url": imageURL},
+	}
+}
+
+// normalizeChatMessagesWithToolOutputMedia re-emits the message list so that
+// any media lifted out of tool results is re-attached as a follow-up user
+// message right after the assistant turn that made the call. It also drops
+// tool replies whose tool_call_id was never announced and prunes assistant
+// tool_calls with no answer, keeping the history in a valid shape for Chat
+// Completions. Only invoked when mediaByCallID is non-empty, so the common
+// string-only path is left untouched.
+func normalizeChatMessagesWithToolOutputMedia(messages []map[string]interface{}, mediaByCallID map[string][]map[string]interface{}) []map[string]interface{} {
+	replies := make(map[string]map[string]interface{})
+	for _, m := range messages {
+		if m["role"] == "tool" {
+			if id, _ := m["tool_call_id"].(string); id != "" {
+				replies[id] = m
+			}
+		}
+	}
+
+	out := make([]map[string]interface{}, 0, len(messages))
+	for _, m := range messages {
+		role, _ := m["role"].(string)
+		switch {
+		case role == "tool":
+			// A tool reply whose id is announced by an assistant is re-emitted
+			// right after that assistant (its standalone occurrence is skipped).
+			// A bare tool message with no id is a passthrough — keep in place.
+			if id, _ := m["tool_call_id"].(string); id == "" {
+				out = append(out, m)
+			}
+			continue
+		case len(toolCallIDs(m)) > 0:
+			ids := filterToolCallsToAnswered(m, replies)
+			if len(ids) == 0 {
+				// No answered tool_calls left: keep as a plain message if it has
+				// content, otherwise drop it entirely.
+				if !isBlankChatContent(m) {
+					out = append(out, m)
+				}
+				continue
+			}
+			out = append(out, m)
+			for _, id := range ids {
+				out = append(out, replies[id])
+			}
+			var mediaParts []map[string]interface{}
+			for _, id := range ids {
+				media := mediaByCallID[id]
+				if len(media) == 0 {
+					continue
+				}
+				mediaParts = append(mediaParts, map[string]interface{}{
+					"type": "text",
+					"text": fmt.Sprintf(toolOutputMediaAttribution, id),
+				})
+				mediaParts = append(mediaParts, media...)
+			}
+			if len(mediaParts) > 0 {
+				out = append(out, map[string]interface{}{
+					"role":    "user",
+					"content": mediaParts,
+				})
+			}
+		default:
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// toolCallIDs returns the tool_call ids in an assistant message's tool_calls
+// field, in order.
+func toolCallIDs(m map[string]interface{}) []string {
+	tcs, ok := m["tool_calls"].([]openAIChatToolCall)
+	if !ok {
+		return nil
+	}
+	ids := make([]string, 0, len(tcs))
+	for _, tc := range tcs {
+		ids = append(ids, tc.ID)
+	}
+	return ids
+}
+
+// filterToolCallsToAnswered rebuilds an assistant message's tool_calls to
+// keep only those whose tool reply is present, mutating m in place, and
+// returns the kept call ids in order.
+func filterToolCallsToAnswered(m map[string]interface{}, replies map[string]map[string]interface{}) []string {
+	tcs, ok := m["tool_calls"].([]openAIChatToolCall)
+	if !ok {
+		return nil
+	}
+	kept := make([]openAIChatToolCall, 0, len(tcs))
+	var ids []string
+	for _, tc := range tcs {
+		if tc.ID == "" {
+			continue
+		}
+		if _, ok := replies[tc.ID]; ok {
+			kept = append(kept, tc)
+			ids = append(ids, tc.ID)
+		}
+	}
+	if len(kept) > 0 {
+		m["tool_calls"] = kept
+	} else {
+		delete(m, "tool_calls")
+	}
+	return ids
+}
+
+// isBlankChatContent reports whether a chat message holds no usable text.
+func isBlankChatContent(m map[string]interface{}) bool {
+	content, exists := m["content"]
+	if !exists || content == nil {
+		return true
+	}
+	switch v := content.(type) {
+	case string:
+		return strings.TrimSpace(v) == ""
+	case []interface{}:
+		return len(v) == 0
+	default:
+		return false
+	}
 }
 
 // --- TransformResponse: Chat Completions → Responses API ---

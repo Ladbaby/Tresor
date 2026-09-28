@@ -492,7 +492,7 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 						{
 							"type":        "tool_result",
 							"tool_use_id": item.CallID,
-							"content":     item.Output,
+							"content":     responsesOutputToAnthropicContent(item),
 						},
 					}
 					flushToolResults(toolResults)
@@ -680,6 +680,47 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 	}
 
 	return newReq, newBody, nil
+}
+
+// responsesOutputToAnthropicContent converts a Responses function_call_output
+// item into an Anthropic tool_result `content` value. A plain-string output
+// stays a string. When the output is the multi-part array form (outputRaw
+// populated) carrying input_image parts — e.g. a `read` tool returning a
+// screenshot — the parts are promoted to native Anthropic content blocks
+// (text + image) inside the tool_result, matching the reference pi client.
+// Without this, the image bytes would be dropped and the Anthropic backend
+// would never receive them.
+func responsesOutputToAnthropicContent(item responsesInputItemRaw) interface{} {
+	if len(item.outputRaw) == 0 {
+		output := item.Output
+		if output == "" {
+			output = "(empty)"
+		}
+		return output
+	}
+	var parts []responsesContentPart
+	if err := json.Unmarshal(item.outputRaw, &parts); err == nil {
+		blocks := make([]map[string]interface{}, 0, len(parts))
+		for _, p := range parts {
+			switch p.Type {
+			case "input_text", "output_text", "text":
+				if p.Text != "" {
+					blocks = append(blocks, map[string]interface{}{"type": "text", "text": p.Text})
+				}
+			case "input_image":
+				if block, ok := dataURIToAnthropicImage(p.ImageURL); ok {
+					blocks = append(blocks, block)
+				}
+			}
+		}
+		if len(blocks) > 0 {
+			return blocks
+		}
+		if len(parts) == 0 {
+			return "(empty)"
+		}
+	}
+	return item.Output
 }
 
 // --- TransformResponse: Anthropic Messages → Responses API ---

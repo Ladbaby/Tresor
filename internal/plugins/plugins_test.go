@@ -2758,6 +2758,157 @@ func TestResponses2OpenAI_TransformRequest_ToolCall(t *testing.T) {
 	}
 }
 
+// Regression: a Responses function_call_output whose output is a multi-part
+// array carrying an input_image must NOT drop the rest of the request, and
+// the image must be lifted out of the (string-only) tool message into a
+// follow-up user message — matching the reference pi / sub2api client.
+func TestResponses2OpenAI_TransformRequest_ToolOutputImageLiftedToUserMessage(t *testing.T) {
+	p := &Responses2OpenAI{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": [
+			{"role": "user", "content": "What's in this file?"},
+			{"type": "function_call", "call_id": "call_1", "name": "read", "arguments": "{\"path\":\"chart.png\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": [
+				{"type": "input_text", "text": "(see attached image)"},
+				{"type": "input_image", "image_url": "data:image/png;base64,Y2hhcnQtZGF0YQ=="}
+			]}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages := result["messages"].([]interface{})
+	// user, assistant(tool_calls), tool(marker), user(lifted media)
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %v", len(messages), messages)
+	}
+	// Tool message carries the marker, not the raw array.
+	tool := messages[2].(map[string]interface{})
+	if tool["role"] != "tool" || tool["tool_call_id"] != "call_1" {
+		t.Fatalf("expected tool call_1, got %v", tool)
+	}
+	toolContent, _ := tool["content"].(string)
+	if !strings.Contains(toolContent, "see attached image") {
+		t.Fatalf("expected tool content to preserve the text part, got %q", toolContent)
+	}
+	if !strings.Contains(toolContent, toolOutputMediaMarker) {
+		t.Fatalf("expected tool content to contain the media marker, got %q", toolContent)
+	}
+	// Follow-up user message carries the attribution + the image part.
+	user := messages[3].(map[string]interface{})
+	if user["role"] != "user" {
+		t.Fatalf("expected follow-up user message, got %v", user["role"])
+	}
+	parts, ok := user["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected lifted media content to be an array, got %T", user["content"])
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 lifted parts (attribution + image), got %d: %v", len(parts), parts)
+	}
+	textPart := parts[0].(map[string]interface{})
+	if textPart["type"] != "text" || !strings.Contains(textPart["text"].(string), "call_1") {
+		t.Fatalf("expected attribution text part, got %v", textPart)
+	}
+	imgPart := parts[1].(map[string]interface{})
+	if imgPart["type"] != "image_url" {
+		t.Fatalf("expected image_url part, got %v", imgPart)
+	}
+	iu := imgPart["image_url"].(map[string]interface{})
+	if iu["url"] != "data:image/png;base64,Y2hhcnQtZGF0YQ==" {
+		t.Fatalf("expected lifted data url, got %v", iu["url"])
+	}
+}
+
+// Regression: a plain-string tool output that is itself an image data URL
+// must also be lifted into a follow-up user message, with the marker left in
+// the tool message.
+func TestResponses2OpenAI_TransformRequest_ToolOutputDataURLLiftedToUserMessage(t *testing.T) {
+	p := &Responses2OpenAI{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": [
+			{"role": "user", "content": "Show me the image"},
+			{"type": "function_call", "call_id": "call_1", "name": "render", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "data:image/png;base64,Y2hhcnQtZGF0YQ=="}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages := result["messages"].([]interface{})
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %v", len(messages), messages)
+	}
+	tool := messages[2].(map[string]interface{})
+	if tool["content"] != toolOutputMediaMarker {
+		t.Fatalf("expected tool content to be the marker, got %v", tool["content"])
+	}
+	user := messages[3].(map[string]interface{})
+	parts, ok := user["content"].([]interface{})
+	if !ok || len(parts) != 2 {
+		t.Fatalf("expected 2 lifted parts, got %v", user["content"])
+	}
+	imgPart := parts[1].(map[string]interface{})
+	iu := imgPart["image_url"].(map[string]interface{})
+	if iu["url"] != "data:image/png;base64,Y2hhcnQtZGF0YQ==" {
+		t.Fatalf("expected lifted data url, got %v", iu["url"])
+	}
+}
+
+// Regression: a text-only array function_call_output must stay a plain string
+// (no spurious user message, no parse failure).
+func TestResponses2OpenAI_TransformRequest_TextOnlyArrayOutputStaysString(t *testing.T) {
+	p := &Responses2OpenAI{}
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": [
+			{"role": "user", "content": "Weather?"},
+			{"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"Paris\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": [
+				{"type": "input_text", "text": "22°C"}
+			]}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages := result["messages"].([]interface{})
+	// user, assistant, tool — no follow-up media message.
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %v", len(messages), messages)
+	}
+	tool := messages[2].(map[string]interface{})
+	if !strings.Contains(tool["content"].(string), "22") {
+		t.Fatalf("expected tool content to contain the text, got %v", tool["content"])
+	}
+}
+
 func TestResponses2OpenAI_TransformRequest_Reasoning(t *testing.T) {
 	p := &Responses2OpenAI{}
 	body := []byte(`{
@@ -3094,6 +3245,125 @@ func TestResponses2Anthropic_TransformRequest_ToolCall(t *testing.T) {
 	block := content[0].(map[string]interface{})
 	if block["type"] != "tool_use" {
 		t.Fatalf("expected tool_use block, got %v", block["type"])
+	}
+}
+
+// Regression: a Responses function_call_output whose output is a multi-part
+// array carrying an input_image must be promoted to native Anthropic content
+// blocks (text + image) inside the tool_result — matching the reference pi /
+// sub2api client. Without this, the image bytes are dropped and the Anthropic
+// backend never receives them.
+func TestResponses2Anthropic_TransformRequest_ToolOutputImageInlinedInToolResult(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "What's in this file?"},
+			{"type": "function_call", "call_id": "call_1", "name": "read", "arguments": "{\"path\":\"chart.png\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": [
+				{"type": "input_text", "text": "(see attached image)"},
+				{"type": "input_image", "image_url": "data:image/png;base64,Y2hhcnQtZGF0YQ=="}
+			]}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages := result["messages"].([]interface{})
+	// user, assistant(tool_use), user(tool_result)
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %v", len(messages), messages)
+	}
+	last := messages[2].(map[string]interface{})
+	if last["role"] != "user" {
+		t.Fatalf("expected user role for tool_result, got %v", last["role"])
+	}
+	blocks := last["content"].([]interface{})
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 tool_result block, got %d: %v", len(blocks), blocks)
+	}
+	tr := blocks[0].(map[string]interface{})
+	if tr["type"] != "tool_result" || tr["tool_use_id"] != "call_1" {
+		t.Fatalf("expected tool_result for call_1, got %v", tr)
+	}
+	// The tool_result content must be an array of text + image blocks.
+	parts, ok := tr["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected tool_result content to be an array, got %T: %v", tr["content"], tr["content"])
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts (text + image), got %d: %v", len(parts), parts)
+	}
+	textPart := parts[0].(map[string]interface{})
+	if textPart["type"] != "text" || textPart["text"] != "(see attached image)" {
+		t.Fatalf("expected text part, got %v", textPart)
+	}
+	imgPart := parts[1].(map[string]interface{})
+	if imgPart["type"] != "image" {
+		t.Fatalf("expected image block, got %v", imgPart)
+	}
+	source := imgPart["source"].(map[string]interface{})
+	if source["type"] != "base64" || source["media_type"] != "image/png" || source["data"] != "Y2hhcnQtZGF0YQ==" {
+		t.Fatalf("expected base64 png source, got %v", source)
+	}
+}
+
+// Regression: a text-only array function_call_output must be preserved as a
+// tool_result whose content is the text part — no image is fabricated and
+// nothing is dropped (matches sub2api: arrays yield blocks, never a plain
+// string).
+func TestResponses2Anthropic_TransformRequest_TextOnlyArrayOutputStaysString(t *testing.T) {
+	p := &Responses2Anthropic{}
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"role": "user", "content": "Weather?"},
+			{"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"Paris\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": [
+				{"type": "input_text", "text": "22C"}
+			]}
+		],
+		"stream": false
+	}`)
+	req, _ := http.NewRequest("POST", "http://example.com/v1/responses", nil)
+	ctx := &engine.PipelineContext{TargetDownstream: &engine.Downstream{APIKey: "sk-test"}}
+	newReq, _, err := p.TransformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(newReq.Body).Decode(&result); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	messages := result["messages"].([]interface{})
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %v", len(messages), messages)
+	}
+	last := messages[2].(map[string]interface{})
+	blocks := last["content"].([]interface{})
+	tr := blocks[0].(map[string]interface{})
+	if tr["type"] != "tool_result" {
+		t.Fatalf("expected tool_result, got %v", tr["type"])
+	}
+	// Text-only array yields a single text block.
+	parts, ok := tr["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected tool_result content to be an array of blocks, got %T: %v", tr["content"], tr["content"])
+	}
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 text block, got %d: %v", len(parts), parts)
+	}
+	block := parts[0].(map[string]interface{})
+	if block["type"] != "text" || block["text"] != "22C" {
+		t.Fatalf("expected text block, got %v", block)
 	}
 }
 
