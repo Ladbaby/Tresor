@@ -367,20 +367,9 @@ func (m *Manager) refreshLock(downstreamID string) *sync.Mutex {
 	return l
 }
 
-// tokenExpiringSoon reports whether the token should be refreshed now.
-func tokenExpiringSoon(t *store.OAuthToken, skewSecs int, now time.Time) bool {
-	if t.NeedsLogin {
-		return false
-	}
-	exp := tokenExpiry(t.AccessToken, t.ExpiresAt)
-	if exp.IsZero() {
-		return false
-	}
-	return now.Add(time.Duration(skewSecs) * time.Second).After(exp)
-}
-
-// resolveProviderSkew returns the refresh skew for a provider (default if
-// the provider is unknown or unset).
+// skew returns the refresh skew for a provider (default if
+// the provider is unknown or unset). A skew of 0 means refresh only at/after
+// the token's actual expiry (pi-style lazy refresh).
 func (p *Provider) skew() int {
 	if p.RefreshSkewSecs > 0 {
 		return p.RefreshSkewSecs

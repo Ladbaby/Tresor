@@ -1,7 +1,6 @@
 package oauth
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/url"
@@ -171,54 +170,6 @@ func (m *Manager) refreshToken(p *Provider, t *store.OAuthToken) (*tokenResponse
 		form.Set("client_id", p.ClientID)
 	}
 	return m.postToken(p, form)
-}
-
-// StartRefresher runs a background loop that proactively refreshes tokens
-// before they expire. It stops when ctx is cancelled.
-func (m *Manager) StartRefresher(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				m.refreshDueNow()
-			}
-		}
-	}()
-}
-
-// refreshDueNow refreshes every OAuth downstream whose token is within its
-// provider's skew window of expiry. Exported-for-tests.
-func (m *Manager) refreshDueNow() {
-	ids, err := m.store.ListOAuthDownstreams()
-	if err != nil {
-		log.Printf("oauth: list downstreams: %v", err)
-		return
-	}
-	now := time.Now()
-	for _, id := range ids {
-		t, err := m.store.GetOAuthToken(id)
-		if err != nil || t == nil || t.NeedsLogin || t.RefreshToken == "" {
-			continue
-		}
-		auth, err := m.authFor(id)
-		if err != nil || auth == nil || auth.Type != "oauth" {
-			continue
-		}
-		p, err := m.buildProvider(id, auth)
-		if err != nil {
-			continue
-		}
-		if !tokenExpiringSoon(t, p.skew(), now) {
-			continue
-		}
-		if _, _, err := m.ResolveValidToken(id); err != nil {
-			log.Printf("oauth: proactive refresh for %s: %v", id, err)
-		}
-	}
 }
 
 // codexUserAgent mirrors the reference client's User-Agent shape

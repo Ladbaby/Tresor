@@ -86,6 +86,48 @@ func TestResolveValidToken_ReturnsStoredToken(t *testing.T) {
 	}
 }
 
+// TestResolveValidToken_NotYetExpiredIsNotRefreshed pins the pi-style lazy
+// refresh behavior: with the default 0 skew, a token that is still valid
+// (even expiring in the near future) must be returned as-is, without any
+// refresh round-trip. Only at/after actual expiry does a refresh fire.
+func TestResolveValidToken_NotYetExpiredIsNotRefreshed(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+
+	var calls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "should-not-be-used", "refresh_token": "rt", "expires_in": 3600,
+		})
+	}))
+	defer ts.Close()
+
+	bindOAuth(t, s, ds, authCodeAuth(ts.URL))
+	// Valid token expiring in a few minutes: still well inside the lifetime.
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  "current-valid-tok",
+		RefreshToken: "old-rt",
+		ExpiresAt:    time.Now().Add(5 * time.Minute).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, _, err := m.ResolveValidToken(ds.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if tok != "current-valid-tok" {
+		t.Fatalf("token = %q, want the still-valid stored token (no refresh)", tok)
+	}
+	if calls != 0 {
+		t.Fatalf("expected 0 refresh calls for a valid token, got %d", calls)
+	}
+}
+
 // TestStatus_HasToken verifies the status reports has_token for both a live
 // token and a stale/needs-login token (so the UI can show Disconnect), and
 // false when no token row exists.

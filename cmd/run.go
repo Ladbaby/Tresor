@@ -132,9 +132,6 @@ func runDaemon(cfg *config.AppConfig) error {
 	refreshCtx, stopRefresh := context.WithCancel(context.Background())
 	defer stopRefresh()
 	iconFetcher.StartPeriodicRefresh(refreshCtx)
-	if oauthMgr != nil {
-		oauthMgr.StartRefresher(refreshCtx)
-	}
 
 	// Initialize request logger
 	logger := engine.NewRequestLogger()

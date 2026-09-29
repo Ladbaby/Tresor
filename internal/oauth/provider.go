@@ -22,7 +22,7 @@ const (
 const (
 	defaultRedirectPort   = 56120
 	defaultRedirectPath   = "/callback"
-	defaultRefreshSkew    = 120 // seconds ahead of expiry to refresh
+	defaultRefreshSkew    = 0 // seconds ahead of expiry to refresh (0 = pi-style lazy: refresh only at/after actual expiry)
 	devicePollTimeout     = 15 * time.Minute
 	deviceMinPollInterval = 5 * time.Second
 )
