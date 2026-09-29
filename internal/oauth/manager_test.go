@@ -286,6 +286,83 @@ func TestResolveValidToken_RefreshFailureMarksNeedsLogin(t *testing.T) {
 	}
 }
 
+// TestResolveValidToken_TransientFailureKeepsCredential verifies the recovery
+// behavior: a transient refresh failure (here a 5xx from the token endpoint,
+// which is not a definitive auth rejection) must NOT mark the downstream as
+// needing login and must leave the credential intact, so the next request
+// retries the refresh automatically.
+func TestResolveValidToken_TransientFailureKeepsCredential(t *testing.T) {
+	s, m := newTestStoreAndManager(t)
+	ds := mustDownstream(t, s)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{"error":"upstream connect error"}`))
+	}))
+	defer ts.Close()
+
+	bindOAuth(t, s, ds, authCodeAuth(ts.URL))
+	if err := s.SaveOAuthToken(&store.OAuthToken{
+		DownstreamID: ds.ID,
+		Provider:     "p",
+		Flow:         FlowAuthCode,
+		AccessToken:  "expired",
+		RefreshToken: "old-rt",
+		ExpiresAt:    time.Now().Add(-time.Minute).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := m.ResolveValidToken(ds.ID); err == nil {
+		t.Fatal("expected an error for a failing refresh")
+	} else if !errors.Is(err, ErrTransientRefresh) {
+		t.Fatalf("expected ErrTransientRefresh, got %v", err)
+	}
+	got, _ := s.GetOAuthToken(ds.ID)
+	if got.NeedsLogin {
+		t.Fatal("needs_login must NOT be set on a transient refresh failure")
+	}
+	if got.RefreshToken != "old-rt" {
+		t.Fatalf("credential must be preserved, got refresh_token %q", got.RefreshToken)
+	}
+	// A subsequent call must not short-circuit with ErrNotConnected — it should
+	// retry the refresh (the token endpoint would be hit again).
+	if _, _, err := m.ResolveValidToken(ds.ID); err == nil || errors.Is(err, ErrNotConnected) {
+		t.Fatalf("second call should retry (not ErrNotConnected), got %v", err)
+	}
+}
+
+// TestIsDefinitiveRefreshError covers the classifier: definitive auth rejections
+// are recognized by their error text, while transient network/server errors are
+// not.
+func TestIsDefinitiveRefreshError(t *testing.T) {
+	definitive := []string{
+		"token endpoint returned 400 Bad Request: {\"error\":\"invalid_grant\"}",
+		"refresh failed: invalid_refresh_token",
+		"access_denied by server",
+	}
+	for _, msg := range definitive {
+		if !isDefinitiveRefreshError(errors.New(msg)) {
+			t.Errorf("expected definitive: %q", msg)
+		}
+	}
+	transient := []string{
+		"token request: Post \"https://auth.openai.com/oauth/token\": dial tcp: i/o timeout",
+		"token request: context deadline exceeded",
+		"token endpoint returned 502 Bad Gateway: upstream connect error",
+		"token endpoint returned 503 Service Unavailable",
+		"",
+	}
+	for _, msg := range transient {
+		if isDefinitiveRefreshError(errors.New(msg)) {
+			t.Errorf("expected transient (not definitive): %q", msg)
+		}
+	}
+	if isDefinitiveRefreshError(nil) {
+		t.Error("nil error must not be definitive")
+	}
+}
+
 // TestResolveValidToken_ConcurrentRefresh ensures concurrent resolves for the
 // same downstream produce a single refresh call (per-downstream lock +
 // double-check).

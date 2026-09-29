@@ -83,11 +83,25 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 
 	tr, err := m.refreshToken(p, t)
 	if err != nil {
-		// Refresh failed: require a fresh interactive login.
-		if markErr := m.store.SetOAuthNeedsLogin(downstreamID, true); markErr != nil {
-			log.Printf("oauth: mark needs_login for %s: %v", downstreamID, markErr)
+		// Distinguish a definitive auth rejection from a transient failure.
+		// Only a definitive failure (the refresh token is actually dead —
+		// invalid_grant, access_denied, revoked session, ...) warrants marking
+		// the downstream as needing a fresh interactive login. A transient
+		// failure — network down, DNS, timeout, a 5xx from the token endpoint
+		// — must NOT wedge the connection: leave the stored credential intact
+		// and let the next request retry the refresh once the network recovers.
+		// This mirrors the reference gateways' non-retryable-error classifier.
+		if isDefinitiveRefreshError(err) {
+			if markErr := m.store.SetOAuthNeedsLogin(downstreamID, true); markErr != nil {
+				log.Printf("oauth: mark needs_login for %s: %v", downstreamID, markErr)
+			}
+			return "", nil, fmt.Errorf("refresh failed: %w (reconnect in the dashboard)", err)
 		}
-		return "", nil, fmt.Errorf("refresh failed: %w (reconnect in the dashboard)", err)
+		// Transient: surface a retryable error and keep the credential so the
+		// next request retries. Do NOT mark needs_login. Wrapping ErrTransientRefresh
+		// lets callers tell this apart from a permanent failure.
+		log.Printf("oauth: transient refresh failure for %s (will retry): %v", downstreamID, err)
+		return "", nil, fmt.Errorf("%w: %v", ErrTransientRefresh, err)
 	}
 
 	nt := m.buildTokenRow(downstreamID, p, tr)
@@ -170,6 +184,45 @@ func (m *Manager) refreshToken(p *Provider, t *store.OAuthToken) (*tokenResponse
 		form.Set("client_id", p.ClientID)
 	}
 	return m.postToken(p, form)
+}
+
+// definitiveRefreshErrors are error substrings (lowercased) that indicate the
+// refresh token itself is dead, not a transient problem. When one of these
+// appears, the connection genuinely needs a fresh interactive login. This list
+// mirrors the reference gateway (sub2api's isNonRetryableRefreshError) so a
+// transient network blip is never mistaken for a revoked token.
+var definitiveRefreshErrors = []string{
+	"invalid_grant",
+	"invalid_refresh_token",
+	"refresh_token_reused",
+	"refresh_token_invalidated",
+	"token_expired",
+	"access_denied",
+	"invalid_client",
+	"unauthorized_client",
+	"app_session_terminated",
+	"subscription required",
+	"entitlement_denied",
+}
+
+// isDefinitiveRefreshError reports whether a refresh failure means the refresh
+// token is unusable (mark needs_login) as opposed to a transient network /
+// server hiccup (leave the credential and retry on the next request).
+//
+// A network error (dial/timeout/DNS) never contains any of these substrings,
+// so it classifies as transient. A 400 whose body carries "invalid_grant" (now
+// included in the error by postToken) classifies as definitive.
+func isDefinitiveRefreshError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range definitiveRefreshErrors {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // codexUserAgent mirrors the reference client's User-Agent shape

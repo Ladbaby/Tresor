@@ -144,7 +144,10 @@ func (m *Manager) postToken(p *Provider, form url.Values) (*tokenResponse, error
 	}
 	if resp.StatusCode != http.StatusOK {
 		_, _ = parseTokenResponse(body, resp.Header.Get("Content-Type"))
-		return nil, fmt.Errorf("token endpoint returned %s", resp.Status)
+		// Include the response body so the caller can classify the failure:
+		// a 400 body containing "invalid_grant" is a definitive auth rejection,
+		// while a network error / 5xx is transient and retryable.
+		return nil, fmt.Errorf("token endpoint returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	return parseTokenResponse(body, resp.Header.Get("Content-Type"))
 }

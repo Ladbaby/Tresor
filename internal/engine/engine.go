@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -26,6 +27,7 @@ import (
 
 	"tresor/internal/inspect"
 	"tresor/internal/middleware"
+	"tresor/internal/oauth"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
 
@@ -929,6 +931,16 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		token, extraHeaders, terr := tm.ResolveValidToken(result.ds.ID)
 		if terr != nil {
+			// A transient refresh failure (network down, timeout, 5xx) is NOT a
+			// "reconnect" situation: the credential is intact and the next
+			// request will retry. Tell the client to retry instead of sending
+			// them to re-login in the dashboard.
+			if errors.Is(terr, oauth.ErrTransientRefresh) {
+				msg := "provider token refresh is temporarily unavailable — please retry"
+				entry.Duration = DurationMs(time.Since(start))
+				e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusServiceUnavailable, msg, msg, "oauth refresh temporarily unavailable", terr})
+				return
+			}
 			msg := "provider not connected — finish the OAuth login in the Tresor dashboard (Downstreams tab)"
 			entry.Duration = DurationMs(time.Since(start))
 			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusUnauthorized, msg, msg, "oauth not connected", terr})

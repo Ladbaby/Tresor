@@ -22,6 +22,13 @@ import (
 // usable token (never logged in, or the refresh token is exhausted).
 var ErrNotConnected = errors.New("provider not connected")
 
+// ErrTransientRefresh wraps a token-refresh failure that is transient (network
+// down, DNS, timeout, 5xx) rather than a definitive rejection of the refresh
+// token. Callers can use errors.Is to distinguish it from a permanent failure
+// and respond with "try again" instead of "re-login": the stored credential is
+// left intact and the next request will retry the refresh automatically.
+var ErrTransientRefresh = errors.New("refresh temporarily unavailable")
+
 // Manager coordinates OAuth logins, token storage and refresh for
 // downstreams. Tokens are persisted via the store (SQLite). OAuth provider
 // configuration is stored per-downstream in the downstreams.auth column, so
