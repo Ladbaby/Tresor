@@ -67,12 +67,23 @@
                     : isDict(u.prompt_tokens_details) && u.prompt_tokens_details.cached_tokens != null ? u.prompt_tokens_details.cached_tokens
                     : 0;
         if (input == null && output == null) return null;
-        const out = { input_tokens: input || 0, output_tokens: output || 0, cache_read_input_tokens: cached };
-        // Preserve the raw input so message_delta events that report only
-        // one side don't clobber the side already known from message_start.
-        if (input != null) out.input_tokens = input;
+        // Responses input_tokens includes cache reads; convert only this
+        // distinct nested shape to the Anthropic-style fresh-input count
+        // used by Logs and Dashboard. Leave malformed counts untouched.
+        const responsesCache = isDict(u.input_tokens_details) && u.input_tokens_details.cached_tokens != null;
+        const freshInput = responsesCache && input != null && cached >= 0 && cached <= input
+            ? input - cached : input;
+        const out = { input_tokens: freshInput || 0, output_tokens: output || 0 };
+        // Preserve whether the provider reported a cache count at all:
+        // explicit zero means 0%, whereas an absent field means N/A.
+        const hasCacheCount = u.cache_read_input_tokens != null || u.cached_tokens != null ||
+            u.cachedContentTokenCount != null ||
+            (isDict(u.input_tokens_details) && u.input_tokens_details.cached_tokens != null) ||
+            (isDict(u.prompt_tokens_details) && u.prompt_tokens_details.cached_tokens != null);
+        if (hasCacheCount) out.cache_read_input_tokens = cached;
+        // Preserve sparse input/output fields for partial streaming updates.
+        if (freshInput != null) out.input_tokens = freshInput;
         if (output != null) out.output_tokens = output;
-        if (cached) out.cache_read_input_tokens = cached;
         return out;
     }
 
@@ -106,7 +117,11 @@
             return openAI / input;
         }
         if (cached <= 0 && openAI <= 0) {
-            return null; // no cache information
+            // An explicitly reported zero is a real cold miss, not absent
+            // usage. Only show N/A when the provider sent no cache count.
+            if (u.cache_read_input_tokens == null && u.cached_tokens == null) return null;
+            const total = input + creation;
+            return total > 0 ? 0 : null;
         }
         const denom = input + cached + creation;
         if (denom <= 0) return null;

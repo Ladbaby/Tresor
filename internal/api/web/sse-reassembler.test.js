@@ -220,6 +220,25 @@ function eq(name, got, want) {
     eq('responses: text deltas merged', txt && txt.text, 'Hello world');
 }
 
+// ---------- OpenAI Responses cache usage ----------
+
+{
+    const warm = { input_tokens: 50137, output_tokens: 179, input_tokens_details: { cached_tokens: 49152 } };
+    const normalized = window.normalizeUsage(warm);
+    eq('responses cache: fresh input excludes cached tokens', normalized.input_tokens, 985);
+    eq('responses cache: cached count retained', normalized.cache_read_input_tokens, 49152);
+    check('responses cache: correct hit rate', Math.abs(window.cacheRateFromUsage(normalized) - 49152 / 50137) < 0.00001);
+
+    const cold = window.normalizeUsage({ input_tokens: 52010, output_tokens: 829, input_tokens_details: { cached_tokens: 0 } });
+    eq('responses cache: cold input remains unchanged', cold.input_tokens, 52010);
+    eq('responses cache: zero cached is 0%, not N/A', window.cacheRateFromUsage(cold), 0);
+    eq('responses cache: absent cache count is N/A', window.cacheRateFromUsage(window.normalizeUsage({ input_tokens: 52010, output_tokens: 829 })), null);
+
+    const malformed = window.normalizeUsage({ input_tokens: 100, input_tokens_details: { cached_tokens: 101 } });
+    eq('responses cache: malformed count does not make input negative', malformed.input_tokens, 100);
+    eq('responses cache: malformed cached count is retained', malformed.cache_read_input_tokens, 101);
+}
+
 // ---------- Gemini streaming ----------
 
 {
