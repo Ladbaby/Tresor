@@ -300,6 +300,70 @@ func TestEngine_CodexCacheKeySeparatesConversations(t *testing.T) {
 	}
 }
 
+// TestEngine_CodexStableCacheKeyIsStableAcrossTurns is the core of the prompt-
+// cache fix: for a conversation that only appends to its history, the derived
+// key must be identical across every turn so the backend keeps a hot prefix
+// cache (and, via sticky routing, the same pod).
+func TestEngine_CodexStableCacheKeyIsStableAcrossTurns(t *testing.T) {
+	base := `{"model":"gpt-5-codex","instructions":"You are helpful.","tools":[{"type":"function","name":"read"},{"type":"function","name":"bash"}],"input":[`
+	firstTurn := base + `{"role":"user","content":"start the conversation"}]}`
+	// A later turn: the first user message is unchanged, but new turns are
+	// appended to the input. The key must NOT change.
+	laterTurn := base + `{"role":"user","content":"start the conversation"},` +
+		`{"type":"function_call","call_id":"fc_1","name":"bash","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"fc_1","output":"done"},` +
+		`{"role":"user","content":"now do something else entirely"}]}`
+
+	first := codexStableCacheKey([]byte(firstTurn))
+	second := codexStableCacheKey([]byte(laterTurn))
+	if first == "" {
+		t.Fatalf("codexStableCacheKey returned empty for a valid conversation")
+	}
+	if first != second {
+		t.Errorf("stable key changed when the conversation appended a turn: %q vs %q", first, second)
+	}
+}
+
+// TestEngine_CodexStableCacheKeySeparatesConversations ensures two
+// conversations with different first user messages get different keys, so
+// their prefixes are not merged on the backend.
+func TestEngine_CodexStableCacheKeySeparatesConversations(t *testing.T) {
+	a := codexStableCacheKey([]byte(`{"model":"gpt-5-codex","tools":[{"name":"bash"}],"input":[{"role":"user","content":"write a poem"}]}`))
+	b := codexStableCacheKey([]byte(`{"model":"gpt-5-codex","tools":[{"name":"bash"}],"input":[{"role":"user","content":"fix the bug in main.go"}]}`))
+	if a == "" || b == "" {
+		t.Fatalf("expected non-empty keys, got %q / %q", a, b)
+	}
+	if a == b {
+		t.Errorf("distinct first user messages produced the same key: %q", a)
+	}
+}
+
+// TestEngine_CodexStableCacheKeyRespectsModelAndTools ensures the key tracks
+// the model and tool set, so switching either produces a distinct key.
+func TestEngine_CodexStableCacheKeyRespectsModelAndTools(t *testing.T) {
+	base := codexStableCacheKey([]byte(`{"model":"gpt-5-codex","tools":[{"name":"bash"}],"input":[{"role":"user","content":"hi"}]}`))
+	otherModel := codexStableCacheKey([]byte(`{"model":"gpt-6-astra","tools":[{"name":"bash"}],"input":[{"role":"user","content":"hi"}]}`))
+	otherTools := codexStableCacheKey([]byte(`{"model":"gpt-5-codex","tools":[{"name":"read"},{"name":"bash"}],"input":[{"role":"user","content":"hi"}]}`))
+	if base == otherModel || base == otherTools {
+		t.Errorf("key must change when model or tools change: base=%q model=%q tools=%q", base, otherModel, otherTools)
+	}
+}
+
+// TestEngine_CodexStableCacheKeyEmptyWithoutStablePrefix returns "" when there
+// is no model or no first user message, so the gateway never fabricates a key
+// it cannot distinguish between conversations.
+func TestEngine_CodexStableCacheKeyEmptyWithoutStablePrefix(t *testing.T) {
+	if got := codexStableCacheKey([]byte(`not json`)); got != "" {
+		t.Errorf("non-JSON body: want empty, got %q", got)
+	}
+	if got := codexStableCacheKey([]byte(`{"tools":[{"name":"bash"}],"input":[{"role":"user","content":"hi"}]}`)); got != "" {
+		t.Errorf("body without model: want empty, got %q", got)
+	}
+	if got := codexStableCacheKey([]byte(`{"model":"gpt-5-codex","input":[{"role":"assistant","content":"hello"}]}`)); got != "" {
+		t.Errorf("body with no user message: want empty, got %q", got)
+	}
+}
+
 // scope: zstd compression is applied only to stream requests, so a non-stream
 // ChatGPT/Codex request keeps a plain JSON body (no content-encoding), while
 // still carrying the fingerprint headers.

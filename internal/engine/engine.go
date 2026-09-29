@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1992,6 +1994,88 @@ func codexCacheKey(original *http.Request) string {
 	return original.Header.Get("x-client-request-id")
 }
 
+// codexStableCacheKey derives a deterministic, stable cache key for a Codex
+// conversation from its stable prefix. It is used when the client supplies no
+// session identity (e.g. the Anthropic client, which never sends a
+// session-id), so the gateway cannot forward a per-request UUID.
+//
+// Why: the ChatGPT/Codex backend is a fleet of pods, and the reference
+// gateway (sub2api) uses a stable prompt_cache_key / session-id as a
+// sticky-routing + cache-affinity signal — the same conversation keeps landing
+// on the pod whose prefix cache is hot. A fresh UUID per request makes every
+// turn look like a brand-new conversation, so the pod the request lands on
+// often has no cached prefix and the turn misses (this is what produces the
+// erratic per-turn cache hit rate). Deriving the key from the stable prefix
+// reproduces the reference behavior while still separating distinct
+// conversations, and it stays constant for the whole conversation because a
+// conversation only ever appends to its history.
+//
+// The key is derived from model + instructions + tools (tool names, in order)
+// + the first user message — the parts that are identical across every turn —
+// and deliberately NOT from later messages or the newest user turn. A client
+// that sends no stable prefix at all yields "" (no key) so we never fabricate
+// an identity we cannot distinguish.
+func codexStableCacheKey(body []byte) string {
+	var parsed struct {
+		Model        string          `json:"model"`
+		Instructions string          `json:"instructions"`
+		Tools        json.RawMessage `json:"tools"`
+		Input        json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Model == "" {
+		return ""
+	}
+
+	var toolNames []string
+	if len(parsed.Tools) > 0 {
+		var tools []map[string]any
+		if err := json.Unmarshal(parsed.Tools, &tools); err == nil {
+			for _, t := range tools {
+				toolNames = append(toolNames, fmt.Sprintf("%v", t["name"]))
+			}
+		}
+	}
+
+	// First real user text in the conversation (stable across turns).
+	var firstUser string
+	if len(parsed.Input) > 0 {
+		var input []map[string]any
+		if err := json.Unmarshal(parsed.Input, &input); err == nil {
+			for _, it := range input {
+				if role, _ := it["role"].(string); role == "user" {
+					if c, ok := it["content"].(string); ok && c != "" {
+						firstUser = c
+						break
+					}
+					if c, ok := it["content"].([]any); ok {
+						var parts []string
+						for _, p := range c {
+							if pm, ok := p.(map[string]any); ok {
+								if txt, ok := pm["text"].(string); ok && txt != "" {
+									parts = append(parts, txt)
+								}
+							}
+						}
+						if s := strings.Join(parts, "\n"); s != "" {
+							firstUser = s
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	if firstUser == "" {
+		// Nothing stable to key on — do not invent an identity.
+		return ""
+	}
+
+	h := sha256.New()
+	fmt.Fprintf(h, "codex-cache-key:v1|model=%s|instructions=%s|tools=%s|first_user=%s",
+		parsed.Model, parsed.Instructions, strings.Join(toolNames, ","), firstUser)
+	return "cc_" + hex.EncodeToString(h.Sum(nil))[:32]
+}
+
 // SSRF validation is not applied here — downstreams are admin-configured via auth-protected API.
 // Returns the response and a cancel function; caller must call cancel after consuming resp.Body.
 func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *PipelineContext) (*http.Response, context.CancelFunc, error) {
@@ -2042,19 +2126,32 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		return nil, func() {}, fmt.Errorf("parse target URL: %w", err)
 	}
 
-	// ChatGPT/Codex fingerprint: preserve a client-provided stable conversation
-	// id for session-id, x-client-request-id, and prompt_cache_key. For clients
-	// without one, generate one per request to retain the reference client's
-	// required correlation headers without incorrectly sharing cache affinity
-	// between independent stateless conversations.
+	// ChatGPT/Codex fingerprint: resolve the stable conversation identity used
+	// for session-id, x-client-request-id, and prompt_cache_key.
+	//
+	// Preference order:
+	//  1. A client-supplied stable session id (session-id / x-client-request-id
+	//     header) — pass it through verbatim, matching the reference gateway.
+	//  2. A key derived from the request's stable prefix (model, instructions,
+	//     tools, first user message) so consecutive turns of the same
+	//     conversation share a prompt_cache_key. Clients that speak Anthropic
+	//     never send a session id, and this is the path that matters for the
+	//     erratic cache hit rate: a fresh UUID per request makes every turn
+	//     look like a new conversation to the backend.
+	//  3. A per-request UUID, only when neither is available, purely to carry
+	//     the reference client's required correlation headers. In that case the
+	//     UUID is sent as headers only and NOT used as prompt_cache_key, so we
+	//     never inject a random cache key.
 	codexSessionID := ""
 	if ctx.CodexBackend {
 		codexSessionID = codexCacheKey(original)
+		if codexSessionID == "" {
+			codexSessionID = codexStableCacheKey(body)
+		}
 	}
 	codexCorrelationID := codexSessionID
 	if ctx.CodexBackend && codexCorrelationID == "" {
 		codexCorrelationID = uuid.NewString()
-		codexSessionID = codexCorrelationID
 	}
 
 	// For the ChatGPT/Codex backend, apply the reference client's request-body
