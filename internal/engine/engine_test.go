@@ -46,6 +46,8 @@ func (m *mockRegistryImpl) CreatePlugin(pluginID string, config map[string]inter
 		return &mockGemini2Anthropic{}, nil
 	case "gemini2responses":
 		return &mockGemini2Responses{}, nil
+	case "test_openai_to_anthropic":
+		return &testOpenAIToAnthropic{}, nil
 	default:
 		return nil, fmt.Errorf("unknown plugin: %s", pluginID)
 	}
@@ -256,6 +258,25 @@ func (m *mockGemini2Responses) TransformResponse(resp *http.Response, body []byt
 
 func (m *mockGemini2Responses) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
 	return chunk, nil
+}
+
+// testOpenAIToAnthropic simulates a format translator whose terminal output is
+// fully formed Anthropic SSE, including the stop reason Pi requires.
+type testOpenAIToAnthropic struct{}
+
+func (t *testOpenAIToAnthropic) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	return req, body, nil
+}
+
+func (t *testOpenAIToAnthropic) TransformResponse(resp *http.Response, body []byte, ctx *PipelineContext) ([]byte, error) {
+	return body, nil
+}
+
+func (t *testOpenAIToAnthropic) TransformStreamChunk(chunk SSEChunk, ctx *PipelineContext) (SSEChunk, error) {
+	if string(chunk.Data) != "[DONE]" {
+		return chunk, nil
+	}
+	return SSEChunk{Data: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")}, nil
 }
 
 func newTestStore(t *testing.T) *store.Store {
@@ -2047,11 +2068,11 @@ func TestEngine_HandleProxy_FormatURL_FallsBackToBaseURL(t *testing.T) {
 
 	// BaseURL serves OpenAI; no FormatURLs set → both formats route to openaiServer.
 	if err := s.CreateDownstream(&store.Downstream{
-		ID:         "openai-only",
-		Name:       "OpenAI",
-		BaseURL:    openaiServer.URL,
-		Auth:       &config.DownstreamAuthCfg{Type: "api_key", APIKey: "sk-test"},
-		ApiFormats: []string{"openai", "anthropic"},
+		ID:             "openai-only",
+		Name:           "OpenAI",
+		BaseURL:        openaiServer.URL,
+		Auth:           &config.DownstreamAuthCfg{Type: "api_key", APIKey: "sk-test"},
+		ApiFormats:     []string{"openai", "anthropic"},
 		OutputModelIDs: []string{"oai-chat"},
 	}); err != nil {
 		t.Fatalf("create downstream: %v", err)

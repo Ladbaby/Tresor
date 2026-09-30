@@ -207,12 +207,12 @@ func IsOpenAIChatEmpty(body []byte) bool {
 			Message struct {
 				Content   interface{}       `json:"content"`
 				ToolCalls []json.RawMessage `json:"tool_calls"`
-				Refusal   string `json:"refusal,omitempty"`
+				Refusal   string            `json:"refusal,omitempty"`
 			} `json:"message"`
 			Delta struct {
 				Content   interface{}       `json:"content"`
 				ToolCalls []json.RawMessage `json:"tool_calls"`
-				Refusal   string `json:"refusal,omitempty"`
+				Refusal   string            `json:"refusal,omitempty"`
 			} `json:"delta"`
 		} `json:"choices"`
 	}
@@ -259,9 +259,9 @@ func IsOpenAIChatEmpty(body []byte) bool {
 func IsAnthropicEmpty(body []byte) bool {
 	var resp struct {
 		Content []struct {
-			Type     string `json:"type"`
-			Text     string `json:"text,omitempty"`
-			Thinking string `json:"thinking,omitempty"`
+			Type     string          `json:"type"`
+			Text     string          `json:"text,omitempty"`
+			Thinking string          `json:"thinking,omitempty"`
 			Input    json.RawMessage `json:"input,omitempty"`
 		} `json:"content"`
 	}
@@ -603,6 +603,9 @@ func DetectStreamFormat(chunk SSEChunk) string {
 // the client — only the terminal marker is held.
 func isTerminalEvent(data string, format string) bool {
 	data = strings.TrimSpace(data)
+	if strings.HasPrefix(data, "data: ") {
+		data = strings.TrimSpace(strings.TrimPrefix(data, "data: "))
+	}
 	if data == "" {
 		return false
 	}
@@ -611,11 +614,16 @@ func isTerminalEvent(data string, format string) bool {
 		// OpenAI uses a sentinel [DONE] payload.
 		return data == "[DONE]"
 	case "anthropic":
-		// Anthropic emits message_stop as a named event; the engine's
-		// SSE scanner strips the "event:" prefix and accumulates the
-		// JSON payload in sseEvent. Check the JSON type field.
-		return strings.Contains(data, `"type":"message_stop"`) ||
-			strings.Contains(data, `"type":"message_delta"`) // message_delta signals end-of-message
+		// Anthropic terminal events are named, so prefer that authoritative
+		// signal. Parsing the JSON also accepts harmless whitespace changes
+		// that substring matching would miss.
+		var event struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(data), &event) == nil {
+			return event.Type == "message_delta" || event.Type == "message_stop"
+		}
+		return false
 	case "openai_responses":
 		// OpenAI Responses API uses named events ending the stream.
 		// The accumulated data is the JSON payload; check the type.

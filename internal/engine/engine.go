@@ -1668,16 +1668,12 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	// should not see [DONE] for an empty response). Reasoning tokens
 	// remain visible to the client; only the terminal marker is held.
 	var heldTerminalBytes []byte
-	holdTerminal := func(rawData string) {
-		// Reconstruct the full SSE event the way it arrived from the
-		// downstream (preserving event: line if present).
-		var b bytes.Buffer
-		if eventLine != "" {
-			fmt.Fprintf(&b, "event: %s\ndata: %s\n\n", eventLine, rawData)
-		} else {
-			fmt.Fprintf(&b, "data: %s\n\n", rawData)
-		}
-		heldTerminalBytes = b.Bytes()
+	// holdTerminal retains the bytes intended for the client. In transform
+	// mode these must be the transformed bytes: holding the raw upstream
+	// terminal would leak a different protocol completion marker to an
+	// Anthropic client, which then misses the required message_delta stop reason.
+	holdTerminal := func(clientBytes []byte) {
+		heldTerminalBytes = append(heldTerminalBytes[:0], clientBytes...)
 	}
 	flushHeldTerminal := func() {
 		if len(heldTerminalBytes) == 0 || clientGone {
@@ -1771,23 +1767,29 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 			log.Printf("Stream transform error: %v", err)
 			return true
 		}
-		// Safety guard: skip empty data to avoid sending data: \n\n that could
-		// confuse downstream event parsers (e.g. Anthropic SDK).
+		// Classify the raw downstream event before looking at transformed bytes:
+		// translators can legitimately produce no output for an input lifecycle
+		// event, but retry-on-empty must still retain its own terminal state.
+		eventHasRealContent := bufferForRetry && IsStreamContentLine("data: "+rawData, streamFormat)
+		isTerminal := bufferForRetry && isTerminalEvent(rawData, streamFormat)
+
+		// Safety guard: skip empty data to avoid sending an empty SSE event that
+		// could confuse downstream event parsers (e.g. Anthropic SDK). The
+		// terminal classification above ensures an intentionally dropped terminal does not bypass
+		// retry bookkeeping.
 		if len(chunk.Data) == 0 {
+			if eventHasRealContent {
+				contentProduced = true
+				flushHeldTerminal()
+			}
 			return true
 		}
-
-		// Detect real content vs reasoning-only.
-		eventHasRealContent := bufferForRetry && IsStreamContentLine("data: "+rawData, streamFormat)
-
-		// Detect terminal events (held until end-of-stream).
-		isTerminal := bufferForRetry && isTerminalEvent(rawData, streamFormat)
 
 		// If the transformer output contains SSE event boundaries (\n\n), it is
 		// already formatted SSE — write it directly without wrapping in data:.
 		if strings.Contains(string(chunk.Data), "\n\n") {
 			if isTerminal {
-				holdTerminal(rawData)
+				holdTerminal(chunk.Data)
 				return true
 			}
 			if eventHasRealContent {
@@ -1808,7 +1810,7 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		out.WriteString("\n\n")
 
 		if isTerminal {
-			holdTerminal(rawData)
+			holdTerminal(out.Bytes())
 			return true
 		}
 		if eventHasRealContent {

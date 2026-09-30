@@ -23,7 +23,7 @@ func TestCalculateBackoff(t *testing.T) {
 		minMS   int // expected minimum delay (excluding jitter)
 		maxMS   int // expected maximum delay (base + 25% jitter)
 	}{
-		{name: "attempt 1", attempt: 1, minMS: 500, maxMS: 625},  // 500 + up to 25%
+		{name: "attempt 1", attempt: 1, minMS: 500, maxMS: 625},   // 500 + up to 25%
 		{name: "attempt 2", attempt: 2, minMS: 1000, maxMS: 1250}, // 1000 + up to 25%
 		{name: "attempt 3", attempt: 3, minMS: 2000, maxMS: 2500}, // 2000 + up to 25%
 		{name: "attempt 4 capped", attempt: 4, minMS: 4000, maxMS: 5000},
@@ -480,66 +480,66 @@ func TestEngine_ShouldRetry_SkipsNonGenerationEndpoints(t *testing.T) {
 	respOK := &http.Response{StatusCode: 200}
 
 	tests := []struct {
-		name     string
-		body     string
-		format   string
-		path     string
+		name      string
+		body      string
+		format    string
+		path      string
 		wantRetry bool
 	}{
 		{
-			name: "count_tokens skipped (anthropic format, no content)",
-			body: `{"input_tokens":7802}`,
-			format: "anthropic",
-			path: "/v1/messages/count_tokens",
+			name:      "count_tokens skipped (anthropic format, no content)",
+			body:      `{"input_tokens":7802}`,
+			format:    "anthropic",
+			path:      "/v1/messages/count_tokens",
 			wantRetry: false,
 		},
 		{
-			name: "bare /count_tokens path also skipped",
-			body: `{"input_tokens":42}`,
-			format: "anthropic",
-			path: "/count_tokens",
+			name:      "bare /count_tokens path also skipped",
+			body:      `{"input_tokens":42}`,
+			format:    "anthropic",
+			path:      "/count_tokens",
 			wantRetry: false,
 		},
 		{
-			name: "models listing endpoint skipped",
-			body: `{"data":[]}`,
-			format: "openai",
-			path: "/v1/models",
+			name:      "models listing endpoint skipped",
+			body:      `{"data":[]}`,
+			format:    "openai",
+			path:      "/v1/models",
 			wantRetry: false,
 		},
 		{
-			name: "embeddings endpoint skipped",
-			body: `{"data":[]}`,
-			format: "openai",
-			path: "/v1/embeddings",
+			name:      "embeddings endpoint skipped",
+			body:      `{"data":[]}`,
+			format:    "openai",
+			path:      "/v1/embeddings",
 			wantRetry: false,
 		},
 		{
-			name: "gemini model listing skipped",
-			body: `{"models":[]}`,
-			format: "gemini",
-			path: "/v1beta/models",
+			name:      "gemini model listing skipped",
+			body:      `{"models":[]}`,
+			format:    "gemini",
+			path:      "/v1beta/models",
 			wantRetry: false,
 		},
 		{
-			name: "unknown custom path skipped (conservative default)",
-			body: `{"choices":[]}`,
-			format: "openai",
-			path: "/v1/custom-thing",
+			name:      "unknown custom path skipped (conservative default)",
+			body:      `{"choices":[]}`,
+			format:    "openai",
+			path:      "/v1/custom-thing",
 			wantRetry: false,
 		},
 		{
-			name: "generation path with empty content still retries",
-			body: `{"content":[]}`,
-			format: "anthropic",
-			path: "/v1/messages",
+			name:      "generation path with empty content still retries",
+			body:      `{"content":[]}`,
+			format:    "anthropic",
+			path:      "/v1/messages",
 			wantRetry: true,
 		},
 		{
-			name: "generation path with non-empty content does not retry",
-			body: `{"content":[{"type":"text","text":"hi"}]}`,
-			format: "anthropic",
-			path: "/v1/messages",
+			name:      "generation path with non-empty content does not retry",
+			body:      `{"content":[{"type":"text","text":"hi"}]}`,
+			format:    "anthropic",
+			path:      "/v1/messages",
 			wantRetry: false,
 		},
 	}
@@ -1192,7 +1192,7 @@ func TestBufferedWriter_Reset(t *testing.T) {
 // once at EOF.
 type chunkRecorder struct {
 	*httptest.ResponseRecorder
-	mu      sync.Mutex
+	mu         sync.Mutex
 	writeTimes []time.Time
 	writeSizes []int
 }
@@ -1973,6 +1973,54 @@ func TestEngine_RetryOnEmpty_Streaming_SingleCleanTerminal(t *testing.T) {
 	}
 	if !strings.Contains(out, `"text":"hello"`) {
 		t.Errorf("expected content in body, got %q", out)
+	}
+}
+
+// TestEngine_RetryOnEmpty_Streaming_TransformedTerminalUsesClientProtocol
+// prevents retry buffering from leaking a raw OpenAI [DONE] after a stream
+// transformer has converted the completion into Anthropic SSE. Pi requires the
+// transformed message_delta's delta.stop_reason, so forwarding the raw terminal
+// makes an otherwise complete answer fail at the end of the stream.
+func TestEngine_RetryOnEmpty_Streaming_TransformedTerminalUsesClientProtocol(t *testing.T) {
+	s := newTestStore(t)
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"hello"}}]}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	var attempts int
+	ts := anthropicSSEdownstream(t, &attempts, []string{body})
+	defer ts.Close()
+	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1", "openai")
+	addOutputModelIDs(t, s, "ds1", "mock-model")
+	addRule(t, s, "r1", "Translate terminal", "/v1/messages", "", "ds1", `[{"plugin_id":"test_openai_to_anthropic"}]`, true)
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	eng.SetRetryOnEmpty(true)
+
+	reqBody := `{"model":"mock-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(reqBody)))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+
+	if attempts != 1 {
+		t.Fatalf("expected exactly 1 downstream call (non-empty stream), got %d", attempts)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	out := w.Body.String()
+	if strings.Contains(out, "[DONE]") {
+		t.Errorf("raw OpenAI terminal leaked through transformed stream: %q", out)
+	}
+	if !strings.Contains(out, `event: message_delta`) || !strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Errorf("missing transformed Anthropic stop reason: %q", out)
+	}
+	if !strings.Contains(out, `event: message_stop`) {
+		t.Errorf("missing transformed Anthropic message_stop: %q", out)
 	}
 }
 
