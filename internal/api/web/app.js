@@ -1206,6 +1206,7 @@ function collectOAuthAuth(root) {
 
 function renderDownstreamDetail(ds) {
     const formats = ds.api_formats || [];
+    const advancedOpen = _downstreamAdvancedOpen.get(ds.id) === true;
     const models = ds.output_model_ids || [];
     const auth = ds.auth || { type: 'api_key' };
     const hasKey = !!(auth.api_key && auth.api_key.length > 0);
@@ -1263,18 +1264,23 @@ function renderDownstreamDetail(ds) {
                 <input type="url" class="detail-edit-url" value="${esc(ds.base_url || '')}" placeholder="https://api.example.com" autocomplete="off">
             </div>
         </div>
-        <div class="detail-section">
-            <label>Per-format URLs<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Per-format base URL overrides. Leave blank to fall back to the global base URL.">?</span></label>
-            <div class="detail-format-urls">
-                ${renderFormatURLInputs(ds)}
+        <details class="detail-advanced" data-role="advanced-settings"${advancedOpen ? ' open' : ''}>
+            <summary>Advanced</summary>
+            <div class="detail-advanced-content">
+                <div class="detail-section">
+                    <label>Per-format URLs<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Per-format base URL overrides. Leave blank to fall back to the global base URL.">?</span></label>
+                    <div class="detail-format-urls">
+                        ${renderFormatURLInputs(ds)}
+                    </div>
+                </div>
+                <div class="detail-section">
+                    <label>Per-format request paths<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Per-format request path override (base URL + this path). Leave blank to forward the client's own path.">?</span></label>
+                    <div class="detail-format-urls">
+                        ${renderFormatPathInputs(ds)}
+                    </div>
+                </div>
             </div>
-        </div>
-        <div class="detail-section">
-            <label>Per-format request paths<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Per-format request path override (base URL + this path). Leave blank to forward the client's own path.">?</span></label>
-            <div class="detail-format-urls">
-                ${renderFormatPathInputs(ds)}
-            </div>
-        </div>
+        </details>
         <div class="detail-section">
             <label class="models-count-label">Models (${models.length})</label>
             <div class="detail-edit-models-actions">
@@ -1450,6 +1456,7 @@ async function disconnectOAuth(id) {
 // downstream from `_currentDownstream` and dispatches by [data-action].
 let _currentDownstream = null;
 let _keyRevealed = false;
+const _downstreamAdvancedOpen = new Map();
 
 // Helper: re-render the detail pane keeping the same selection.
 function refreshDownstreamDetail() {
@@ -1459,6 +1466,12 @@ function refreshDownstreamDetail() {
 (async function setupDownstreamsDelegation() {
     const root = document.getElementById('downstreams-detail');
     if (!root) return;
+
+    root.addEventListener('toggle', (e) => {
+        const advanced = e.target;
+        if (!_currentDownstream || !advanced.matches('details[data-role="advanced-settings"]')) return;
+        _downstreamAdvancedOpen.set(_currentDownstream.id, advanced.open);
+    }, true);
 
     // Auto-save text inputs on blur (delegated; works after any re-render).
     root.addEventListener('blur', async (e) => {

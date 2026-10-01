@@ -2099,6 +2099,39 @@ html[data-theme="light"] form select {
     font-weight: 600;
 }
 
+/* Optional downstream endpoint overrides stay available without obscuring the
+   primary provider settings. Native details/summary keeps the control
+   keyboard-accessible and exposes its expanded state to assistive tech. */
+.detail-advanced {
+    margin: 0 0 1.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+}
+.detail-advanced > summary {
+    padding: 0.65rem 0.75rem;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    user-select: none;
+}
+.detail-advanced > summary:hover { color: var(--text-primary); }
+.detail-advanced > summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: 7px;
+}
+.detail-advanced-content {
+    padding: 0.25rem 0.75rem 0.75rem;
+    border-top: 1px solid var(--border-color);
+}
+.detail-advanced-content .detail-section {
+    margin: 1rem 0 0;
+}
+.detail-advanced-content .detail-section:first-child { margin-top: 0.75rem; }
+
 .detail-row {
     display: flex;
     gap: 0.5rem;
