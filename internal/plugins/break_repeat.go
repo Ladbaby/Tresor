@@ -262,8 +262,8 @@ func assistantTurns(body []byte, format string) []string {
 // Non-deterministic fields (call IDs, etc.) are deliberately excluded.
 func toolCallPiece(name, args interface{}) interface{} {
 	return map[string]interface{}{
-		"tool":  canonicalScalar(name),
-		"args":  canonicalScalar(args),
+		"tool": canonicalScalar(name),
+		"args": canonicalScalar(args),
 	}
 }
 
@@ -325,9 +325,32 @@ func appendReminder(body []byte, format string, reminder string) ([]byte, error)
 		payload["input"] = items
 	case "anthropic":
 		msgs, _ := payload["messages"].([]interface{})
+		reminderBlock := map[string]interface{}{"type": "text", "text": reminder}
+
+		// Anthropic Messages requires user and assistant roles to alternate. A
+		// repeated tool call is normally followed by its tool_result, so appending
+		// another user message would create two consecutive user turns and make
+		// the downstream reject the request. Add the reminder to that existing
+		// tool-result turn instead.
+		if len(msgs) > 0 {
+			if last, ok := msgs[len(msgs)-1].(map[string]interface{}); ok && last["role"] == "user" {
+				switch content := last["content"].(type) {
+				case []interface{}:
+					last["content"] = append(content, reminderBlock)
+				case string:
+					last["content"] = []interface{}{
+						map[string]interface{}{"type": "text", "text": content},
+						reminderBlock,
+					}
+				default:
+					last["content"] = []interface{}{reminderBlock}
+				}
+				return json.Marshal(payload)
+			}
+		}
 		payload["messages"] = append(msgs, map[string]interface{}{
 			"role":    "user",
-			"content": []interface{}{map[string]interface{}{"type": "text", "text": reminder}},
+			"content": []interface{}{reminderBlock},
 		})
 	case "gemini":
 		contents, _ := payload["contents"].([]interface{})

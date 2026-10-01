@@ -195,6 +195,55 @@ func TestBreakRepeat_Anthropic_Trigger(t *testing.T) {
 	}
 }
 
+func TestBreakRepeat_Anthropic_ToolResultFollowedByReminder(t *testing.T) {
+	p, _ := NewBreakRepeatPlugin(nil)
+	toolUse := func(id string) interface{} {
+		return map[string]interface{}{
+			"type":  "tool_use",
+			"id":    id,
+			"name":  "grep",
+			"input": map[string]interface{}{"pattern": "runner"},
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"model": "claude-x",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "assistant", "content": []interface{}{toolUse("toolu_1")}},
+			map[string]interface{}{"role": "user", "content": []interface{}{map[string]interface{}{"type": "tool_result", "tool_use_id": "toolu_1", "content": "No files found"}}},
+			map[string]interface{}{"role": "assistant", "content": []interface{}{toolUse("toolu_2")}},
+			map[string]interface{}{"role": "user", "content": []interface{}{map[string]interface{}{"type": "tool_result", "tool_use_id": "toolu_2", "content": "No files found"}}},
+			map[string]interface{}{"role": "assistant", "content": []interface{}{toolUse("toolu_3")}},
+			map[string]interface{}{"role": "user", "content": []interface{}{map[string]interface{}{"type": "tool_result", "tool_use_id": "toolu_3", "content": "No files found"}}},
+		},
+	})
+
+	_, newBody, err := p.TransformRequest(newBreakRepeatRequest(t, body), body, &engine.PipelineContext{})
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(newBody, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msgs := payload["messages"].([]interface{})
+	if len(msgs) != 6 {
+		t.Fatalf("expected reminder to be merged with tool result, got %d messages", len(msgs))
+	}
+	last := msgs[len(msgs)-1].(map[string]interface{})
+	if last["role"] != "user" {
+		t.Fatalf("expected last role user, got %v", last["role"])
+	}
+	content := last["content"].([]interface{})
+	if len(content) != 2 {
+		t.Fatalf("expected tool result plus reminder, got %v", content)
+	}
+	reminder := content[1].(map[string]interface{})
+	if reminder["type"] != "text" || reminder["text"] != repeatReminder {
+		t.Fatalf("unexpected reminder block: %v", reminder)
+	}
+}
+
 func TestBreakRepeat_Gemini_Trigger(t *testing.T) {
 	p, _ := NewBreakRepeatPlugin(nil)
 	model := func() interface{} {
@@ -293,9 +342,9 @@ func TestBreakRepeat_Anthropic_DistinctToolCallsNoTrigger(t *testing.T) {
 	p, _ := NewBreakRepeatPlugin(nil)
 	toolUse := func(name, input interface{}) interface{} {
 		return map[string]interface{}{
-			"type": "tool_use",
-			"id":   fmt.Sprintf("toolu_%v", input),
-			"name": name,
+			"type":  "tool_use",
+			"id":    fmt.Sprintf("toolu_%v", input),
+			"name":  name,
 			"input": input,
 		}
 	}
@@ -413,10 +462,10 @@ func TestBreakRepeat_DetectRequestFormat(t *testing.T) {
 	cases := map[string]string{
 		`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`: "gemini",
 		`{"input":[{"role":"user","content":"hi"}]}`:             "openai_responses",
-		`{"input":"hi"}`:                                         "openai_responses",
-		`{"messages":[{"role":"user","content":"hi"}]}`:          "openai",
+		`{"input":"hi"}`: "openai_responses",
+		`{"messages":[{"role":"user","content":"hi"}]}`:                          "openai",
 		`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`: "anthropic",
-		`{"foo":"bar"}`:                                          "",
+		`{"foo":"bar"}`: "",
 	}
 	for body, want := range cases {
 		if got := detectRequestFormat([]byte(body)); got != want {
