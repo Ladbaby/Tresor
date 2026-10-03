@@ -16,6 +16,65 @@ import (
 	"time"
 )
 
+// Verify same-format Anthropic streaming through a real response plugin and
+// daemon: retry buffering must preserve both terminal events, not just stop.
+func TestAnthropicRetryOnEmptyPreservesStopReason(t *testing.T) {
+	body := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"mock-model\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	var attempts atomic.Int32
+	mock := startMockServer(t, 9219, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, body)
+	}))
+	defer mock.Close()
+	cfg := fmt.Sprintf(`bind_addr: "127.0.0.1:9218"
+db_path: %q
+proxy_mode: none
+retry_on_empty: true
+downstreams:
+  - id: anthropic
+    name: Mock Anthropic
+    base_url: http://127.0.0.1:9219
+    api_key: mock-key
+    api_formats: [anthropic]
+    is_enabled: true
+    output_model_ids: [mock-model]
+rules:
+  - id: usage-fix
+    name: Usage fix
+    pattern_path: /v1/messages
+    is_enabled: true
+    pipeline_config:
+      - plugin_id: fix_anthropic_usage
+`, filepath.Join(t.TempDir(), "retry.db"))
+	base, cleanup := startTresor(t, cfg, 9218)
+	defer cleanup()
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(`{"model":"mock-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	events, err := scanSSE(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || attempts.Load() != 1 {
+		t.Fatalf("status=%d attempts=%d", resp.StatusCode, attempts.Load())
+	}
+	delta := findEvent(events, "message_delta")
+	if delta == nil || !strings.Contains(delta.Data, `"stop_reason":"end_turn"`) {
+		t.Fatalf("missing Anthropic stop reason: %+v", events)
+	}
+	if len(findEvents(events, "message_delta")) != 1 || len(findEvents(events, "message_stop")) != 1 || events[len(events)-1].Type != "message_stop" {
+		t.Fatalf("invalid terminal event sequence: %+v", events)
+	}
+}
+
 const streamPort = 9200
 
 // mockChatSSE writes an OpenAI-format streaming response with the given words.
@@ -396,9 +455,9 @@ downstreams:
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	reqBody, _ := json.Marshal(map[string]interface{}{
-		"model":  "thinking-model",
-		"input":  "Reply with PONG",
-		"stream": true,
+		"model":     "thinking-model",
+		"input":     "Reply with PONG",
+		"stream":    true,
 		"reasoning": map[string]interface{}{"effort": "high"},
 	})
 	req, _ := http.NewRequest(http.MethodPost, apiBase+"/v1/responses", bytes.NewReader(reqBody))
@@ -625,10 +684,10 @@ downstreams:
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	reqBody, _ := json.Marshal(map[string]interface{}{
-		"model":                "cap-model",
+		"model":                 "cap-model",
 		"max_completion_tokens": 1024,
-		"stream":               true,
-		"messages":             []map[string]interface{}{{"role": "user", "content": "Say hi"}},
+		"stream":                true,
+		"messages":              []map[string]interface{}{{"role": "user", "content": "Say hi"}},
 	})
 	req, _ := http.NewRequest(http.MethodPost, apiBase+"/v1/chat/completions", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")

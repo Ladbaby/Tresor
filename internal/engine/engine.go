@@ -1673,7 +1673,10 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	// terminal would leak a different protocol completion marker to an
 	// Anthropic client, which then misses the required message_delta stop reason.
 	holdTerminal := func(clientBytes []byte) {
-		heldTerminalBytes = append(heldTerminalBytes[:0], clientBytes...)
+		// A completion can span multiple events. In Anthropic streams,
+		// message_delta carries stop_reason and message_stop follows it;
+		// replacing the buffer here would silently lose the stop reason.
+		heldTerminalBytes = append(heldTerminalBytes, clientBytes...)
 	}
 	flushHeldTerminal := func() {
 		if len(heldTerminalBytes) == 0 || clientGone {

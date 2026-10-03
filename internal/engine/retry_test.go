@@ -2024,6 +2024,66 @@ func TestEngine_RetryOnEmpty_Streaming_TransformedTerminalUsesClientProtocol(t *
 	}
 }
 
+// Anthropic completes a message with two events: message_delta carries the
+// stop reason and message_stop closes the stream. Retry buffering must retain
+// both, including when a same-format stream passes through response plugins.
+func TestEngine_RetryOnEmpty_AnthropicTerminalSequence(t *testing.T) {
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"mock-model","stop_reason":null}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"bash","input":{}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":157}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+		``,
+	}, "\n")
+	for _, transformed := range []bool{false, true} {
+		for _, retry := range []bool{false, true} {
+			t.Run(fmt.Sprintf("transformed=%t/retry=%t", transformed, retry), func(t *testing.T) {
+				s := newTestStore(t)
+				var attempts int
+				ts := anthropicSSEdownstream(t, &attempts, []string{body})
+				defer ts.Close()
+				addDownstream(t, s, "ds1", "ds1", ts.URL, "key", "anthropic")
+				addOutputModelIDs(t, s, "ds1", "mock-model")
+				if transformed {
+					// This mock stream transformer returns each chunk unchanged,
+					// exercising the transform path without changing API formats.
+					addRule(t, s, "r1", "Identity stream", "/v1/messages", "", "ds1", `[{"plugin_id":"anthropic2openai"}]`, true)
+				}
+				eng := New(s)
+				eng.SetRegistry(&mockRegistryImpl{})
+				eng.SetRetryOnEmpty(retry)
+				req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"mock-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+				w := httptest.NewRecorder()
+				eng.HandleProxy(w, req)
+				if w.Code != http.StatusOK || attempts != 1 {
+					t.Fatalf("status=%d attempts=%d body=%q", w.Code, attempts, w.Body.String())
+				}
+				out := w.Body.String()
+				if !strings.HasPrefix(out, body) {
+					t.Fatalf("stream events changed or lost:\n%s", out)
+				}
+				if strings.Count(out, `event: message_delta`) != 1 || strings.Count(out, `event: message_stop`) != 1 {
+					t.Fatalf("expected exactly one stop reason and one message_stop: %q", out)
+				}
+			})
+		}
+	}
+}
+
 // TestEngine_RetryOnEmpty_ChainedInstancesBothOn is the regression test for
 // the user-reported bug: two chained gateway instances, both with
 // retry_on_empty enabled, serving a non-empty Anthropic stream. The outer
