@@ -43,7 +43,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "openai2anthropic",
 		Description: "Converts OpenAI Chat Completion requests to Anthropic Messages format",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -54,7 +54,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "break_repeat",
 		Description: "Inserts a user reminder when the last three assistant messages are identical, breaking repetition loops in small models",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -65,18 +65,26 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "fix_anthropic_images",
 		Description: "Fix the image reading capability for the Anthropic API of some providers (e.g., llama.cpp). Refer to https://github.com/ggml-org/llama.cpp/pull/22536",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
 		return &FixAnthropicImages{}, nil
 	})
 
+	r.register("fix_anthropic_system", engine.PluginInfo{
+		ID:           "fix_anthropic_system",
+		Description:  "Move system-role messages into Anthropic's top-level system field for Claude Cowork compatibility with llama.cpp/Qwen templates. Existing system instructions are preserved; response-only plugins such as remove_thinking are unaffected.",
+		ConfigSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+	}, func(config map[string]interface{}) (interface{}, error) {
+		return &FixAnthropicSystem{}, nil
+	})
+
 	r.register("fix_anthropic_usage", engine.PluginInfo{
 		ID:          "fix_anthropic_usage",
 		Description: "Normalize the Anthropic Messages `usage` block: add missing cache_creation_input_tokens / cache_read_input_tokens fields in message_start, and synthesize a usage block in message_delta when the upstream omits it. Use with providers such as MiniMax-M3 whose usage reporting is incomplete.",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -98,7 +106,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "anthropic2openai",
 		Description: "Converts Anthropic Messages requests to OpenAI Chat Completion format",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -109,7 +117,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "responses2openai",
 		Description: "Converts OpenAI Responses API requests to Chat Completions format and vice versa",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -120,7 +128,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "responses2anthropic",
 		Description: "Converts OpenAI Responses API requests to Anthropic Messages format and vice versa",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -131,7 +139,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "openai2responses",
 		Description: "Converts OpenAI Chat Completion requests to Responses API format",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -142,7 +150,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "anthropic2responses",
 		Description: "Converts Anthropic Messages requests to Responses API format",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -153,7 +161,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "openai2gemini",
 		Description: "Converts OpenAI Chat Completion requests to Google Gemini generateContent format",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -164,7 +172,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "anthropic2gemini",
 		Description: "Converts Anthropic Messages requests to Google Gemini generateContent format",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -175,7 +183,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "gemini2openai",
 		Description: "Converts Google Gemini generateContent requests to OpenAI Chat Completion format and vice versa",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -186,7 +194,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "gemini2anthropic",
 		Description: "Converts Google Gemini generateContent requests to Anthropic Messages format and vice versa",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
@@ -197,7 +205,7 @@ func NewRegistry() engine.PluginRegistry {
 		ID:          "gemini2responses",
 		Description: "Converts Google Gemini generateContent requests to OpenAI Responses API format and vice versa",
 		ConfigSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {

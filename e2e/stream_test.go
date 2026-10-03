@@ -156,6 +156,75 @@ rules:
 	}
 }
 
+func TestFixAnthropicSystemCowork(t *testing.T) {
+	mock := startMockServer(t, 9234, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			System   []struct{ Text string }
+			Messages []struct{ Role string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		for _, msg := range body.Messages {
+			if msg.Role == "system" {
+				http.Error(w, "System message must be at the beginning.", 400)
+				return
+			}
+		}
+		text := ""
+		for _, block := range body.System {
+			text += block.Text
+		}
+		if text != "SDK instructions\n\n# Environment" || len(body.Messages) != 1 || body.Messages[0].Role != "user" {
+			http.Error(w, "lost instructions", 400)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`)
+	}))
+	defer mock.Close()
+	cfg := fmt.Sprintf(`bind_addr: "127.0.0.1:9233"
+proxy_mode: none
+db_path: %q
+downstreams:
+  - id: mock
+    name: Mock
+    base_url: http://127.0.0.1:9234
+    api_key: mock
+    api_formats: [anthropic]
+    is_enabled: true
+    output_model_ids: [mock-model]
+rules:
+  - id: system-fix
+    name: Cowork compatibility
+    pattern_path: /v1/messages
+    is_enabled: true
+    pipeline_config:
+      - plugin_id: fix_anthropic_system
+`, filepath.Join(t.TempDir(), "system.db"))
+	base, cleanup := startTresor(t, cfg, 9233)
+	defer cleanup()
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(`{"model":"mock-model","max_tokens":100,"system":[{"type":"text","text":"SDK instructions","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Powerpoint?"}]},{"role":"system","content":"# Environment"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(body), `"text":"ok"`) {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	plugins, err := http.Get(base + "/api/plugins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plugins.Body.Close()
+	list, _ := io.ReadAll(plugins.Body)
+	if !strings.Contains(string(list), `fix_anthropic_system`) {
+		t.Fatalf("plugin not registered: %s", list)
+	}
+}
+
 const streamPort = 9200
 
 // mockChatSSE writes an OpenAI-format streaming response with the given words.
