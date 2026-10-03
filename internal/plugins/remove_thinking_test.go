@@ -9,6 +9,63 @@ import (
 	"tresor/internal/engine"
 )
 
+// Regression: clients append blocks on start and use delta.index to find
+// the block. Leaving a gap after thinking loses execute_office_js inputs.
+func TestRemoveThinking_AnthropicToolArgumentsContiguousIndexes(t *testing.T) {
+	p := &RemoveThinking{}
+	ctx := &engine.PipelineContext{}
+	for stream := 0; stream < 2; stream++ {
+		var blocks []string
+		for _, hidden := range []string{"thinking", "redacted_thinking"} {
+			start, _ := json.Marshal(map[string]interface{}{"index": len(blocks) + 10, "content_block": map[string]string{"type": hidden}})
+			out, err := p.TransformStreamChunk(engine.SSEChunk{EventType: "content_block_start", Data: start}, ctx)
+			if err != nil || len(out.Data) != 0 {
+				t.Fatalf("hidden block leaked: %s, %v", out.Data, err)
+			}
+			// Retained blocks must be indexed by their client-side position.
+			idx := len(blocks) + 20
+			start, _ = json.Marshal(map[string]interface{}{"index": idx, "content_block": map[string]interface{}{"type": "tool_use", "name": "execute_office_js", "input": map[string]interface{}{}}})
+			fragments := []string{`{"code":"return { n: 5 };",`, `"explanation":"Sanity test","index":9007199254740993}`}
+			events := []engine.SSEChunk{{EventType: "content_block_start", Data: start}}
+			for _, fragment := range fragments {
+				data, _ := json.Marshal(map[string]interface{}{"index": idx, "delta": map[string]string{"type": "input_json_delta", "partial_json": fragment}})
+				events = append(events, engine.SSEChunk{EventType: "content_block_delta", Data: data})
+			}
+			stop, _ := json.Marshal(map[string]int{"index": idx})
+			events = append(events, engine.SSEChunk{EventType: "content_block_stop", Data: stop})
+			for _, event := range events {
+				out, err := p.TransformStreamChunk(event, ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var payload struct {
+					Index int
+					Delta struct {
+						PartialJSON string `json:"partial_json"`
+					}
+				}
+				if err := json.Unmarshal(out.Data, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if event.EventType == "content_block_start" {
+					if payload.Index != len(blocks) {
+						t.Fatalf("start index = %d, want %d", payload.Index, len(blocks))
+					}
+					blocks = append(blocks, "")
+				}
+				if payload.Index != len(blocks)-1 {
+					t.Fatalf("event index = %d, want %d", payload.Index, len(blocks)-1)
+				}
+				blocks[payload.Index] += payload.Delta.PartialJSON
+			}
+			if blocks[len(blocks)-1] != fragments[0]+fragments[1] {
+				t.Fatalf("arguments changed: %s", blocks[len(blocks)-1])
+			}
+		}
+		_, _ = p.TransformStreamChunk(engine.SSEChunk{EventType: "message_stop", Data: []byte(`{"type":"message_stop"}`)}, ctx)
+	}
+}
+
 // ===== Non-streaming =====
 
 func TestRemoveThinking_OpenAI_NonStreaming_RemovesReasoningContent(t *testing.T) {

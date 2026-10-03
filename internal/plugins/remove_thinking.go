@@ -39,6 +39,11 @@ type RemoveThinking struct {
 	// avoid dropping stop events that belong to sibling blocks.
 	anthropicThinkingIndex int
 
+	// Map upstream indexes to contiguous client indexes. Clients commonly
+	// append blocks on start, then address them by index for argument deltas.
+	anthropicBlockIndexes map[int]int
+	anthropicHiddenBlocks map[int]bool
+
 	// responsesReasoningOutputIdx tracks output_index values for
 	// reasoning items that were added during the stream, so the matching
 	// response.output_item.done event can be dropped too.
@@ -375,50 +380,55 @@ func (t *RemoveThinking) transformOpenAIStreamChunk(chunk engine.SSEChunk) (engi
 // from message_delta. message_start / message_delta / message_stop pass
 // through unchanged.
 func (t *RemoveThinking) transformAnthropicStreamChunk(chunk engine.SSEChunk) (engine.SSEChunk, error) {
-	data := string(chunk.Data)
-
-	switch chunk.EventType {
-	case "content_block_start":
-		// Enter a thinking block: capture the index and drop the event.
-		if strings.Contains(data, `"type":"thinking"`) {
-			t.anthropicInsideThinking = true
-			t.anthropicThinkingIndex = extractBlockIndex(data)
-			return engine.SSEChunk{EventType: "", Data: []byte{}}, nil
+	if chunk.EventType == "content_block_start" || chunk.EventType == "content_block_delta" || chunk.EventType == "content_block_stop" {
+		var event struct {
+			Index        *int `json:"index"`
+			ContentBlock struct {
+				Type string `json:"type"`
+			} `json:"content_block"`
 		}
-		return chunk, nil
-
-	case "content_block_delta":
-		// Drop ONLY deltas whose index matches the thinking block.
-		// Deltas for sibling blocks (different index) MUST pass through —
-		// otherwise a model that emits thinking first then text (e.g. the
-		// real-world stream in completely_stripped_anthropic_response.txt
-		// where thinking is at index 0 and text is at index 1) will lose
-		// every text_delta and the client sees an empty response.
-		// This also covers signature_delta (which always carries the
-		// thinking block's index) so we don't emit an orphan signature.
-		if t.anthropicInsideThinking {
-			deltaIndex := extractBlockIndex(data)
-			if deltaIndex == t.anthropicThinkingIndex {
-				return engine.SSEChunk{EventType: "", Data: []byte{}}, nil
+		if err := json.Unmarshal(chunk.Data, &event); err != nil || event.Index == nil || *event.Index < 0 {
+			return chunk, nil
+		}
+		idx := *event.Index
+		if t.anthropicBlockIndexes == nil {
+			t.anthropicBlockIndexes = make(map[int]int)
+			t.anthropicHiddenBlocks = make(map[int]bool)
+		}
+		if chunk.EventType == "content_block_start" {
+			if event.ContentBlock.Type == "thinking" || event.ContentBlock.Type == "redacted_thinking" {
+				t.anthropicHiddenBlocks[idx] = true
+				t.anthropicInsideThinking = true
+				t.anthropicThinkingIndex = idx
+			} else if _, exists := t.anthropicBlockIndexes[idx]; !exists {
+				t.anthropicBlockIndexes[idx] = len(t.anthropicBlockIndexes)
 			}
 		}
-		return chunk, nil
-
-	case "content_block_stop":
-		// Drop the stop event ONLY if it closes the thinking block we
-		// opened. A stop for a sibling block (e.g. an inner text block
-		// that was opened before thinking) must pass through so the
-		// output stays in order.
-		if t.anthropicInsideThinking {
-			stopIndex := extractBlockIndex(data)
-			if stopIndex == t.anthropicThinkingIndex {
+		if t.anthropicHiddenBlocks[idx] {
+			if chunk.EventType == "content_block_stop" && idx == t.anthropicThinkingIndex {
 				t.anthropicInsideThinking = false
 				t.anthropicThinkingIndex = -1
-				return engine.SSEChunk{EventType: "", Data: []byte{}}, nil
 			}
+			return engine.SSEChunk{}, nil
+		}
+		if mapped, ok := t.anthropicBlockIndexes[idx]; ok && mapped != idx {
+			// RawMessage preserves tool inputs and partial_json exactly while
+			// changing only the top-level index (never a nested tool argument).
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(chunk.Data, &payload); err != nil {
+				return chunk, nil
+			}
+			payload["index"], _ = json.Marshal(mapped)
+			out, err := json.Marshal(payload)
+			if err != nil {
+				return chunk, nil
+			}
+			chunk.Data = out
 		}
 		return chunk, nil
+	}
 
+	switch chunk.EventType {
 	case "message_delta":
 		// Strip thinking_tokens from the usage block, then pass through.
 		out, err := stripAnthropicThinkingTokensInMessageDelta(chunk.Data)
@@ -709,6 +719,8 @@ func (t *RemoveThinking) resetState() {
 	t.detectedFormat = ""
 	t.anthropicInsideThinking = false
 	t.anthropicThinkingIndex = -1
+	t.anthropicBlockIndexes = nil
+	t.anthropicHiddenBlocks = nil
 	t.responsesReasoningOutputIdx = nil
 }
 

@@ -75,6 +75,87 @@ rules:
 	}
 }
 
+func TestRemoveThinkingPreservesToolInput(t *testing.T) {
+	mock := startMockServer(t, 9231, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range []struct{ kind, data string }{
+			{"message_start", `{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"mock-model","usage":{"input_tokens":1,"output_tokens":0}}}`},
+			{"content_block_start", `{"index":0,"content_block":{"type":"thinking","thinking":""}}`},
+			{"content_block_stop", `{"index":0}`},
+			{"content_block_start", `{"index":1,"content_block":{"type":"tool_use","id":"tool_1","name":"execute_office_js","input":{}}}`},
+			{"content_block_delta", `{"index":1,"delta":{"type":"input_json_delta","partial_json":"{\"code\":\"return { n: 5 };\","}}`},
+			{"content_block_delta", `{"index":1,"delta":{"type":"input_json_delta","partial_json":"\"explanation\":\"Sanity test\"}"}}`},
+			{"content_block_stop", `{"index":1}`},
+			{"message_delta", `{"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":10}}`},
+			{"message_stop", `{"type":"message_stop"}`},
+		} {
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.kind, event.data)
+		}
+	}))
+	defer mock.Close()
+	cfg := fmt.Sprintf(`bind_addr: "127.0.0.1:9230"
+proxy_mode: none
+db_path: %q
+downstreams:
+  - id: mock
+    name: Mock
+    base_url: http://127.0.0.1:9231
+    api_key: mock
+    api_formats: [anthropic]
+    is_enabled: true
+    output_model_ids: [mock-model]
+rules:
+  - id: remove
+    name: Remove thinking
+    pattern_path: /v1/messages
+    is_enabled: true
+    pipeline_config:
+      - plugin_id: remove_thinking
+`, filepath.Join(t.TempDir(), "thinking.db"))
+	base, cleanup := startTresor(t, cfg, 9230)
+	defer cleanup()
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(`{"model":"mock-model","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	events, err := scanSSE(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocks []string
+	for _, event := range events {
+		if strings.Contains(event.Data, `"type":"thinking"`) {
+			t.Fatalf("thinking leaked: %s", event.Data)
+		}
+		if !strings.HasPrefix(event.Type, "content_block_") {
+			continue
+		}
+		var payload struct {
+			Index int
+			Delta struct {
+				PartialJSON string `json:"partial_json"`
+			}
+		}
+		if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == "content_block_start" {
+			blocks = append(blocks, "")
+		}
+		if payload.Index < 0 || payload.Index >= len(blocks) {
+			t.Fatalf("orphan tool event: %s", event.Data)
+		}
+		blocks[payload.Index] += payload.Delta.PartialJSON
+	}
+	if len(blocks) != 1 || blocks[0] != `{"code":"return { n: 5 };","explanation":"Sanity test"}` {
+		t.Fatalf("lost tool input: %v", blocks)
+	}
+}
+
 const streamPort = 9200
 
 // mockChatSSE writes an OpenAI-format streaming response with the given words.
