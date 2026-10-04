@@ -2198,13 +2198,16 @@ func TestOpenAI2Anthropic_TransformStreamChunk_ContentBlockStop(t *testing.T) {
 func TestRegistry_ListPlugins(t *testing.T) {
 	r := NewRegistry()
 	plugins := r.ListPlugins()
-	if len(plugins) != 17 {
-		t.Fatalf("expected 17 plugins, got %d", len(plugins))
+	if len(plugins) != 18 {
+		t.Fatalf("expected 18 plugins, got %d", len(plugins))
 	}
 
 	ids := make(map[string]bool)
 	for _, p := range plugins {
 		ids[p.ID] = true
+	}
+	if !ids["force_streaming"] {
+		t.Fatal("expected force_streaming plugin")
 	}
 	if !ids["custom_header"] {
 		t.Fatal("expected custom_header plugin")

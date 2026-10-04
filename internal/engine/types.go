@@ -9,9 +9,9 @@ import (
 
 // Downstream is a resolved target endpoint.
 type Downstream struct {
-	ID         string
-	Name       string
-	BaseURL    string
+	ID      string
+	Name    string
+	BaseURL string
 	// APIKey is the effective credential forwarded to the downstream. For
 	// api_key auth it is the static key; for oauth it is the live access
 	// token resolved at request time (substituted in place).
@@ -38,6 +38,14 @@ type PipelineContext struct {
 	// correct per-format URL from TargetDownstream.FormatURLs, and is also
 	// used for empty-response detection / stream format detection.
 	DownstreamFormat string
+	// ClientStreaming records the client's mode before request translation.
+	ClientStreaming bool
+	// ResponseBodyCollector is an opt-in transport hook installed by a request
+	// plugin. It converts an upstream stream to buffered downstream-format JSON
+	// before the normal response pipeline runs.
+	ResponseBodyCollector func(*http.Response, *PipelineContext) ([]byte, error)
+	// RequestPathOverride takes precedence over configured format paths.
+	RequestPathOverride string
 	// OAuthExtraHeaders are additional headers required by the OAuth
 	// provider (e.g. originator, user-agent). Applied in forwardRequest
 	// after the standard auth header is set.
@@ -105,11 +113,11 @@ type PluginFactory func(config map[string]interface{}) (interface{}, error)
 // gatewayError carries structured error information for consistent logging and
 // client-facing error responses across the proxy handler.
 type gatewayError struct {
-	status  int    // HTTP status code
-	logMsg  string // detailed message for server logs
-	httpMsg string // client-facing error message
+	status   int    // HTTP status code
+	logMsg   string // detailed message for server logs
+	httpMsg  string // client-facing error message
 	errLabel string // short label for log entry
-	cause   error  // underlying error (nil if none)
+	cause    error  // underlying error (nil if none)
 }
 
 // modelResult holds the output of model resolution: which downstream to forward

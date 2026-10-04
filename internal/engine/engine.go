@@ -920,6 +920,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// auth path (forwardRequest + transformers) works unchanged.
 	ctx := &PipelineContext{
 		TargetDownstream: dsCopy,
+		ClientStreaming:  isStreamRequest(result.body) || strings.HasSuffix(r.URL.Path, ":streamGenerateContent"),
 		Variables:        make(map[string]interface{}),
 	}
 	if isOAuth {
@@ -1005,6 +1006,8 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			ctx.Variables = make(map[string]interface{})
 		}
 
+		ctx.ResponseBodyCollector = nil
+		ctx.RequestPathOverride = ""
 		// Execute request transformers
 		currentReq, currentBody, err := ExecuteRequestPipeline(r, result.body, ctx, pipeline.RequestSteps)
 		if err != nil {
@@ -1038,7 +1041,8 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		if !streamed && ctx.CodexBackend && isStreamRequest(currentBody) {
 			streamed = true
 		}
-		if streamed {
+		collectStream := streamed && ctx.ResponseBodyCollector != nil && resp.StatusCode >= 200 && resp.StatusCode < 300
+		if streamed && !collectStream {
 			// Streaming responses always go through a headerDelayWriter so the
 			// HTTP status stays uncommitted until the first bytes are released.
 			// This is what lets the gateway replace a downstream's 200 with a
@@ -1087,8 +1091,26 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Non-streaming response: buffer and transform
-		respBody, err := io.ReadAll(resp.Body)
+		// Non-streaming response: buffer and transform. An opt-in collector
+		// rebuilds downstream JSON before format translation or response plugins.
+		var respBody []byte
+		var collectedRaw *boundedResponseCapture
+		originalRespCT := resp.Header.Get("Content-Type")
+		if collectStream {
+			if e.payloadStore != nil {
+				collectedRaw = &boundedResponseCapture{}
+				resp.Body = &captureReadCloser{Reader: io.TeeReader(resp.Body, collectedRaw), Closer: resp.Body}
+			}
+			stop := context.AfterFunc(r.Context(), func() { cancel(); resp.Body.Close() })
+			respBody, err = ctx.ResponseBodyCollector(resp, ctx)
+			stop()
+			resp.Header.Set("Content-Type", "application/json")
+			resp.Header.Del("Content-Length")
+			resp.Header.Del("Cache-Control")
+			resp.Header.Del("X-Accel-Buffering")
+		} else {
+			respBody, err = io.ReadAll(resp.Body)
+		}
 		resp.Body.Close()
 		cancel()
 		if err != nil {
@@ -1096,7 +1118,13 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if len(respBody) > 0 {
 				errMsg += ": " + truncateString(string(respBody), 500)
 			}
-			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, errMsg, errMsg, "failed to read response", err})
+			status := http.StatusBadGateway
+			var upstreamErr interface{ UpstreamStatus() int }
+			if errors.As(err, &upstreamErr) {
+				status = upstreamErr.UpstreamStatus()
+				errMsg = err.Error()
+			}
+			e.logAndReturnError(cw, &entry, start, &gatewayError{status, errMsg, errMsg, "failed to read response", err})
 			return
 		}
 
@@ -1110,6 +1138,15 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			} else {
 				rawResp = append(make([]byte, 0, len(respBody)), respBody...)
 			}
+		}
+
+		if collectedRaw != nil {
+			rawResp = collectedRaw.Bytes()
+			respTrunc = collectedRaw.truncated
+		}
+		inspectRespCT := resp.Header.Get("Content-Type")
+		if collectStream {
+			inspectRespCT = originalRespCT
 		}
 
 		transformedBody, err := ExecuteResponsePipeline(resp, respBody, ctx, pipeline.ResponseSteps)
@@ -1128,7 +1165,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if attempt >= maxRetries {
 				entry.Status = resp.StatusCode
 				entry.Duration = DurationMs(time.Since(start))
-				e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc, inputFormat, downstreamFormat)
+				e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), inspectRespCT, respTrunc, inputFormat, downstreamFormat)
 				e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "empty response after retries exhausted", "empty response after retries exhausted", "empty response", nil})
 				return
 			}
@@ -1153,7 +1190,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), respTrunc, inputFormat, downstreamFormat)
+		e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), inspectRespCT, respTrunc, inputFormat, downstreamFormat)
 		cw.WriteHeader(resp.StatusCode)
 		cw.Write(transformedBody)
 		return
@@ -2118,8 +2155,8 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	//     version prefix (e.g. "https://host/v1" + "/v1/chat/completions").
 	// An empty DownstreamFormat or missing map key simply yields "" and falls
 	// through to the default, so the lookup is safe without an explicit guard.
-	requestPath := ""
-	if ctx.TargetDownstream != nil && ctx.TargetDownstream.FormatPaths != nil {
+	requestPath := ctx.RequestPathOverride
+	if requestPath == "" && ctx.TargetDownstream != nil && ctx.TargetDownstream.FormatPaths != nil {
 		requestPath = ctx.TargetDownstream.FormatPaths[ctx.DownstreamFormat]
 	}
 	if requestPath == "" {

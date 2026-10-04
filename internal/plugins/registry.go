@@ -21,6 +21,11 @@ func NewRegistry() engine.PluginRegistry {
 	}
 
 	// Register built-in plugins
+	r.register("force_streaming", engine.PluginInfo{
+		ID:           "force_streaming",
+		Description:  "Force provider streaming for non-streaming generation requests, then collect the stream into a non-streaming response. Supports OpenAI Chat Completions, Anthropic Messages, OpenAI Responses and Gemini.",
+		ConfigSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+	}, func(config map[string]interface{}) (interface{}, error) { return &ForceStreaming{}, nil })
 	r.register("custom_header", engine.PluginInfo{
 		ID:          "custom_header",
 		Description: "Injects custom HTTP headers into the forwarded request",
