@@ -1268,13 +1268,13 @@ function renderDownstreamDetail(ds) {
             <summary>Advanced</summary>
             <div class="detail-advanced-content">
                 <div class="detail-section">
-                    <label>Per-format URLs<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Per-format base URL overrides. Leave blank to fall back to the global base URL.">?</span></label>
+                    <label>Per-format URLs<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Override the base URL for specific API formats. Some providers (e.g. DeepSeek) serve Anthropic requests at a sub-path of their base URL. Leave blank to fall back to the base URL above.">?</span></label>
                     <div class="detail-format-urls">
                         ${renderFormatURLInputs(ds)}
                     </div>
                 </div>
                 <div class="detail-section">
-                    <label>Per-format request paths<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Per-format request path override (base URL + this path). Leave blank to forward the client's own path.">?</span></label>
+                    <label>Per-format request paths<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Per-format URL + Path will determine the request's destination. Leave blank to use each API format's default path.">?</span></label>
                     <div class="detail-format-urls">
                         ${renderFormatPathInputs(ds)}
                     </div>
