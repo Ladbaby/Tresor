@@ -459,7 +459,7 @@ tr:hover {
 
 .inspect-meta .meta-val {
     color: var(--text-primary);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
     word-break: break-all;
 }
 
@@ -517,7 +517,7 @@ tr:hover {
     background: var(--bg-primary);
     color: var(--text-muted);
     border: 1px solid var(--border-color);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
 }
 
 .inspect-section-header .copy-btn {
@@ -547,7 +547,7 @@ tr:hover {
     padding: 0.75rem 1rem;
     max-height: 360px;
     overflow: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-size: 0.8rem;
     line-height: 1.45;
     white-space: pre-wrap;
@@ -791,7 +791,7 @@ tr:hover {
 }
 
 .inspect-block-tool-args {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-size: 0.8rem;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
@@ -834,7 +834,7 @@ tr:hover {
     color: #dc3545;
 }
 .inspect-block-tool-result-id {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-size: 0.7rem;
     color: var(--text-muted);
     word-break: break-all;
@@ -843,7 +843,7 @@ tr:hover {
     /* Body may contain <pre> and <div class="...image"> children. */
 }
 .inspect-block-tool-result-pre {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-size: 0.8rem;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
@@ -1028,7 +1028,7 @@ tr:hover {
 }
 
 .inspect-md code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-size: 0.85em;
     padding: 0.1em 0.3em;
     background: var(--bg-secondary);
@@ -1044,7 +1044,7 @@ tr:hover {
     border: 1px solid var(--border-color);
     border-radius: 4px;
     overflow-x: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-size: 0.8rem;
     line-height: 1.45;
     white-space: pre;
@@ -1183,7 +1183,7 @@ tr:hover {
 }
 
 .inspect-tool-name {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-size: 0.85rem;
     font-weight: 600;
     color: var(--color-link, #1a5ab8);
@@ -1235,7 +1235,7 @@ tr:hover {
 }
 
 .inspect-tool-schema {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-size: 0.8rem;
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
@@ -3785,6 +3785,7 @@ td .ds-toggle.rule-toggle {
     font-size: 1.05rem;
     font-weight: 600;
 }
+
 
 .chart-container {
     background: var(--bg-secondary);

@@ -6,8 +6,28 @@ import (
 	"time"
 )
 
+// DecodeStats preserves duration precision until weighted rates are finalized.
+type DecodeStats struct {
+	DecodeTokens          int64    `json:"decode_tokens"`
+	DecodeDurationNS      int64    `json:"-"`
+	DecodeDurationMS      float64  `json:"decode_duration_ms"`
+	DecodeRequestCount    int64    `json:"decode_request_count"`
+	DecodeTokensPerSecond *float64 `json:"decode_tokens_per_second"`
+}
+
+func (d *DecodeStats) Finalize() {
+	d.DecodeDurationMS = float64(d.DecodeDurationNS) / 1e6
+	d.DecodeTokensPerSecond = nil
+	if d.DecodeTokens > 0 && d.DecodeDurationNS > 0 && d.DecodeRequestCount > 0 {
+		rate := float64(d.DecodeTokens) * 1e9 / float64(d.DecodeDurationNS)
+		d.DecodeTokensPerSecond = &rate
+	}
+}
+
 // UsageStatsRow is one row of the per-(downstream, model) aggregate.
 type UsageStatsRow struct {
+	DecodeStats
+
 	DownstreamID  string `json:"downstream_id"`
 	Model         string `json:"model"`
 	InputTokens   int64  `json:"input_tokens"`
@@ -20,6 +40,7 @@ type UsageStatsRow struct {
 
 // TimeSeriesPoint is one bucket in the time-series response.
 type TimeSeriesPoint struct {
+	DecodeStats
 	Bucket       string `json:"bucket"` // ISO8601 hour ("YYYY-MM-DDTHH:00:00Z") or date ("YYYY-MM-DD")
 	InputTokens  int64  `json:"input_tokens"`
 	OutputTokens int64  `json:"output_tokens"`
@@ -36,6 +57,7 @@ type TimeSeriesPoint struct {
 // downstream has been deleted from the downstreams table — defensive only;
 // under normal operation the FK-on-delete cascade keeps these in sync.
 type ProviderStatsRow struct {
+	DecodeStats
 	DownstreamID  string `json:"downstream_id"`
 	Name          string `json:"name"`
 	InputTokens   int64  `json:"input_tokens"`
@@ -103,14 +125,15 @@ func (s *Store) RecordUsageStats(bucket, downstreamID, model string,
 // The engine collects these in memory and writes them in bulk via
 // BulkRecordUsageStats every flush interval (default 60s).
 type StatsBatchEntry struct {
-	Bucket        string
-	DownstreamID  string
-	Model         string
-	ClientIP      string // "" means no client IP — skip the ip_usage_stats table
-	InputTokens   int64
-	OutputTokens  int64
-	CacheCreation int64
-	CacheRead     int64
+	Bucket                                             string
+	DownstreamID                                       string
+	Model                                              string
+	ClientIP                                           string // "" means no client IP — skip the ip_usage_stats table
+	InputTokens                                        int64
+	OutputTokens                                       int64
+	CacheCreation                                      int64
+	CacheRead                                          int64
+	DecodeTokens, DecodeDurationNS, DecodeRequestCount int64
 }
 
 // BulkRecordUsageStats performs all upserts in a single transaction. This is
@@ -139,7 +162,7 @@ func (s *Store) BulkRecordUsageStats(entries []StatsBatchEntry) (int, error) {
 	// SQLite's max variable count is 32766 (SQLITE_MAX_VARIABLE_NUMBER).
 	// Each row uses 9 bind vars, so we cap a single statement at ~3000 rows
 	// (9 * 3000 = 27000) to stay safely under the limit.
-	const maxRowsPerStmt = 3000
+	const maxRowsPerStmt = 32766 / 11
 
 	written := 0
 	for offset := 0; offset < len(entries); offset += maxRowsPerStmt {
@@ -153,14 +176,15 @@ func (s *Store) BulkRecordUsageStats(entries []StatsBatchEntry) (int, error) {
 		var sb strings.Builder
 		sb.WriteString(`INSERT INTO usage_stats
 			(bucket, downstream_id, model, input_tokens, output_tokens,
-			 cache_creation, cache_read, request_count, cache_hit_count)
+			 cache_creation, cache_read, request_count, cache_hit_count,
+			 decode_tokens, decode_duration_ns, decode_request_count)
 			VALUES `)
-		args := make([]interface{}, 0, len(chunk)*9)
+		args := make([]interface{}, 0, len(chunk)*11)
 		for i, e := range chunk {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, 1, ?)")
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)")
 			bucket := e.Bucket
 			if bucket == "" {
 				bucket = bucketKey(time.Now())
@@ -173,7 +197,7 @@ func (s *Store) BulkRecordUsageStats(entries []StatsBatchEntry) (int, error) {
 				bucket, e.DownstreamID, e.Model,
 				e.InputTokens, e.OutputTokens,
 				e.CacheCreation, e.CacheRead,
-				cacheHitIncrement)
+				cacheHitIncrement, e.DecodeTokens, e.DecodeDurationNS, e.DecodeRequestCount)
 		}
 		sb.WriteString(`
 			ON CONFLICT(bucket, downstream_id, model) DO UPDATE SET
@@ -182,7 +206,10 @@ func (s *Store) BulkRecordUsageStats(entries []StatsBatchEntry) (int, error) {
 				cache_creation  = cache_creation  + excluded.cache_creation,
 				cache_read      = cache_read      + excluded.cache_read,
 				request_count   = request_count   + 1,
-				cache_hit_count = cache_hit_count + excluded.cache_hit_count
+				cache_hit_count = cache_hit_count + excluded.cache_hit_count,
+				decode_tokens = decode_tokens + excluded.decode_tokens,
+				decode_duration_ns = decode_duration_ns + excluded.decode_duration_ns,
+				decode_request_count = decode_request_count + excluded.decode_request_count
 		`)
 
 		if _, err := tx.Exec(sb.String(), args...); err != nil {
@@ -297,7 +324,8 @@ func (s *Store) AggregateStats(q StatsQuery) ([]UsageStatsRow, error) {
 		       COALESCE(SUM(cache_creation), 0),
 		       COALESCE(SUM(cache_read), 0),
 		       COALESCE(SUM(request_count), 0),
-		       COALESCE(SUM(cache_hit_count), 0)
+		       COALESCE(SUM(cache_hit_count), 0),
+		       COALESCE(SUM(decode_tokens), 0), COALESCE(SUM(decode_duration_ns), 0), COALESCE(SUM(decode_request_count), 0)
 		FROM usage_stats
 		WHERE bucket >= ? AND bucket <= ?
 		GROUP BY downstream_id, model
@@ -314,9 +342,10 @@ func (s *Store) AggregateStats(q StatsQuery) ([]UsageStatsRow, error) {
 		if err := rows.Scan(&r.DownstreamID, &r.Model,
 			&r.InputTokens, &r.OutputTokens,
 			&r.CacheCreation, &r.CacheRead,
-			&r.RequestCount, &r.CacheHitCount); err != nil {
+			&r.RequestCount, &r.CacheHitCount, &r.DecodeTokens, &r.DecodeDurationNS, &r.DecodeRequestCount); err != nil {
 			return nil, err
 		}
+		r.Finalize()
 		result = append(result, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -345,7 +374,7 @@ func (s *Store) AggregateByProvider(q StatsQuery) ([]ProviderStatsRow, error) {
 		       COALESCE(SUM(u.cache_creation), 0),
 		       COALESCE(SUM(u.cache_read), 0),
 		       COALESCE(SUM(u.request_count), 0),
-		       COALESCE(SUM(u.cache_hit_count), 0)
+		       COALESCE(SUM(u.cache_hit_count), 0), COALESCE(SUM(u.decode_tokens), 0), COALESCE(SUM(u.decode_duration_ns), 0), COALESCE(SUM(u.decode_request_count), 0)
 		FROM usage_stats u
 		LEFT JOIN downstreams d ON d.id = u.downstream_id
 		WHERE u.bucket >= ? AND u.bucket <= ?
@@ -363,9 +392,10 @@ func (s *Store) AggregateByProvider(q StatsQuery) ([]ProviderStatsRow, error) {
 		if err := rows.Scan(&r.DownstreamID, &r.Name,
 			&r.InputTokens, &r.OutputTokens,
 			&r.CacheCreation, &r.CacheRead,
-			&r.RequestCount, &r.CacheHitCount); err != nil {
+			&r.RequestCount, &r.CacheHitCount, &r.DecodeTokens, &r.DecodeDurationNS, &r.DecodeRequestCount); err != nil {
 			return nil, err
 		}
+		r.Finalize()
 		result = append(result, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -432,7 +462,7 @@ func (s *Store) TimeSeries(q StatsQuery, bucketSize string) ([]TimeSeriesPoint, 
 	query := `
 		SELECT ` + groupExpr + ` AS ts,
 		       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-		       COALESCE(SUM(request_count), 0)
+		       COALESCE(SUM(request_count), 0), COALESCE(SUM(decode_tokens), 0), COALESCE(SUM(decode_duration_ns), 0), COALESCE(SUM(decode_request_count), 0)
 		FROM usage_stats
 		WHERE bucket >= ? AND bucket <= ?
 		GROUP BY ts
@@ -447,9 +477,10 @@ func (s *Store) TimeSeries(q StatsQuery, bucketSize string) ([]TimeSeriesPoint, 
 	result := []TimeSeriesPoint{}
 	for rows.Next() {
 		var p TimeSeriesPoint
-		if err := rows.Scan(&p.Bucket, &p.InputTokens, &p.OutputTokens, &p.RequestCount); err != nil {
+		if err := rows.Scan(&p.Bucket, &p.InputTokens, &p.OutputTokens, &p.RequestCount, &p.DecodeTokens, &p.DecodeDurationNS, &p.DecodeRequestCount); err != nil {
 			return nil, err
 		}
+		p.Finalize()
 		result = append(result, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -522,3 +553,13 @@ func (s *Store) PurgeUsageStatsBefore(cutoff string) (int64, error) {
 	return n + n2, nil
 }
 
+// TotalDecodeStats returns summed decode metrics for a range.
+func (s *Store) TotalDecodeStats(q StatsQuery) (DecodeStats, error) {
+	var d DecodeStats
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(decode_tokens),0), COALESCE(SUM(decode_duration_ns),0), COALESCE(SUM(decode_request_count),0) FROM usage_stats WHERE bucket >= ? AND bucket <= ?`, bucketKey(q.From), bucketKey(q.To)).Scan(&d.DecodeTokens, &d.DecodeDurationNS, &d.DecodeRequestCount)
+	if err != nil {
+		return d, fmt.Errorf("total decode stats: %w", err)
+	}
+	d.Finalize()
+	return d, nil
+}

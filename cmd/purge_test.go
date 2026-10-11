@@ -45,6 +45,12 @@ func TestPurgeOldUsageStats_RemovesOldKeepsRecent(t *testing.T) {
 		t.Fatalf("seed newest: %v", err)
 	}
 
+	if _, err := s.BulkRecordUsageStats([]store.StatsBatchEntry{
+		{Bucket: eighteen, DownstreamID: "anthropic", Model: "old-model", DecodeTokens: 100, DecodeDurationNS: int64(time.Second), DecodeRequestCount: 1},
+		{Bucket: recent, DownstreamID: "anthropic", Model: "newest-model", DecodeTokens: 40, DecodeDurationNS: int64(2 * time.Second), DecodeRequestCount: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := purgeOldUsageStats(s); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
@@ -60,6 +66,13 @@ func TestPurgeOldUsageStats_RemovesOldKeepsRecent(t *testing.T) {
 	seen := map[string]bool{}
 	for _, r := range rows {
 		seen[r.Model] = true
+	}
+	decode, err := s.TotalDecodeStats(store.StatsQuery{From: from, To: to})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decode.DecodeTokens != 40 || decode.DecodeRequestCount != 1 || decode.DecodeTokensPerSecond == nil || *decode.DecodeTokensPerSecond != 20 {
+		t.Fatalf("decode retention diverged from usage: %+v", decode)
 	}
 	if seen["old-model"] {
 		t.Error("old-model (18mo ago) should have been purged")

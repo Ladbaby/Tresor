@@ -22,7 +22,7 @@ func statsRangeParam(name string, now time.Time) (from, to time.Time, bucketSize
 		return today, endOfDay, "hour", true
 	case "yesterday":
 		y := today.Add(-24 * time.Hour)
-		return y, y.Add(24*time.Hour).Add(-time.Nanosecond), "hour", true
+		return y, y.Add(24 * time.Hour).Add(-time.Nanosecond), "hour", true
 	case "last_7_days":
 		return today.Add(-7 * 24 * time.Hour), endOfDay, "day", true
 	case "last_14_days":
@@ -36,7 +36,7 @@ func statsRangeParam(name string, now time.Time) (from, to time.Time, bucketSize
 		firstOfThis := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 		lastOfLast := firstOfThis.Add(-time.Nanosecond)
 		firstOfLast := time.Date(lastOfLast.Year(), lastOfLast.Month(), 1, 0, 0, 0, 0, time.UTC)
-		return firstOfLast, lastOfLast.Add(24*time.Hour).Add(-time.Nanosecond), "day", true
+		return firstOfLast, lastOfLast.Add(24 * time.Hour).Add(-time.Nanosecond), "day", true
 	case "this_year":
 		first := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, time.UTC)
 		return first, endOfDay, "day", true
@@ -70,7 +70,7 @@ func parseStatsRange(r *http.Request) (from, to time.Time, bucketSize string, er
 		if perr != nil {
 			return time.Time{}, time.Time{}, "", &rangeError{msg: "invalid to date (use YYYY-MM-DD)"}
 		}
-		to = to.UTC().Add(24*time.Hour).Add(-time.Nanosecond)
+		to = to.UTC().Add(24 * time.Hour).Add(-time.Nanosecond)
 		// hour buckets for short ranges, day buckets for everything else
 		days := to.Sub(from).Hours() / 24
 		if days <= 3 {
@@ -128,6 +128,8 @@ func (r *Router) handleStats(w http.ResponseWriter, req *http.Request) {
 				"output_tokens":  int64(0),
 				"requests":       int64(0),
 				"cache_hit_rate": nil,
+				"decode_tokens":  int64(0), "decode_duration_ms": float64(0),
+				"decode_request_count": int64(0), "decode_tokens_per_second": nil,
 			},
 			"models":    []interface{}{},
 			"providers": []interface{}{},
@@ -140,6 +142,12 @@ func (r *Router) handleStats(w http.ResponseWriter, req *http.Request) {
 	totalIn, totalOut, totalReqs, cacheHitRate, err := r.store.TotalStats(query)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load totals: "+err.Error())
+		return
+	}
+
+	decodeTotal, err := r.store.TotalDecodeStats(query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load decode totals: "+err.Error())
 		return
 	}
 
@@ -175,10 +183,14 @@ func (r *Router) handleStats(w http.ResponseWriter, req *http.Request) {
 		},
 		"bucket_size": bucketSize,
 		"total": map[string]interface{}{
-			"input_tokens":   totalIn,
-			"output_tokens":  totalOut,
-			"requests":       totalReqs,
-			"cache_hit_rate": cacheHitRate, // nil when no cache data
+			"input_tokens":             totalIn,
+			"output_tokens":            totalOut,
+			"requests":                 totalReqs,
+			"cache_hit_rate":           cacheHitRate,
+			"decode_tokens":            decodeTotal.DecodeTokens,
+			"decode_duration_ms":       decodeTotal.DecodeDurationMS,
+			"decode_request_count":     decodeTotal.DecodeRequestCount,
+			"decode_tokens_per_second": decodeTotal.DecodeTokensPerSecond,
 		},
 		"models":    models,
 		"providers": providers,

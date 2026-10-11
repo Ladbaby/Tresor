@@ -411,18 +411,22 @@ func (r *Router) handleLogInspect(w http.ResponseWriter, req *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, inspectResponse{
-		ID:               entry.ID,
-		Timestamp:        entry.Timestamp.UTC().Format(time.RFC3339Nano),
-		Path:             entry.Path,
-		Method:           entry.Method,
-		Model:            entry.Model,
-		ResolvedModel:    entry.ResolvedModel,
-		DownstreamID:     entry.DownstreamID,
-		DownstreamName:   entry.DownstreamName,
-		ClientIP:         entry.ClientIP,
-		Status:           entry.Status,
-		RequestFormat:    entry.RequestFormat,
-		DownstreamFormat: entry.DownstreamFormat,
+		ID:                      entry.ID,
+		Timestamp:               entry.Timestamp.UTC().Format(time.RFC3339Nano),
+		Path:                    entry.Path,
+		Method:                  entry.Method,
+		Model:                   entry.Model,
+		ResolvedModel:           entry.ResolvedModel,
+		DownstreamID:            entry.DownstreamID,
+		DownstreamName:          entry.DownstreamName,
+		ClientIP:                entry.ClientIP,
+		Status:                  entry.Status,
+		RequestFormat:           entry.RequestFormat,
+		DownstreamFormat:        entry.DownstreamFormat,
+		DecodeTokens:            entry.DecodeTokens,
+		DecodeDurationMS:        entry.DecodeDurationMS,
+		DecodeTokensPerSecond:   entry.DecodeTokensPerSecond,
+		DecodeUnavailableReason: entry.DecodeUnavailableReason,
 		Request: inspectBody{
 			ContentType: entry.RequestContentType,
 			Body:        string(entry.RequestBody),
@@ -465,7 +469,11 @@ type inspectResponse struct {
 	// URL path is no longer a reliable hint for the response shape.
 	// When empty, the UI falls back to deriving the format from the
 	// request path.
-	DownstreamFormat string      `json:"downstream_format,omitempty"`
-	Request          inspectBody `json:"request"`
-	Response         inspectBody `json:"response"`
+	DownstreamFormat        string      `json:"downstream_format,omitempty"`
+	DecodeTokens            *int64      `json:"decode_tokens"`
+	DecodeDurationMS        *float64    `json:"decode_duration_ms"`
+	DecodeTokensPerSecond   *float64    `json:"decode_tokens_per_second"`
+	DecodeUnavailableReason string      `json:"decode_unavailable_reason,omitempty"`
+	Request                 inspectBody `json:"request"`
+	Response                inspectBody `json:"response"`
 }

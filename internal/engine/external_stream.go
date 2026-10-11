@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func (externalStream) PreservesFormat() bool { return true }
@@ -491,6 +492,7 @@ func collectExternalPipeline(resp *http.Response, ctx *PipelineContext, pipeline
 	}
 	resp.Body = &collectionLimitReader{ReadCloser: resp.Body, remaining: externalCollectionLimit, statistics: &e.Statistics}
 	err = scanEventsMode(resp.Body, func(event SSEChunk) error {
+		ctx.observeDecodeEvent(event, time.Now())
 		e.Statistics.RawEvents++
 		if IsStreamContentLine("data: "+string(event.Data), ctx.DownstreamFormat) {
 			e.RawContent = true

@@ -48,11 +48,11 @@ func TestLogInspect_ReturnsCapturedEntry(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var got struct {
-		ID            int    `json:"id"`
-		Path          string `json:"path"`
-		Method        string `json:"method"`
-		Model         string `json:"model"`
-		ResolvedModel string `json:"resolved_model"`
+		ID             int    `json:"id"`
+		Path           string `json:"path"`
+		Method         string `json:"method"`
+		Model          string `json:"model"`
+		ResolvedModel  string `json:"resolved_model"`
 		DownstreamID   string `json:"downstream_id"`
 		DownstreamName string `json:"downstream_name"`
 		ClientIP       string `json:"client_ip"`
@@ -97,6 +97,33 @@ func TestLogInspect_ReturnsCapturedEntry(t *testing.T) {
 	// engine should strip the port and surface just the IPv4.
 	if got.ClientIP != "192.0.2.1" {
 		t.Fatalf("expected client ip '192.0.2.1' (port-stripped), got %q", got.ClientIP)
+	}
+}
+
+func TestLogInspect_DecodeMetadataIndependentOfBody(t *testing.T) {
+	router, captures := newTestRouterWithPayloadStore(t)
+	tokens := int64(64)
+	duration, speed := 1500.0, 64.0/1.5
+	captures.Add(inspect.Entry{ID: 43, Status: 200, ResponseBody: []byte(`truncated`), TruncatedResponse: true,
+		DecodeTokens: &tokens, DecodeDurationMS: &duration, DecodeTokensPerSecond: &speed})
+	w := httptest.NewRecorder()
+	router.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/logs/43/inspect", nil))
+	var got inspectResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || got.DecodeTokens == nil || *got.DecodeTokens != tokens || got.DecodeDurationMS == nil || *got.DecodeDurationMS != duration || got.DecodeTokensPerSecond == nil || *got.DecodeTokensPerSecond != speed || !got.Response.Truncated {
+		t.Fatalf("lost decode metadata: %s", w.Body.String())
+	}
+	captures.Add(inspect.Entry{ID: 44, DecodeUnavailableReason: "not_streamed"})
+	w = httptest.NewRecorder()
+	router.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/logs/44/inspect", nil))
+	var absent map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &absent); err != nil {
+		t.Fatal(err)
+	}
+	if value, exists := absent["decode_tokens_per_second"]; !exists || value != nil || absent["decode_unavailable_reason"] != "not_streamed" {
+		t.Fatalf("unavailable metric not explicit: %s", w.Body.String())
 	}
 }
 

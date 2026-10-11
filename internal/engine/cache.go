@@ -100,7 +100,7 @@ func usageFromMap(m map[string]interface{}) *UsageBlock {
 		switch k {
 		case "input_tokens":
 			u.InputTokens = ptrInt(asInt64(v))
-		case "output_tokens":
+		case "output_tokens", "completion_tokens":
 			u.OutputTokens = ptrInt(asInt64(v))
 		case "cache_creation_input_tokens":
 			u.CacheCreationTokens = ptrInt(asInt64(v))

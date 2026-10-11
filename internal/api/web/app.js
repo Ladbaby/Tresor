@@ -3531,7 +3531,7 @@ function renderInspectBody() {
         const reqFmt = backendFormatToInternal(currentInspectData.request_format);
         const respFmt = backendFormatToInternal(currentInspectData.downstream_format);
         bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request', reqFmt));
-        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response', respFmt));
+        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response', respFmt, currentInspectData));
     } else {
         bodyEl.appendChild(renderInspectSection('Raw client request (before plugins)', currentInspectData.request));
         bodyEl.appendChild(renderInspectSection('Raw downstream response (before plugins)', currentInspectData.response));
@@ -3564,7 +3564,7 @@ function buildInspectMarkdownToggle() {
         const reqFmt = backendFormatToInternal(currentInspectData.request_format);
         const respFmt = backendFormatToInternal(currentInspectData.downstream_format);
         bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request', reqFmt));
-        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response', respFmt));
+        bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response', respFmt, currentInspectData));
     });
 
     const span = document.createElement('span');
@@ -3706,7 +3706,7 @@ function prettyPrintJSON(s) {
  * (e.g. a non-streaming OpenAI Responses JSON body — still pretty-
  * printed but reported in the parsed tab as a single shape).
  */
-function renderInspectSectionParsed(title, body, path, kind, formatOverride) {
+function renderInspectSectionParsed(title, body, path, kind, formatOverride, responseMetadata) {
     const wrap = document.createElement('div');
     wrap.className = 'inspect-section';
 
@@ -3757,13 +3757,13 @@ function renderInspectSectionParsed(title, body, path, kind, formatOverride) {
         // a tooltip explaining that, for Anthropic and OpenAI Responses
         // APIs, the section order is the LLM's prompt-cache processing
         // order — not the raw JSON key order.
-        wrap.appendChild(renderParsedSections(parsedView.sections, parsedView.format));
+        wrap.appendChild(renderParsedSections(parsedView.sections, parsedView.format, kind === 'response' ? responseMetadata : null));
         return wrap;
     }
     if (parsedView && parsedView.messages && parsedView.messages.length) {
         // Response side (and streaming fallback): flat message list
         // with a possible usage footer.
-        wrap.appendChild(renderParsedMessages(parsedView));
+        wrap.appendChild(renderParsedMessages(parsedView, kind === 'response' ? responseMetadata : null));
         return wrap;
     }
     if (isStreaming && parsedView && parsedView.complete === false) {
@@ -3774,9 +3774,10 @@ function renderInspectSectionParsed(title, body, path, kind, formatOverride) {
         warn.textContent = 'Stream incomplete — showing partial reconstruction.';
         wrap.appendChild(warn);
         if (parsedView.messages && parsedView.messages.length) {
-            wrap.appendChild(renderParsedMessages(parsedView));
+            wrap.appendChild(renderParsedMessages(parsedView, kind === 'response' ? responseMetadata : null));
         } else {
             wrap.appendChild(buildRawFallback(body));
+            renderResponseMetadataFooter(wrap, kind === 'response' ? responseMetadata : null);
         }
         return wrap;
     }
@@ -3788,6 +3789,7 @@ function renderInspectSectionParsed(title, body, path, kind, formatOverride) {
             + '. Showing raw.';
         wrap.appendChild(note);
         wrap.appendChild(buildRawFallback(body));
+        renderResponseMetadataFooter(wrap, kind === 'response' ? responseMetadata : null);
         return wrap;
     }
     // Reached the empty-messages path: the parser ran without error but
@@ -3800,6 +3802,7 @@ function renderInspectSectionParsed(title, body, path, kind, formatOverride) {
     note.textContent = 'No parsed content reconstructed. Showing raw.';
     wrap.appendChild(note);
     wrap.appendChild(buildRawFallback(body));
+    renderResponseMetadataFooter(wrap, kind === 'response' ? responseMetadata : null);
     return wrap;
 }
 
@@ -4217,26 +4220,37 @@ function buildRawFallback(body) {
     return pre;
 }
 
-function renderParsedMessages(view) {
+function renderParsedMessages(view, responseMetadata) {
     const out = document.createElement('div');
     out.className = 'inspect-parsed';
     for (const m of view.messages) {
         out.appendChild(renderOneMessage(m));
     }
-    if (view.usage) {
-        const u = view.usage;
-        const parts = [];
-        if (u.input_tokens != null)      parts.push('<strong>' + u.input_tokens + '</strong> in');
-        if (u.output_tokens != null)     parts.push('<strong>' + u.output_tokens + '</strong> out');
-        if (u.cache_read_input_tokens)    parts.push('<strong>' + u.cache_read_input_tokens + '</strong> cached');
-        if (parts.length) {
-            const d = document.createElement('div');
-            d.className = 'inspect-usage';
-            d.innerHTML = parts.join(' \u00b7 ');
-            out.appendChild(d);
-        }
-    }
+    renderUsageFooter(out, view.usage, responseMetadata);
     return out;
+}
+
+function renderUsageFooter(out, usage, metadata) {
+    const parts = [];
+    const u = usage || {};
+    if (u.input_tokens != null) parts.push('<strong>' + esc(u.input_tokens) + '</strong> in');
+    if (u.output_tokens != null) parts.push('<strong>' + esc(u.output_tokens) + '</strong> out');
+    if (u.cache_read_input_tokens) parts.push('<strong>' + esc(u.cache_read_input_tokens) + '</strong> cached');
+    if (metadata) {
+        if (metadata.decode_tokens_per_second != null) parts.push('<strong>' + esc(Number(metadata.decode_tokens_per_second).toFixed(1)) + '</strong> token/s decode');
+        else parts.push('N/A token/s decode');
+    }
+    if (!parts.length) return;
+    const d = document.createElement('div');
+    d.className = 'inspect-usage';
+
+    d.innerHTML = parts.join(' · ');
+    out.appendChild(d);
+}
+
+function renderResponseMetadataFooter(out, metadata) {
+    if (!metadata || typeof metadata !== 'object') return;
+    renderUsageFooter(out, null, metadata);
 }
 
 function renderOneMessage(m) {
@@ -4578,7 +4592,7 @@ function shortDescription(desc) {
 //   { type: 'usage',       usage: {...} }              // token-usage footer (messages carries its own)
 //   { type: 'json',        value: <unknown object> }   // pretty-printed JSON for unhandled top-level keys
 //   { type: 'skip' }                                    // placeholder, no output (e.g. model)
-function renderParsedSections(sections, format) {
+function renderParsedSections(sections, format, responseMetadata) {
     const out = document.createElement('div');
     out.className = 'inspect-parsed';
     // For Anthropic and OpenAI Responses APIs, the canonical sections
@@ -4614,19 +4628,8 @@ function renderParsedSections(sections, format) {
             out.appendChild(renderToolsSection(sec.tools || []));
         } else if (sec.type === 'messages') {
             for (const m of (sec.messages || [])) out.appendChild(renderOneMessage(m));
-            if (sec.usage) {
-                const u = sec.usage;
-                const parts = [];
-                if (u.input_tokens != null)       parts.push('<strong>' + u.input_tokens + '</strong> in');
-                if (u.output_tokens != null)      parts.push('<strong>' + u.output_tokens + '</strong> out');
-                if (u.cache_read_input_tokens)    parts.push('<strong>' + u.cache_read_input_tokens + '</strong> cached');
-                if (parts.length) {
-                    const d = document.createElement('div');
-                    d.className = 'inspect-usage';
-                    d.innerHTML = parts.join(' · ');
-                    out.appendChild(d);
-                }
-            }
+            renderUsageFooter(out, sec.usage, responseMetadata);
+            responseMetadata = null;
         } else if (sec.type === 'json') {
             const wrap = document.createElement('div');
             wrap.className = 'inspect-section-json';
@@ -4643,6 +4646,7 @@ function renderParsedSections(sections, format) {
             out.appendChild(wrap);
         }
     }
+    renderResponseMetadataFooter(out, responseMetadata);
     return out;
 }
 
@@ -5174,9 +5178,9 @@ function setDashboardLoading() {
     document.getElementById('dash-top-ip-detail').textContent = '';
     document.getElementById('dash-token-chart').innerHTML = '<div class="chart-empty">Loading…</div>';
     document.getElementById('dash-models-body').innerHTML =
-        '<tr><td colspan="7" class="loading">Loading…</td></tr>';
+        '<tr><td colspan="8" class="loading">Loading…</td></tr>';
     document.getElementById('dash-providers-body').innerHTML =
-        '<tr><td colspan="7" class="loading">Loading…</td></tr>';
+        '<tr><td colspan="8" class="loading">Loading…</td></tr>';
     document.getElementById('dash-ips-body').innerHTML =
         '<tr><td colspan="7" class="loading">Loading…</td></tr>';
 }
@@ -5191,9 +5195,9 @@ function renderDashboardError(msg) {
     document.getElementById('dash-token-chart').innerHTML =
         '<div class="chart-empty">Error: ' + esc(msg) + '</div>';
     document.getElementById('dash-models-body').innerHTML =
-        '<tr><td colspan="7" class="loading">Error: ' + esc(msg) + '</td></tr>';
+        '<tr><td colspan="8" class="loading">Error: ' + esc(msg) + '</td></tr>';
     document.getElementById('dash-providers-body').innerHTML =
-        '<tr><td colspan="7" class="loading">Error: ' + esc(msg) + '</td></tr>';
+        '<tr><td colspan="8" class="loading">Error: ' + esc(msg) + '</td></tr>';
     document.getElementById('dash-ips-body').innerHTML =
         '<tr><td colspan="7" class="loading">Error: ' + esc(msg) + '</td></tr>';
 }
@@ -5341,10 +5345,14 @@ function renderDashboardSeries(series) {
     container.innerHTML = html;
 }
 
+function fmtDecodeSpeed(value) {
+    return value == null ? '<span class="summary-na">—</span>' : esc(Number(value).toFixed(1));
+}
+
 function renderDashboardModels(models, captureOn) {
     const tbody = document.getElementById('dash-models-body');
     if (!models || models.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="loading">No data for selected range</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="loading">No data for selected range</td></tr>';
         return;
     }
 
@@ -5365,11 +5373,12 @@ function renderDashboardModels(models, captureOn) {
             '<td><div class="model-cell">' + providerIconHTML(modelName) +
                 esc(modelName) + 
             '</div></td>' +
-            '<td class="num">' + esc(fmtNum(m.request_count || 0)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(mTotal)) + '</td>' +
             '<td class="num">' + esc(fmtNum(inTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
-            '<td class="num">' + esc(fmtNum(mTotal)) + '</td>' +
+            '<td class="num">' + fmtDecodeSpeed(m.decode_tokens_per_second) + '</td>' +
             '<td class="num">' + cacheCell + '</td>' +
+            '<td class="num">' + esc(fmtNum(m.request_count || 0)) + '</td>' +
             '<td class="num">' + pct.toFixed(1) + '%' + '</td>' +
             '</tr>';
     }
@@ -5379,7 +5388,7 @@ function renderDashboardModels(models, captureOn) {
 function renderDashboardProviders(providers, captureOn) {
     const tbody = document.getElementById('dash-providers-body');
     if (!providers || providers.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="loading">No data for selected range</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="loading">No data for selected range</td></tr>';
         return;
     }
 
@@ -5409,11 +5418,12 @@ function renderDashboardProviders(providers, captureOn) {
             '<td><div class="model-cell">' + providerIconHTML(provLabel) +
                 esc(provLabel) +
             '</div></td>' +
-            '<td class="num">' + esc(fmtNum(p.request_count || 0)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(pTotal)) + '</td>' +
             '<td class="num">' + esc(fmtNum(inTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
-            '<td class="num">' + esc(fmtNum(pTotal)) + '</td>' +
+            '<td class="num">' + fmtDecodeSpeed(p.decode_tokens_per_second) + '</td>' +
             '<td class="num">' + cacheCell + '</td>' +
+            '<td class="num">' + esc(fmtNum(p.request_count || 0)) + '</td>' +
             '<td class="num">' + pct.toFixed(1) + '%' + '</td>' +
             '</tr>';
     }
@@ -5445,11 +5455,11 @@ function renderDashboardIPs(ips, captureOn) {
 
         html += '<tr>' +
             '<td><div class="model-cell">' + esc(ipLabel) + '</div></td>' +
-            '<td class="num">' + esc(fmtNum(p.request_count || 0)) + '</td>' +
+            '<td class="num">' + esc(fmtNum(pTotal)) + '</td>' +
             '<td class="num">' + esc(fmtNum(inTok)) + '</td>' +
             '<td class="num">' + esc(fmtNum(outTok)) + '</td>' +
-            '<td class="num">' + esc(fmtNum(pTotal)) + '</td>' +
             '<td class="num">' + cacheCell + '</td>' +
+            '<td class="num">' + esc(fmtNum(p.request_count || 0)) + '</td>' +
             '<td class="num">' + pct.toFixed(1) + '%' + '</td>' +
             '</tr>';
     }

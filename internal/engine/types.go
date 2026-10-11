@@ -32,6 +32,7 @@ type Downstream struct {
 
 // PipelineContext carries state through the transformation pipeline.
 type PipelineContext struct {
+	decode            *decodeMeasurement
 	ClientFormat      string
 	Execution         *AttemptExecution
 	Diagnostics       *PluginDiagnostics

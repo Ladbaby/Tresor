@@ -161,8 +161,15 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			ctx.execution().Failure = fmt.Errorf("request attempt failed")
 		}
 		if err := pipeline.finishAttempt(ctx, attemptOutcome); err != nil {
+			if ctx.decode != nil {
+				ctx.decode.failed = true
+			}
 			log.Printf("plugin finish error: %v", err)
 		}
+		if ctx.decode != nil && attemptOutcome != "success" {
+			ctx.decode.failed = true
+		}
+		ctx.decode.finalize(&entry)
 		entry.PluginDiagnostics = ctx.Diagnostics
 	}()
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -185,6 +192,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			ctx.Variables = make(map[string]interface{})
 		}
 
+		entry.Usage = nil
+		ctx.decode = nil
+		if e.payloadStore != nil {
+			ctx.decode = &decodeMeasurement{format: downstreamFormat}
+		}
 		ctx.RequestPathOverride = ""
 		cleanReq, _ := CopyRequest(r, result.body)
 		if err := pipeline.beginAttempt(ctx, cleanReq, attempt); err != nil {
@@ -340,7 +352,9 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 		// Only accumulate usage statistics when the inspector is enabled.
 		if e.payloadStore != nil {
-			if usage, ok := UsageFromResponseBody(respBody); ok && usage != nil {
+			if collectStream && ctx.decode != nil && ctx.decode.usage != nil {
+				entry.Usage = ctx.decode.usage
+			} else if usage, ok := UsageFromResponseBody(respBody); ok && usage != nil {
 				entry.Usage = usage
 			}
 		}

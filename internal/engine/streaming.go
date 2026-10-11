@@ -126,6 +126,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		if clientCtx.Err() != nil && ctx.execution().Failure == nil {
 			ctx.execution().Failure = clientCtx.Err()
 		}
+		if ctx.decode != nil && (streamErr != nil || clientCtx.Err() != nil) {
+			ctx.decode.failed = true
+		}
 		empty := bufferForRetry && !contentProduced
 		if streamErr == nil && !empty && clientCtx.Err() == nil {
 			if err := pipeline.finishAttempt(ctx, "success"); err != nil {
@@ -206,6 +209,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 			return false
 		}
 		if _, err := w.Write(p); err != nil {
+			if ctx.decode != nil {
+				ctx.decode.failed = true
+			}
 			clientGone = true
 			return false
 		}
@@ -335,6 +341,8 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 				streamErr = upstream
 				return fmt.Errorf("upstream stream error: %s", upstream.Message)
 			}
+			// Observe each complete raw downstream event before any plugin transforms.
+			ctx.observeDecodeEvent(event, time.Now())
 			scrapeUsage(event.Data)
 			if bufferForRetry {
 				if format := DetectStreamFormat(event); format != "" {
@@ -477,6 +485,7 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 				return true
 			}
 			payload := strings.Join(evData, "\n")
+			ctx.observeDecodeEvent(SSEChunk{EventType: sseEventName, Data: []byte(payload)}, time.Now())
 			// Check first for a fatal in-band error event — the downstream said
 			// 200 but is reporting a failure.
 			if se, isErr := ParseStreamError(sseEventName, []byte(payload)); isErr {
@@ -642,6 +651,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		if bufferForRetry && terminalEventActive && !contentProduced {
 			discardTerminal()
 			if err := scanner.Err(); err != nil {
+				if ctx.decode != nil {
+					ctx.decode.failed = true
+				}
 				log.Printf("Stream ended: %v", err)
 			}
 			record()
@@ -651,6 +663,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		}
 		flushTerminal()
 		if err := scanner.Err(); err != nil {
+			if ctx.decode != nil {
+				ctx.decode.failed = true
+			}
 			log.Printf("Stream ended: %v", err)
 		}
 		record()
@@ -712,6 +727,7 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		// Combine data lines to get the raw SSE payload
 		rawData := strings.Join(dataLines, "\n")
 		chunk := SSEChunk{EventType: eventLine, Data: []byte(rawData)}
+		ctx.observeDecodeEvent(chunk, time.Now())
 
 		// Check for a fatal in-band error before running transformers, so a
 		// format translator cannot mangle the error into something
@@ -918,6 +934,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	if bufferForRetry && !contentProduced && len(heldTerminalBytes) > 0 {
 		discardHeldTerminal()
 		if err := scanner.Err(); err != nil {
+			if ctx.decode != nil {
+				ctx.decode.failed = true
+			}
 			log.Printf("Stream ended: %v", err)
 		}
 		record()
@@ -926,6 +945,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	flushHeldTerminal()
 
 	if err := scanner.Err(); err != nil {
+		if ctx.decode != nil {
+			ctx.decode.failed = true
+		}
 		log.Printf("Stream ended: %v", err)
 	}
 	record()

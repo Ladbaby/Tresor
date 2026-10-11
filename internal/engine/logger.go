@@ -100,6 +100,13 @@ type RequestLogEntry struct {
 	// reports cache_creation + output. The engine stores whichever
 	// fields each event supplied, so the final usage is the union.
 	Usage *UsageBlock `json:"usage,omitempty"`
+
+	decodeDurationNS        int64
+	DecodeTokens            *int64   `json:"decode_tokens,omitempty"`
+	DecodeDurationMS        *float64 `json:"decode_duration_ms,omitempty"`
+	DecodeTokensPerSecond   *float64 `json:"decode_tokens_per_second,omitempty"`
+	DecodeUnavailableReason string   `json:"decode_unavailable_reason,omitempty"`
+	decode                  *decodeMeasurement
 }
 
 // logSeverity returns the severity level of a log entry based on status code and type.

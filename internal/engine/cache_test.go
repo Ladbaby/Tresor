@@ -34,6 +34,9 @@ func TestUsageFromResponseBody_OpenAIChat(t *testing.T) {
 	if u.InputTokens == nil || *u.InputTokens != 100 {
 		t.Errorf("input_tokens (from prompt_tokens): got %v, want 100", u.InputTokens)
 	}
+	if u.OutputTokens == nil || *u.OutputTokens != 50 {
+		t.Errorf("output_tokens (from completion_tokens): got %v, want 50", u.OutputTokens)
+	}
 	if u.CachedTokens == nil || *u.CachedTokens != 91 {
 		t.Errorf("cached_tokens (from prompt_tokens_details): got %v, want 91", u.CachedTokens)
 	}

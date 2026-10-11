@@ -283,6 +283,15 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Add decode usage counters to existing databases. Legacy rows default to zero.
+	for _, column := range []string{"decode_tokens", "decode_duration_ns", "decode_request_count"} {
+		if !s.columnExists("usage_stats", column) {
+			if _, err := s.db.Exec(`ALTER TABLE usage_stats ADD COLUMN ` + column + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migrate add usage_stats.%s: %w", column, err)
+			}
+		}
+	}
+
 	// One-time upgrade-in-place cleanup: drop the legacy single-session row.
 	// The new sessions table is the source of truth from now on.
 	if _, err := s.db.Exec("DELETE FROM settings WHERE key = 'session_token'"); err != nil {

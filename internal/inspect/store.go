@@ -33,6 +33,11 @@ type Entry struct {
 	DownstreamName      string    `json:"downstream_name,omitempty"`
 	Status              int       `json:"status,omitempty"`
 	ClientIP            string    `json:"client_ip,omitempty"`
+	// Decode metrics are final raw-upstream observations, independent of body truncation.
+	DecodeTokens            *int64   `json:"decode_tokens"`
+	DecodeDurationMS        *float64 `json:"decode_duration_ms"`
+	DecodeTokensPerSecond   *float64 `json:"decode_tokens_per_second"`
+	DecodeUnavailableReason string   `json:"decode_unavailable_reason,omitempty"`
 	// RequestFormat is the API format the client used on the wire for the
 	// incoming request (one of "openai", "anthropic", "openai_responses",
 	// "gemini", or "" when unknown). It is the format the inspector should

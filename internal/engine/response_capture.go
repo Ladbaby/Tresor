@@ -79,7 +79,14 @@ func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []by
 		if entry.Usage.CachedTokens != nil {
 			cacheRead += *entry.Usage.CachedTokens
 		}
+		var decodeTokens, decodeDuration, decodeCount int64
+		if entry.DecodeTokens != nil && entry.DecodeDurationMS != nil {
+			decodeTokens = *entry.DecodeTokens
+			decodeDuration = entry.decodeDurationNS
+			decodeCount = 1
+		}
 		e.bufferStats(store.StatsBatchEntry{
+			DecodeTokens: decodeTokens, DecodeDurationNS: decodeDuration, DecodeRequestCount: decodeCount,
 			Bucket:        entry.Timestamp.UTC().Format("2006-01-02T15:00:00Z"),
 			DownstreamID:  entry.DownstreamID,
 			Model:         entry.ResolvedModel,
@@ -112,5 +119,7 @@ func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []by
 		TruncatedResponse:   truncResp,
 		RequestFormat:       requestFormat,
 		DownstreamFormat:    downstreamFormat,
+		DecodeTokens:        entry.DecodeTokens, DecodeDurationMS: entry.DecodeDurationMS,
+		DecodeTokensPerSecond: entry.DecodeTokensPerSecond, DecodeUnavailableReason: entry.DecodeUnavailableReason,
 	})
 }
