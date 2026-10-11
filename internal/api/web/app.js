@@ -2075,7 +2075,7 @@ document.getElementById('package-remote-form').addEventListener('submit', async 
     const status = document.getElementById('package-management-status');
     if (!confirm('Install code from this trusted source? Only continue if you trust the publisher. The plugin will not be activated automatically.\n' + input.url)) return;
     button.disabled = true; status.textContent = 'Downloading and installing...';
-    try { await api('/plugin-packages/install-remote', {method:'POST',body:JSON.stringify(input)}); status.textContent = 'Installed. Activate the plugin to make it available in rules. Approve permissions first if requested.'; await loadPlugins(); } catch(error) { status.textContent = error.message; } finally { button.disabled = false; }
+    try { await api('/plugin-packages/install-remote', {method:'POST',body:JSON.stringify(input)}); status.textContent = 'Installed.'; await loadPlugins(); } catch(error) { status.textContent = error.message; } finally { button.disabled = false; }
 });
 
 // Local bundles use the same raw JSON envelope emitted by `plugin pack`.
@@ -2096,7 +2096,7 @@ async function installLocalBundle(files) {
     status.textContent = 'Installing local bundle...';
     try {
         await api('/plugin-packages/install', { method: 'POST', body: await file.text() });
-        status.textContent = 'Installed. Activate the plugin to make it available in rules. Approve permissions first if requested.';
+        status.textContent = 'Installed.';
         await loadPlugins();
     } catch (error) { status.textContent = error.message; }
     finally { pluginInstallBusy = false; pluginBundleChoose.disabled = false; pluginDropZone.removeAttribute('aria-busy'); pluginBundleFile.value = ''; }
