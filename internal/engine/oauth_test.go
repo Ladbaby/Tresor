@@ -14,6 +14,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"tresor/internal/config"
+	"tresor/internal/oauth"
 )
 
 // fakeTokenManager implements TokenResolver with a fixed token and optional
@@ -80,6 +81,96 @@ func TestEngine_OAuthTokenInjectedAsBearer(t *testing.T) {
 
 // TestEngine_OAuthNotConnectedReturns401 verifies that an OAuth downstream
 // with no usable token returns a 401 without forwarding to the downstream.
+func TestCodexPreparationFallbackAndHeaderPrecedence(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/responses", nil)
+	prepared := prepareCodexRequest(req, []byte(`{"input":[],"stream":false}`))
+	if prepared.correlationID == "" || prepared.compressed {
+		t.Fatalf("unexpected preparation: %+v", prepared)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(prepared.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["prompt_cache_key"]; ok {
+		t.Fatal("fallback identity used as prompt cache key")
+	}
+	req.Header.Set("OpenAI-Beta", "caller-beta")
+	req.Header.Set("Content-Encoding", "caller-encoding")
+	req.Header.Set("Content-Length", "999")
+	prepared.applyHeaders(req)
+	if req.Header.Get("OpenAI-Beta") != "caller-beta" || req.Header.Get("Content-Encoding") != "caller-encoding" || req.Header.Get("Content-Length") != "999" || req.Header.Get("session-id") != prepared.correlationID || req.Header.Get("x-client-request-id") != prepared.correlationID {
+		t.Fatal(req.Header)
+	}
+	prepared.compressed = true
+	prepared.applyHeaders(req)
+	if req.Header.Get("Content-Encoding") != "zstd" || req.Header.Get("Content-Length") != "" {
+		t.Fatal(req.Header)
+	}
+}
+
+func TestEngine_GenericForwardingDoesNotAddCodexFingerprint(t *testing.T) {
+	s := newTestStore(t)
+	const body = `{"model":"generic-model","stream":true,"input":[]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ := io.ReadAll(r.Body)
+		if string(got) != body {
+			t.Errorf("generic body changed: %s", got)
+		}
+		for _, header := range []string{"OpenAI-Beta", "session-id", "x-client-request-id", "Content-Encoding", "chatgpt-account-id"} {
+			if value := r.Header.Get(header); value != "" {
+				t.Errorf("generic request leaked %s=%s", header, value)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer server.Close()
+	addDownstream(t, s, "generic-ds", "generic-ds", server.URL, "test-key", "openai")
+	addOutputModelIDs(t, s, "generic-ds", "generic-model")
+	eng := New(s)
+	defer eng.Stop()
+	eng.SetRegistry(&mockRegistryImpl{})
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestEngine_OAuthPreparationErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		manager TokenResolver
+		status  int
+		message string
+	}{
+		{"missing manager", nil, 401, "no OAuth support"},
+		{"transient refresh", &fakeTokenManager{err: fmt.Errorf("refresh: %w", oauth.ErrTransientRefresh)}, 503, "please retry"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			addDownstream(t, s, "oauth-ds", "oauth-ds", "http://127.0.0.1:1", "", "openai")
+			if err := s.SetDownstreamAuth("oauth-ds", &config.DownstreamAuthCfg{Type: "oauth"}); err != nil {
+				t.Fatal(err)
+			}
+			addOutputModelIDs(t, s, "oauth-ds", "oauth-model")
+			eng := New(s)
+			defer eng.Stop()
+			eng.SetRegistry(&mockRegistryImpl{})
+			eng.SetTokenManager(tc.manager)
+			w := httptest.NewRecorder()
+			eng.HandleProxy(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"oauth-model"}`)))
+			if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.message) {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+			entries := eng.GetLogger().RecentEntries(10)
+			if len(entries) != 1 || entries[0].Status != tc.status {
+				t.Fatalf("logs: %+v", entries)
+			}
+		})
+	}
+}
+
 func TestEngine_OAuthNotConnectedReturns401(t *testing.T) {
 	s := newTestStore(t)
 

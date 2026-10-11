@@ -32,7 +32,13 @@ type Downstream struct {
 
 // PipelineContext carries state through the transformation pipeline.
 type PipelineContext struct {
-	TargetDownstream *Downstream
+	ClientFormat      string
+	Execution         *AttemptExecution
+	Diagnostics       *PluginDiagnostics
+	Committed         bool
+	AttemptIndex      int
+	ExternalCollector *ExternalPlugin
+	TargetDownstream  *Downstream
 	// DownstreamFormat is the API format the downstream will actually receive
 	// (after any auto-translation). Used by forwardRequest to select the
 	// correct per-format URL from TargetDownstream.FormatURLs, and is also
@@ -40,10 +46,6 @@ type PipelineContext struct {
 	DownstreamFormat string
 	// ClientStreaming records the client's mode before request translation.
 	ClientStreaming bool
-	// ResponseBodyCollector is an opt-in transport hook installed by a request
-	// plugin. It converts an upstream stream to buffered downstream-format JSON
-	// before the normal response pipeline runs.
-	ResponseBodyCollector func(*http.Response, *PipelineContext) ([]byte, error)
 	// RequestPathOverride takes precedence over configured format paths.
 	RequestPathOverride string
 	// OAuthExtraHeaders are additional headers required by the OAuth
@@ -80,6 +82,8 @@ type ResponseTransformer interface {
 // payload (without "data: " prefix). For protocols without named events (e.g.,
 // OpenAI), EventType is empty.
 type SSEChunk struct {
+	ID        *string
+	Retry     *int
 	EventType string // e.g. "message_start", "content_block_delta" — empty for unnamed events
 	Data      []byte // the JSON payload
 }

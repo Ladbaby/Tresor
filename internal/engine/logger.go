@@ -59,22 +59,25 @@ func (d *DurationMs) UnmarshalJSON(data []byte) error {
 
 // RequestLogEntry captures a single gateway request.
 type RequestLogEntry struct {
-	ID             int       `json:"id"`
-	Timestamp      time.Time `json:"timestamp"`
-	Method         string    `json:"method"`
-	Path           string    `json:"path"`
-	Model          string    `json:"model"`
-	ResolvedModel  string    `json:"resolved_model,omitempty"`
-	DownstreamID   string    `json:"downstream_id"`
-	DownstreamName string    `json:"downstream_name"`
-	AliasGroup     string    `json:"alias_group,omitempty"`
-	RuleIDs        []string  `json:"rule_ids,omitempty"`
-	ClientIP       string    `json:"client_ip,omitempty"`
-	Status         int       `json:"status"`
-	Duration       DurationMs `json:"duration"`
-	Error          string    `json:"error,omitempty"`
-	Level          string    `json:"level,omitempty"`
-	Message        string    `json:"message,omitempty"`
+	ID                int                `json:"id"`
+	Timestamp         time.Time          `json:"timestamp"`
+	Method            string             `json:"method"`
+	Path              string             `json:"path"`
+	Model             string             `json:"model"`
+	ResolvedModel     string             `json:"resolved_model,omitempty"`
+	DownstreamID      string             `json:"downstream_id"`
+	DownstreamName    string             `json:"downstream_name"`
+	AliasGroup        string             `json:"alias_group,omitempty"`
+	RuleIDs           []string           `json:"rule_ids,omitempty"`
+	ClientIP          string             `json:"client_ip,omitempty"`
+	Status            int                `json:"status"`
+	Duration          DurationMs         `json:"duration"`
+	Error             string             `json:"error,omitempty"`
+	Level             string             `json:"level,omitempty"`
+	Message           string             `json:"message,omitempty"`
+	PluginDiagnostics *PluginDiagnostics `json:"plugin_diagnostics,omitempty"`
+	deferRecord       bool
+	capture           *pendingCapture
 
 	// Usage is a sparse accumulation of the request's prompt/output
 	// token counts, intentionally shaped the same way as the inspect
@@ -113,6 +116,18 @@ func (e RequestLogEntry) logSeverity() LogLevel {
 	if e.Status >= 400 {
 		return LogLevelWarn
 	}
+	if e.PluginDiagnostics != nil {
+		severity := LogLevelInfo
+		for _, d := range e.PluginDiagnostics.Entries {
+			if d.Level == "error" {
+				return LogLevelError
+			}
+			if d.Level == "warn" {
+				severity = LogLevelWarn
+			}
+		}
+		return severity
+	}
 	return LogLevelInfo
 }
 
@@ -121,11 +136,11 @@ const maxLogEntries = 500
 // RequestLogger collects gateway request logs in a circular buffer
 // and supports SSE streaming for real-time UI updates.
 type RequestLogger struct {
-	mu       sync.RWMutex
-	level    LogLevel
-	entries  []RequestLogEntry
-	nextID   int
-	writers  []logWriter // SSE subscribers
+	mu      sync.RWMutex
+	level   LogLevel
+	entries []RequestLogEntry
+	nextID  int
+	writers []logWriter // SSE subscribers
 }
 
 type logWriter struct {
@@ -175,7 +190,7 @@ func (l *RequestLogger) Debug(format string, args ...interface{}) {
 // pointer. Callers that need the assigned id (e.g. the inspector store)
 // must pass a pointer; the helper recordAndCapture relies on this.
 func (l *RequestLogger) Record(entry *RequestLogEntry) {
-	if l == nil || entry == nil {
+	if l == nil || entry == nil || entry.deferRecord {
 		return
 	}
 	l.mu.Lock()
@@ -244,14 +259,14 @@ func (l *RequestLogger) RecentEntries(n int) []RequestLogEntry {
 }
 
 // Subscribe adds an SSE writer. Call this when a new client connects to the stream endpoint.
-func (l *RequestLogger)Subscribe(w http.ResponseWriter, flusher http.Flusher) {
+func (l *RequestLogger) Subscribe(w http.ResponseWriter, flusher http.Flusher) {
 	l.mu.Lock()
 	l.writers = append(l.writers, logWriter{flusher: flusher, writer: w})
 	l.mu.Unlock()
 }
 
 // Unsubscribe removes an SSE writer.
-func (l *RequestLogger)Unsubscribe(w http.ResponseWriter) {
+func (l *RequestLogger) Unsubscribe(w http.ResponseWriter) {
 	l.mu.Lock()
 	for i, sw := range l.writers {
 		if sw.writer == w {

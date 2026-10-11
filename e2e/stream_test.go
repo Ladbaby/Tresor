@@ -9,12 +9,49 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func installThinkingPackage(t *testing.T, base string) {
+	t.Helper()
+	files := map[string]string{}
+	// Integration exercises the independently maintained package source, not
+	// an embedded production fallback. CI may provide a sibling checkout here.
+	source := os.Getenv("TRESOR_PLUGIN_SOURCE_DIR")
+	if source == "" {
+		source = filepath.Join("..", "..", "Tresor-plugins")
+	}
+	for _, name := range []string{"manifest.json", "plugin.js"} {
+		data, err := os.ReadFile(filepath.Join(source, "remove_thinking", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = string(data)
+	}
+	for _, setup := range []struct {
+		path  string
+		value any
+	}{
+		{"/api/plugin-packages/install", map[string]any{"files": files}},
+		{"/api/plugin-packages/activate", map[string]string{"id": "remove_thinking", "version": "2.0.0"}},
+	} {
+		data, _ := json.Marshal(setup.value)
+		resp, err := http.Post(base+setup.path, "application/json", bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			t.Fatalf("%s: %d %s", setup.path, resp.StatusCode, body)
+		}
+	}
+}
 
 // Verify same-format Anthropic streaming through a real response plugin and
 // daemon: retry buffering must preserve both terminal events, not just stop.
@@ -45,15 +82,16 @@ downstreams:
     is_enabled: true
     output_model_ids: [mock-model]
 rules:
-  - id: usage-fix
-    name: Usage fix
+  - id: response-plugin
+    name: External response plugin
     pattern_path: /v1/messages
     is_enabled: true
     pipeline_config:
-      - plugin_id: fix_anthropic_usage
+      - plugin_id: remove_thinking
 `, filepath.Join(t.TempDir(), "retry.db"))
 	base, cleanup := startTresor(t, cfg, 9218)
 	defer cleanup()
+	installThinkingPackage(t, base)
 	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(`{"model":"mock-model","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +110,54 @@ rules:
 	}
 	if len(findEvents(events, "message_delta")) != 1 || len(findEvents(events, "message_stop")) != 1 || events[len(events)-1].Type != "message_stop" {
 		t.Fatalf("invalid terminal event sequence: %+v", events)
+	}
+}
+
+func TestRemoveThinkingRetryResetsHiddenIndexes(t *testing.T) {
+	var attempts atomic.Int32
+	mock := startMockServer(t, 9233, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"role\":\"assistant\",\"content\":[]}}\n\n")
+		if attempts.Add(1) == 1 {
+			fmt.Fprint(w, "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\nevent: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"private\"}}\n\nevent: content_block_stop\ndata: {\"index\":0}\n\n")
+		} else {
+			fmt.Fprint(w, "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"visible\"}}\n\nevent: content_block_stop\ndata: {\"index\":0}\n\n")
+		}
+		fmt.Fprint(w, "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer mock.Close()
+	cfg := fmt.Sprintf(`bind_addr: "127.0.0.1:9232"
+db_path: %q
+proxy_mode: none
+retry_on_empty: true
+downstreams:
+  - id: anthropic
+    base_url: http://127.0.0.1:9233
+    api_formats: [anthropic]
+    is_enabled: true
+    output_model_ids: [mock-model]
+rules:
+  - id: thinking-retry
+    name: Thinking retry
+    pattern_path: /v1/messages
+    is_enabled: true
+    pipeline_config:
+      - plugin_id: remove_thinking
+`, filepath.Join(t.TempDir(), "retry-thinking.db"))
+	base, cleanup := startTresor(t, cfg, 9232)
+	defer cleanup()
+	installThinkingPackage(t, base)
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(`{"model":"mock-model","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || attempts.Load() != 2 || !strings.Contains(string(body), "visible") || strings.Contains(string(body), "private") {
+		t.Fatalf("status=%d attempts=%d body=%s", resp.StatusCode, attempts.Load(), body)
 	}
 }
 
@@ -114,6 +200,7 @@ rules:
 `, filepath.Join(t.TempDir(), "thinking.db"))
 	base, cleanup := startTresor(t, cfg, 9230)
 	defer cleanup()
+	installThinkingPackage(t, base)
 	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(`{"model":"mock-model","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -153,75 +240,6 @@ rules:
 	}
 	if len(blocks) != 1 || blocks[0] != `{"code":"return { n: 5 };","explanation":"Sanity test"}` {
 		t.Fatalf("lost tool input: %v", blocks)
-	}
-}
-
-func TestFixAnthropicSystemCowork(t *testing.T) {
-	mock := startMockServer(t, 9234, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			System   []struct{ Text string }
-			Messages []struct{ Role string }
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-		for _, msg := range body.Messages {
-			if msg.Role == "system" {
-				http.Error(w, "System message must be at the beginning.", 400)
-				return
-			}
-		}
-		text := ""
-		for _, block := range body.System {
-			text += block.Text
-		}
-		if text != "SDK instructions\n\n# Environment" || len(body.Messages) != 1 || body.Messages[0].Role != "user" {
-			http.Error(w, "lost instructions", 400)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`)
-	}))
-	defer mock.Close()
-	cfg := fmt.Sprintf(`bind_addr: "127.0.0.1:9233"
-proxy_mode: none
-db_path: %q
-downstreams:
-  - id: mock
-    name: Mock
-    base_url: http://127.0.0.1:9234
-    api_key: mock
-    api_formats: [anthropic]
-    is_enabled: true
-    output_model_ids: [mock-model]
-rules:
-  - id: system-fix
-    name: Cowork compatibility
-    pattern_path: /v1/messages
-    is_enabled: true
-    pipeline_config:
-      - plugin_id: fix_anthropic_system
-`, filepath.Join(t.TempDir(), "system.db"))
-	base, cleanup := startTresor(t, cfg, 9233)
-	defer cleanup()
-	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(`{"model":"mock-model","max_tokens":100,"system":[{"type":"text","text":"SDK instructions","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Powerpoint?"}]},{"role":"system","content":"# Environment"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 || !strings.Contains(string(body), `"text":"ok"`) {
-		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
-	}
-	plugins, err := http.Get(base + "/api/plugins")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer plugins.Body.Close()
-	list, _ := io.ReadAll(plugins.Body)
-	if !strings.Contains(string(list), `fix_anthropic_system`) {
-		t.Fatalf("plugin not registered: %s", list)
 	}
 }
 

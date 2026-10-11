@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,34 +17,41 @@ import (
 const e2ePort = 9199
 
 func TestE2E(t *testing.T) {
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-e2e","object":"chat.completion","created":1,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"Hello from local mock"},"finish_reason":"stop"}]}`)
+	}))
+	defer mockUpstream.Close()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	cfg := fmt.Sprintf(`
 bind_addr: 127.0.0.1:%d
 db_path: %s
+plugin_cache_dir: %s
+icon_cache_dir: %s
 
 downstreams:
   - id: openai-gpt4o
     name: OpenAI GPT-4o
-    base_url: https://api.openai.com
+    base_url: %s
     api_key: sk-test-key
     output_model_ids:
       - gpt-4o
       - gpt-4o-mini
   - id: anthropic-sonnet
     name: Anthropic Sonnet
-    base_url: https://api.anthropic.com
+    base_url: %s
     api_key: sk-ant-test-key
     output_model_ids:
       - claude-sonnet-4-20250514
   - id: azure-gpt4o
     name: Azure GPT-4o
-    base_url: https://my-resource.openai.azure.com/openai
+    base_url: %s
     api_key: azure-test-key
     output_model_ids:
       - gpt-4o
   - id: minimax-test
     name: MiniMax Test
-    base_url: https://example.invalid
+    base_url: %s
     api_key: sk-noop
     output_model_ids:
       - MiniMax-M2.5
@@ -65,11 +73,34 @@ aliases:
         downstream_id: anthropic-sonnet
         output_model_id: claude-sonnet-4-20250514
 `,
-		e2ePort, dbPath)
+		e2ePort, dbPath, filepath.ToSlash(filepath.Join(t.TempDir(), "plugin-cache")), filepath.ToSlash(filepath.Join(t.TempDir(), "icon-cache")), mockUpstream.URL, mockUpstream.URL, mockUpstream.URL, mockUpstream.URL)
 	apiBase, cleanup := startTresor(t, cfg, e2ePort)
 	defer cleanup()
 
 	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Rule CRUD uses an installed external fixture, not a production built-in.
+	for _, setup := range []struct {
+		path    string
+		payload any
+	}{
+		{"/api/plugin-packages/install", map[string]any{"files": map[string]string{
+			"manifest.json": `{"id":"test/headers","version":"1.0.0","api_version":2,"entry":"plugin.js","config_schema":{"type":"object","properties":{"headers":{"type":"object","additionalProperties":{"type":"string"}}},"required":["headers"]}}`,
+			"plugin.js":     `module.exports={request({config:{headers}}){return {request:{setHeaders:Object.fromEntries(Object.entries(headers).map(([k,v])=>[k,[v]]))}}}};`,
+		}}},
+		{"/api/plugin-packages/activate", map[string]string{"id": "test/headers", "version": "1.0.0"}},
+	} {
+		data, _ := json.Marshal(setup.payload)
+		resp, err := client.Post(apiBase+setup.path, "application/json", bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			t.Fatalf("fixture setup: %d %s", resp.StatusCode, out)
+		}
+	}
 
 	t.Run("HealthCheck", func(t *testing.T) {
 		resp, err := client.Get(apiBase + "/api/health")
@@ -120,7 +151,7 @@ aliases:
 			"pattern_path":      "/v1/chat/completions",
 			"pattern_models":    []string{"gpt-4o"},
 			"match_downstreams": []string{"openai-gpt4o"},
-			"pipeline_config":   `[{"plugin_id":"custom_header","config":{"headers":{"X-Test":"e2e"}}}]`,
+			"pipeline_config":   `[{"plugin_id":"test/headers","config":{"headers":{"X-Test":"e2e"}}}]`,
 			"is_enabled":        true,
 		}
 		body, _ := json.Marshal(newRule)
@@ -161,17 +192,20 @@ aliases:
 		if err := json.NewDecoder(resp.Body).Decode(&plugins); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		want := []string{"openai2gemini", "anthropic2gemini", "gemini2openai", "gemini2anthropic"}
+
 		have := make(map[string]bool, len(plugins))
 		for _, p := range plugins {
 			if id, ok := p["id"].(string); ok {
 				have[id] = true
 			}
 		}
-		for _, id := range want {
-			if !have[id] {
-				t.Fatalf("plugin %q not registered", id)
+		for _, id := range []string{"openai2gemini", "anthropic2gemini", "gemini2openai", "gemini2anthropic", "openai2anthropic", "anthropic2openai"} {
+			if have[id] {
+				t.Errorf("native converter %q must not be exposed in /api/plugins", id)
 			}
+		}
+		if !have["test/headers"] {
+			t.Fatal("activated test/headers fixture not found in /api/plugins")
 		}
 	})
 
@@ -201,6 +235,18 @@ aliases:
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("RestoreOpenAIAlias", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPut, apiBase+"/api/aliases/alias-gpt4o-openai/activate", bytes.NewReader([]byte("{}")))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("restore OpenAI alias: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
 	})
@@ -248,11 +294,29 @@ aliases:
 		body := `{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}`
 		resp, err := client.Post(apiBase+"/v1/chat/completions", "application/json", bytes.NewReader([]byte(body)))
 		if err != nil {
-			t.Logf("expected connect failure (no real upstream): %v", err)
-			return
+			t.Fatalf("proxy request: %v", err)
 		}
 		defer resp.Body.Close()
-		t.Logf("proxy status: %d", resp.StatusCode)
+		out, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read proxy response: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", resp.StatusCode, out)
+		}
+		var result struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			t.Fatalf("decode proxy response: %v", err)
+		}
+		if len(result.Choices) != 1 || result.Choices[0].Message.Content != "Hello from local mock" {
+			t.Fatalf("unexpected completion: %s", out)
+		}
 	})
 
 	t.Run("WebUI", func(t *testing.T) {
@@ -282,7 +346,10 @@ aliases:
 	})
 
 	t.Run("IconEndpoint_UnknownModelFallback", func(t *testing.T) {
-		resp, err := client.Get(apiBase + "/api/icons/totally-unknown-model-xyz-12345")
+		// A fresh isolated icon cache can wait for CDN lookup/fallback; its
+		// timeout is independent of the short admin CRUD request timeout.
+		iconClient := &http.Client{Timeout: 60 * time.Second}
+		resp, err := iconClient.Get(apiBase + "/api/icons/totally-unknown-model-xyz-12345")
 		if err != nil {
 			t.Fatalf("icon: %v", err)
 		}

@@ -2,11 +2,75 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
+	"tresor/internal/engine"
+	"tresor/internal/jsplugins"
 	"tresor/internal/store"
 )
+
+// validateJSPipeline validates newly supplied user pipeline configuration.
+func (r *Router) validateJSPipeline(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	var steps []engine.PipelineStepConfig
+	if err := json.Unmarshal([]byte(raw), &steps); err != nil {
+		return fmt.Errorf("invalid pipeline: %w", err)
+	}
+	for index, step := range steps {
+		if engine.IsInternalPlugin(r.engine.Registry(), step.PluginID) {
+			return fmt.Errorf("step %d: %s is internal-only; API format conversion is automatic", index, step.PluginID)
+		}
+	}
+	if r.pluginManager == nil {
+		return nil
+	}
+	active, blocked := r.pluginManager.ExecutionSnapshot()
+	for index, step := range steps {
+		if step.FailurePolicy != "" && step.FailurePolicy != "fail_closed" && step.FailurePolicy != "safe_passthrough" {
+			return fmt.Errorf("step %d: unknown failure_policy", index)
+		}
+		if reason := blocked[step.PluginID]; reason != "" {
+			return fmt.Errorf("step %d: plugin %s %s", index, step.PluginID, reason)
+		}
+		pkg := active[step.PluginID]
+		if pkg == nil {
+			if jsplugins.ValidPackageID(step.PluginID) {
+				return fmt.Errorf("step %d: JS plugin %s is not active", index, step.PluginID)
+			}
+			continue
+		}
+		if _, err := jsplugins.NewInstance(pkg, step.Config); err != nil {
+			return fmt.Errorf("step %d: %w", index, err)
+		}
+		if err := jsplugins.ValidatePolicy(pkg, step.Config, step.FailurePolicy); err != nil {
+			return fmt.Errorf("step %d: %w", index, err)
+		}
+	}
+	return nil
+}
+
+// Rule-only display metadata does not alter stored DB/YAML pipelines.
+type ruleView struct {
+	store.Rule
+	IgnoredPipelineSteps []int `json:"ignored_pipeline_steps,omitempty"`
+}
+
+func (r *Router) ruleView(rule store.Rule) ruleView {
+	view := ruleView{Rule: rule}
+	var steps []engine.PipelineStepConfig
+	if json.Unmarshal([]byte(rule.PipelineConfig), &steps) == nil {
+		for index, step := range steps {
+			if engine.IsInternalPlugin(r.engine.Registry(), step.PluginID) {
+				view.IgnoredPipelineSteps = append(view.IgnoredPipelineSteps, index)
+			}
+		}
+	}
+	return view
+}
 
 // handleRules handles GET and POST on /api/rules.
 func (r *Router) handleRules(w http.ResponseWriter, req *http.Request) {
@@ -20,7 +84,11 @@ func (r *Router) handleRules(w http.ResponseWriter, req *http.Request) {
 		if rules == nil {
 			rules = []store.Rule{}
 		}
-		writeJSON(w, http.StatusOK, rules)
+		views := make([]ruleView, 0, len(rules))
+		for _, rule := range rules {
+			views = append(views, r.ruleView(rule))
+		}
+		writeJSON(w, http.StatusOK, views)
 
 	case http.MethodPost:
 		var payload struct {
@@ -52,6 +120,10 @@ func (r *Router) handleRules(w http.ResponseWriter, req *http.Request) {
 		}
 		if rule.Name == "" || rule.PatternPath == "" {
 			writeError(w, http.StatusBadRequest, "name and pattern_path are required")
+			return
+		}
+		if err := r.validateJSPipeline(rule.PipelineConfig); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// Validate downstreams exist if specified
@@ -105,7 +177,7 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, rule)
+		writeJSON(w, http.StatusOK, r.ruleView(*rule))
 
 	case req.Method == http.MethodPut:
 		var update struct {
@@ -178,6 +250,13 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 				existing.IsEnabled = *update.IsEnabled
 			}
 
+			// Only newly supplied pipelines reject legacy internal converter steps.
+			if update.PipelineConfig != "" {
+				if err := r.validateJSPipeline(existing.PipelineConfig); err != nil {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+			}
 			if err := r.store.UpdateRule(existing); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -199,7 +278,7 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, rule)
+		writeJSON(w, http.StatusOK, r.ruleView(*rule))
 
 	case req.Method == http.MethodDelete:
 		if err := r.store.DeleteRule(id); err != nil {

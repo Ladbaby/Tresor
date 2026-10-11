@@ -1283,6 +1283,7 @@ form label {
 }
 
 form input[type="text"],
+form input[type="url"],
 form input[type="password"],
 form select,
 form textarea {
@@ -1322,6 +1323,87 @@ form textarea {
 form .btn-primary {
     margin-top: 1rem;
     width: 100%;
+}
+
+.plugin-drop-zone {
+    border: 2px dashed var(--border-color);
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+    background: var(--bg-secondary);
+}
+.plugin-drop-zone p { margin-bottom: 0.6rem; }
+.plugin-drop-zone.drag-over, .plugin-drop-zone:focus-within { border-color: var(--accent); }
+.plugin-drop-zone[aria-busy="true"] { opacity: 0.65; }
+.plugin-table-scroll { overflow-x: auto; }
+#packages-table { min-width: 760px; }
+#packages-table details > summary { cursor: pointer; }
+#packages-table .schema-hint { white-space: pre-wrap; }
+
+#plugin-incompatibility.hidden {
+    display: none;
+}
+
+/* Rules identifiers are readable labels, not source-code blocks. */
+#tab-rules table code {
+    font-family: inherit;
+    font-size: inherit;
+}
+
+.package-help, .package-digest {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+.package-install {
+    margin: 0.75rem 0;
+}
+.package-install > summary, .package-digest > summary {
+    cursor: pointer;
+}
+#package-remote-form {
+    margin-top: 0.75rem;
+}
+#package-remote-form label {
+    margin-bottom: 0.3rem;
+}
+.package-install-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+.package-install-controls input {
+    flex: 1;
+    min-width: 0;
+    margin-top: 0;
+}
+#package-remote-form .btn-primary {
+    width: auto;
+    margin-top: 0;
+    flex-shrink: 0;
+}
+#packages-table td {
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+}
+.package-digest code {
+    display: block;
+    margin-top: 0.25rem;
+}
+.package-actions button {
+    display: block;
+    margin-bottom: 0.4rem;
+}
+#package-management-status:not(:empty) {
+    margin: 0.75rem 0;
+}
+@media (max-width: 600px) {
+    .package-install-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    #package-remote-form .btn-primary {
+        width: 100%;
+    }
 }
 
 /* ============================================================

@@ -218,7 +218,7 @@ func TestEngine_HandleProxy_ToggleCaptureAtRuntime(t *testing.T) {
 		t.Fatalf("after request 3 (capture on) expected 2 entries in store, got %d", got)
 	}
 
-// Flip back off (detach store) and verify the next request is not captured.
+	// Flip back off (detach store) and verify the next request is not captured.
 	eng.SetPayloadStore(nil)
 	req4 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body)))
 	w4 := httptest.NewRecorder()
@@ -254,9 +254,13 @@ func TestEngine_HandleProxy_StreamingToggleCaptureAtRuntime(t *testing.T) {
 		w.WriteHeader(200)
 		flusher, _ := w.(http.Flusher)
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
-		if flusher != nil { flusher.Flush() }
+		if flusher != nil {
+			flusher.Flush()
+		}
 		fmt.Fprint(w, "data: [DONE]\n\n")
-		if flusher != nil { flusher.Flush() }
+		if flusher != nil {
+			flusher.Flush()
+		}
 	}))
 	defer ts.Close()
 	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1")
@@ -321,11 +325,17 @@ func TestEngine_HandleProxy_StreamingCaptureTeesRawBytes(t *testing.T) {
 		w.WriteHeader(200)
 		flusher, _ := w.(http.Flusher)
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
-		if flusher != nil { flusher.Flush() }
+		if flusher != nil {
+			flusher.Flush()
+		}
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n")
-		if flusher != nil { flusher.Flush() }
+		if flusher != nil {
+			flusher.Flush()
+		}
 		fmt.Fprint(w, "data: [DONE]\n\n")
-		if flusher != nil { flusher.Flush() }
+		if flusher != nil {
+			flusher.Flush()
+		}
 	}))
 	defer ts.Close()
 	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1")
@@ -380,6 +390,65 @@ func TestEngine_HandleProxy_StreamingCaptureTeesRawBytes(t *testing.T) {
 	}
 }
 
+func TestEngine_HandleProxy_CaptureAliasRewrittenRawRequest(t *testing.T) {
+	s := newTestStore(t)
+	ts := newTestDownstream(t, 200, `{"ok":true}`, nil)
+	defer ts.Close()
+	addDownstream(t, s, "ds1", "DS1", ts.URL, "key-ds1")
+	addAlias(t, s, "gpt-4o", "ds1", "claude-3.5", true)
+
+	eng := New(s)
+	defer eng.Stop()
+	store2 := inspect.New(10)
+	eng.SetPayloadStore(store2)
+	const original = `{"model":"gpt-4o","messages":[]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(original))
+	eng.HandleProxy(httptest.NewRecorder(), req)
+
+	var captured *inspect.Entry
+	for id := 0; id < 100; id++ {
+		if entry, ok := store2.Get(id); ok {
+			captured = entry
+			break
+		}
+	}
+	if captured == nil {
+		t.Fatal("no captured entry")
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(captured.RequestBody, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["model"] != "claude-3.5" {
+		t.Fatalf("captured rewritten raw body model = %v", raw["model"])
+	}
+	if captured.Model != "gpt-4o" || captured.ResolvedModel != "claude-3.5" {
+		t.Fatalf("unexpected model snapshot: model=%q resolved=%q", captured.Model, captured.ResolvedModel)
+	}
+}
+
+func TestBoundedResponseCaptureBoundaries(t *testing.T) {
+	for _, size := range []int{inspect.MaxBodyBytes - 1, inspect.MaxBodyBytes, inspect.MaxBodyBytes + 1} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			input := bytes.Repeat([]byte("x"), size)
+			var capture boundedResponseCapture
+			n, err := capture.Write(input)
+			if err != nil || n != size {
+				t.Fatalf("Write() = %d, %v; want %d, nil", n, err, size)
+			}
+			wantLen := size
+			if wantLen > inspect.MaxBodyBytes {
+				wantLen = inspect.MaxBodyBytes
+			}
+			if capture.Len() != wantLen {
+				t.Fatalf("captured length = %d, want %d", capture.Len(), wantLen)
+			}
+			if capture.truncated != (size > inspect.MaxBodyBytes) {
+				t.Fatalf("truncated = %v for input size %d", capture.truncated, size)
+			}
+		})
+	}
+}
 
 // hasID0 is a small helper because the previous check used 0 as "not found"
 // and a real id of 0 would be ambiguous. Reserved for future-proofing.

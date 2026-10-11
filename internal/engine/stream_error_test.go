@@ -92,24 +92,24 @@ func TestParseStreamError(t *testing.T) {
 			wantErr:   false,
 		},
 		{
-			name:      "openai content mentioning error",
-			data:      `{"choices":[{"delta":{"content":"error: file not found"}}]}`,
-			wantErr:   false,
+			name:    "openai content mentioning error",
+			data:    `{"choices":[{"delta":{"content":"error: file not found"}}]}`,
+			wantErr: false,
 		},
 		{
-			name:      "tool call whose name contains error",
-			data:      `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"log_error"}}]}}]}`,
-			wantErr:   false,
+			name:    "tool call whose name contains error",
+			data:    `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"log_error"}}]}}]}`,
+			wantErr: false,
 		},
 		{
-			name:      "DONE sentinel",
-			data:      "[DONE]",
-			wantErr:   false,
+			name:    "DONE sentinel",
+			data:    "[DONE]",
+			wantErr: false,
 		},
 		{
-			name:      "empty payload",
-			data:      "",
-			wantErr:   false,
+			name:    "empty payload",
+			data:    "",
+			wantErr: false,
 		},
 		{
 			name:      "non-JSON payload",
@@ -124,9 +124,9 @@ func TestParseStreamError(t *testing.T) {
 			wantErr:   false,
 		},
 		{
-			name:      "null error field is not an error",
-			data:      `{"choices":[{"delta":{"content":"hi"}}],"error":null}`,
-			wantErr:   false,
+			name:    "null error field is not an error",
+			data:    `{"choices":[{"delta":{"content":"hi"}}],"error":null}`,
+			wantErr: false,
 		},
 	}
 

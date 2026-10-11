@@ -14,6 +14,7 @@ import (
 	"tresor/internal/engine"
 	"tresor/internal/icons"
 	"tresor/internal/inspect"
+	"tresor/internal/jsplugins"
 	"tresor/internal/middleware"
 	"tresor/internal/oauth"
 	"tresor/internal/store"
@@ -43,7 +44,8 @@ type Router struct {
 
 	// oauthMgr manages OAuth logins/tokens for downstreams. Nil when no
 	// OAuth providers are configured; all oauth routes degrade gracefully.
-	oauthMgr *oauth.Manager
+	oauthMgr      *oauth.Manager
+	pluginManager *jsplugins.Manager
 
 	// Config write debounce: delays YAML write-back to avoid excessive disk I/O
 	// when multiple mutations occur in rapid succession.
@@ -165,7 +167,7 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"version":   r.version,
+			"version":    r.version,
 			"build_time": r.buildTime,
 		})
 	})
@@ -209,6 +211,8 @@ func (r *Router) Handler() http.Handler {
 			r.handleReorderGroups(w, req)
 		case strings.HasPrefix(path, "aliases/"):
 			r.handleAliasByID(w, req)
+		case path == "plugin-packages" || strings.HasPrefix(path, "plugin-packages/"):
+			r.handlePluginPackages(w, req)
 		case path == "plugins":
 			r.handlePlugins(w, req)
 		case path == "fetch-models":
@@ -238,6 +242,8 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/aliases", protected)
 	mux.Handle("/api/aliases/", protected)
 	mux.Handle("/api/plugins", protected)
+	mux.Handle("/api/plugin-packages", protected)
+	mux.Handle("/api/plugin-packages/", protected)
 	mux.Handle("/api/fetch-models", protected)
 	mux.Handle("/api/config", protected)
 	mux.Handle("/api/icons/refresh", protected)
@@ -394,6 +400,10 @@ func (r *Router) handleLogInspect(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if r.payloadStore == nil {
+		writeError(w, http.StatusNotFound, "no captured payload for this log entry (capture off, evicted, or unknown id)")
+		return
+	}
 	entry, ok := r.payloadStore.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "no captured payload for this log entry (capture off, evicted, or unknown id)")
@@ -432,16 +442,16 @@ type inspectBody struct {
 }
 
 type inspectResponse struct {
-	ID             int         `json:"id"`
-	Timestamp      string      `json:"timestamp"`
-	Path           string      `json:"path"`
-	Method         string      `json:"method"`
-	Model          string      `json:"model,omitempty"`
-	ResolvedModel  string      `json:"resolved_model,omitempty"`
-	DownstreamID   string      `json:"downstream_id,omitempty"`
-	DownstreamName string      `json:"downstream_name,omitempty"`
-	ClientIP       string      `json:"client_ip,omitempty"`
-	Status         int         `json:"status"`
+	ID             int    `json:"id"`
+	Timestamp      string `json:"timestamp"`
+	Path           string `json:"path"`
+	Method         string `json:"method"`
+	Model          string `json:"model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
+	DownstreamID   string `json:"downstream_id,omitempty"`
+	DownstreamName string `json:"downstream_name,omitempty"`
+	ClientIP       string `json:"client_ip,omitempty"`
+	Status         int    `json:"status"`
 	// RequestFormat is the API format of the client's incoming request
 	// (one of "openai", "anthropic", "openai_responses", "gemini", or "").
 	// The inspector UI uses it to pick the correct normaliser for the
@@ -455,7 +465,7 @@ type inspectResponse struct {
 	// URL path is no longer a reliable hint for the response shape.
 	// When empty, the UI falls back to deriving the format from the
 	// request path.
-	DownstreamFormat string `json:"downstream_format,omitempty"`
+	DownstreamFormat string      `json:"downstream_format,omitempty"`
 	Request          inspectBody `json:"request"`
 	Response         inspectBody `json:"response"`
 }

@@ -10,37 +10,44 @@ import (
 
 // PipelineStepConfig represents one step in a pipeline_config JSON array.
 type PipelineStepConfig struct {
-	PluginID string                 `json:"plugin_id"`
-	Config   map[string]interface{} `json:"config,omitempty"`
+	PluginID      string                 `json:"plugin_id"`
+	Config        map[string]interface{} `json:"config,omitempty"`
+	FailurePolicy string                 `json:"failure_policy,omitempty"`
 }
 
 // Pipeline describes the transformation steps for a matched rule.
 type Pipeline struct {
-	RequestSteps         []RequestTransformer
-	ResponseSteps        []ResponseTransformer
-	StreamResponseSteps  []StreamResponseTransformer
+	UpstreamSteps       []StreamResponseTransformer
+	ExternalSteps       []*ExternalPlugin
+	RequestSteps        []RequestTransformer
+	ResponseSteps       []ResponseTransformer
+	StreamResponseSteps []StreamResponseTransformer
 }
 
 // ExecuteRequestPipeline runs all request transformers sequentially.
 func ExecuteRequestPipeline(req *http.Request, body []byte, ctx *PipelineContext, steps []RequestTransformer) (*http.Request, []byte, error) {
+	ctx.execution().Phase, ctx.execution().Stage = "request", "request"
 	var err error
 	for i, t := range steps {
 		req, body, err = t.TransformRequest(req, body, ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("request transformer %d: %w", i, err)
 		}
+		advanceFormat(ctx, t, true)
 	}
 	return req, body, nil
 }
 
 // ExecuteResponsePipeline runs all response transformers sequentially.
 func ExecuteResponsePipeline(resp *http.Response, body []byte, ctx *PipelineContext, steps []ResponseTransformer) ([]byte, error) {
+	ctx.execution().Phase, ctx.execution().Stage = "response", "response_pipeline"
 	var err error
 	for i, t := range steps {
 		body, err = t.TransformResponse(resp, body, ctx)
 		if err != nil {
 			return nil, fmt.Errorf("response transformer %d: %w", i, err)
 		}
+		advanceFormat(ctx, t, false)
 	}
 	return body, nil
 }
@@ -58,8 +65,15 @@ func ExecuteStreamResponsePipeline(chunk SSEChunk, ctx *PipelineContext, steps [
 	return chunk, nil
 }
 
-// ParsePipelineConfig parses the JSON pipeline_config into a Pipeline of
-// transformer instances using the given registry.
+// IsInternalPlugin queries host-owned registry classification. It is not a
+// configurable pipeline property and remains stable across pinned snapshots.
+func IsInternalPlugin(registry PluginRegistry, id string) bool {
+	internal, ok := registry.(interface{ IsInternalPlugin(string) bool })
+	return ok && internal.IsInternalPlugin(id)
+}
+
+// ParsePipelineConfig builds a persisted user-rule pipeline. Legacy internal
+// converter steps are ignored; automatic conversion is constructed separately.
 func ParsePipelineConfig(jsonConfig string, registry PluginRegistry) (*Pipeline, error) {
 	if jsonConfig == "" || jsonConfig == "[]" {
 		return &Pipeline{}, nil
@@ -71,12 +85,44 @@ func ParsePipelineConfig(jsonConfig string, registry PluginRegistry) (*Pipeline,
 	}
 
 	p := &Pipeline{}
-	for _, step := range steps {
+	for index, step := range steps {
+		if IsInternalPlugin(registry, step.PluginID) {
+			continue
+		}
+		if step.FailurePolicy != "" && step.FailurePolicy != "fail_closed" && step.FailurePolicy != "safe_passthrough" {
+			return nil, fmt.Errorf("step %d: unknown failure_policy", index)
+		}
 		plugin, err := registry.CreatePlugin(step.PluginID, step.Config)
 		if err != nil {
 			return nil, fmt.Errorf("create plugin %s: %w", step.PluginID, err)
 		}
 
+		if external, ok := plugin.(*ExternalPlugin); ok {
+			external.stepIndex = index
+			external.failurePolicy = step.FailurePolicy
+			if step.FailurePolicy == "safe_passthrough" {
+				eligible, ok := external.runtime.(interface{ SafePolicyEligible() bool })
+				if !ok || !eligible.SafePolicyEligible() {
+					return nil, fmt.Errorf("step %d: safe_passthrough requires stateless buffered hooks", index)
+				}
+			}
+			p.ExternalSteps = append(p.ExternalSteps, external)
+			// Every step records the current request, even response-only plugins.
+			p.RequestSteps = append(p.RequestSteps, externalRequest{external})
+			if external.runtime.HasHook("response") {
+				p.ResponseSteps = append(p.ResponseSteps, externalResponse{external})
+			}
+			if external.runtime.HasHook("streamStart") || external.runtime.HasHook("streamEvent") || external.runtime.HasHook("streamEnd") {
+				p.StreamResponseSteps = append(p.StreamResponseSteps, externalStream{p: external})
+			}
+			if external.runtime.HasHook("upstreamStart") || external.runtime.HasHook("upstreamEvent") || external.runtime.HasHook("upstreamEnd") {
+				p.UpstreamSteps = append(p.UpstreamSteps, externalStream{p: external, upstream: true})
+			}
+			continue
+		}
+		if step.FailurePolicy == "safe_passthrough" {
+			return nil, fmt.Errorf("step %d: native plugins cannot use safe_passthrough", index)
+		}
 		if rt, ok := plugin.(RequestTransformer); ok {
 			p.RequestSteps = append(p.RequestSteps, rt)
 		}

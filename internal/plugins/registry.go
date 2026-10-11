@@ -2,8 +2,10 @@ package plugins
 
 import (
 	"fmt"
+	"sort"
 
 	"tresor/internal/engine"
+	"tresor/internal/jsplugins"
 )
 
 // registry holds all available plugin factories.
@@ -21,29 +23,6 @@ func NewRegistry() engine.PluginRegistry {
 	}
 
 	// Register built-in plugins
-	r.register("force_streaming", engine.PluginInfo{
-		ID:           "force_streaming",
-		Description:  "Force provider streaming for non-streaming generation requests, then collect the stream into a non-streaming response. Supports OpenAI Chat Completions, Anthropic Messages, OpenAI Responses and Gemini.",
-		ConfigSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
-	}, func(config map[string]interface{}) (interface{}, error) { return &ForceStreaming{}, nil })
-	r.register("custom_header", engine.PluginInfo{
-		ID:          "custom_header",
-		Description: "Injects custom HTTP headers into the forwarded request",
-		ConfigSchema: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"headers": map[string]interface{}{
-					"type":                 "object",
-					"description":          "Key-value pairs of HTTP headers to inject",
-					"additionalProperties": map[string]interface{}{"type": "string"},
-				},
-			},
-			"required": []interface{}{"headers"},
-		},
-	}, func(config map[string]interface{}) (interface{}, error) {
-		return NewCustomHeaderPlugin(config)
-	})
-
 	r.register("openai2anthropic", engine.PluginInfo{
 		ID:          "openai2anthropic",
 		Description: "Converts OpenAI Chat Completion requests to Anthropic Messages format",
@@ -53,58 +32,6 @@ func NewRegistry() engine.PluginRegistry {
 		},
 	}, func(config map[string]interface{}) (interface{}, error) {
 		return &OpenAI2Anthropic{}, nil
-	})
-
-	r.register("break_repeat", engine.PluginInfo{
-		ID:          "break_repeat",
-		Description: "Inserts a user reminder when the last three assistant messages are identical, breaking repetition loops in small models",
-		ConfigSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
-		},
-	}, func(config map[string]interface{}) (interface{}, error) {
-		return NewBreakRepeatPlugin(config)
-	})
-
-	r.register("fix_anthropic_images", engine.PluginInfo{
-		ID:          "fix_anthropic_images",
-		Description: "Fix the image reading capability for the Anthropic API of some providers (e.g., llama.cpp). Refer to https://github.com/ggml-org/llama.cpp/pull/22536",
-		ConfigSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
-		},
-	}, func(config map[string]interface{}) (interface{}, error) {
-		return &FixAnthropicImages{}, nil
-	})
-
-	r.register("fix_anthropic_system", engine.PluginInfo{
-		ID:           "fix_anthropic_system",
-		Description:  "Move system-role messages into Anthropic's top-level system field for Claude Cowork compatibility with llama.cpp/Qwen templates. Existing system instructions are preserved; response-only plugins such as remove_thinking are unaffected.",
-		ConfigSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
-	}, func(config map[string]interface{}) (interface{}, error) {
-		return &FixAnthropicSystem{}, nil
-	})
-
-	r.register("fix_anthropic_usage", engine.PluginInfo{
-		ID:          "fix_anthropic_usage",
-		Description: "Normalize the Anthropic Messages `usage` block: add missing cache_creation_input_tokens / cache_read_input_tokens fields in message_start, and synthesize a usage block in message_delta when the upstream omits it. Use with providers such as MiniMax-M3 whose usage reporting is incomplete.",
-		ConfigSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
-		},
-	}, func(config map[string]interface{}) (interface{}, error) {
-		return &FixAnthropicUsage{}, nil
-	})
-
-	r.register("remove_thinking", engine.PluginInfo{
-		ID:          "remove_thinking",
-		Description: "Removes 'thinking' / 'reasoning' content from downstream model responses across all 4 supported API formats (OpenAI Chat Completions, Anthropic Messages, OpenAI Responses API, Google Gemini). Also strips thinking_tokens from usage blocks.",
-		ConfigSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
-		},
-	}, func(config map[string]interface{}) (interface{}, error) {
-		return &RemoveThinking{}, nil
 	})
 
 	r.register("anthropic2openai", engine.PluginInfo{
@@ -235,13 +162,79 @@ func (r *registry) CreatePlugin(pluginID string, config map[string]interface{}) 
 	return factory(config)
 }
 
-// ListPlugins returns metadata about all registered plugins.
-func (r *registry) ListPlugins() []engine.PluginInfo {
-	plugins := make([]engine.PluginInfo, 0, len(r.info))
-	for _, info := range r.info {
-		plugins = append(plugins, info)
+// Native format converters are internal capabilities, not user-rule plugins.
+func (r *registry) IsInternalPlugin(id string) bool { _, ok := r.factories[id]; return ok }
+
+// ListPlugins returns only user-rule plugin metadata.
+func (r *registry) ListPlugins() []engine.PluginInfo { return []engine.PluginInfo{} }
+
+// NewManagedRegistry composes protected built-ins with live local JS packages.
+func NewManagedRegistry(manager *jsplugins.Manager) engine.PluginRegistry {
+	return &managedRegistry{builtin: NewRegistry(), manager: manager}
+}
+
+type managedRegistry struct {
+	builtin engine.PluginRegistry
+	manager *jsplugins.Manager
+}
+
+// Snapshot pins every package used by one request, including retries.
+func (r *managedRegistry) Snapshot() engine.PluginRegistry {
+	packages, unavailable := r.manager.ExecutionSnapshot()
+	return &packageSnapshot{builtin: r.builtin, packages: packages, unavailable: unavailable}
+}
+
+func (r *managedRegistry) CreatePlugin(id string, config map[string]interface{}) (interface{}, error) {
+	return r.Snapshot().CreatePlugin(id, config)
+}
+
+func (r *managedRegistry) IsInternalPlugin(id string) bool {
+	return engine.IsInternalPlugin(r.builtin, id)
+}
+func (r *managedRegistry) ListPlugins() []engine.PluginInfo { return r.Snapshot().ListPlugins() }
+
+type packageSnapshot struct {
+	builtin     engine.PluginRegistry
+	unavailable map[string]string
+	packages    map[string]*jsplugins.Package
+}
+
+func (r *packageSnapshot) CreatePlugin(id string, config map[string]interface{}) (interface{}, error) {
+	if reason := r.unavailable[id]; reason != "" {
+		return nil, fmt.Errorf("plugin %s %s", id, reason)
 	}
-	return plugins
+	if pkg, ok := r.packages[id]; ok {
+		instance, err := jsplugins.NewInstance(pkg, config)
+		if err != nil {
+			return nil, err
+		}
+		return engine.NewExternalPlugin(instance), nil
+	}
+	return r.builtin.CreatePlugin(id, config)
+}
+
+func (r *packageSnapshot) IsInternalPlugin(id string) bool {
+	return engine.IsInternalPlugin(r.builtin, id)
+}
+
+func (r *packageSnapshot) ListPlugins() []engine.PluginInfo {
+	result := r.builtin.ListPlugins()
+	for _, pkg := range r.packages {
+		m := pkg.Manifest
+		result = append(result, engine.PluginInfo{ID: m.ID, Description: m.Description, ConfigSchema: m.ConfigSchema})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+
+// BuiltinIDs returns all identities protected from local package overrides.
+func BuiltinIDs() []string {
+	var ids []string
+	for id := range NewRegistry().(*registry).factories {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // Ensure registry implements engine.PluginRegistry.

@@ -144,27 +144,27 @@ downstreams:
 		if err := json.NewDecoder(resp.Body).Decode(&plugins); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		want := []string{"openai2gemini", "anthropic2gemini", "gemini2openai", "gemini2anthropic"}
+
 		have := make(map[string]bool, len(plugins))
 		for _, p := range plugins {
 			if id, ok := p["id"].(string); ok {
 				have[id] = true
 			}
 		}
-		for _, id := range want {
-			if !have[id] {
-				t.Errorf("plugin %s not found in /api/plugins", id)
+		for _, id := range []string{"openai2gemini", "anthropic2gemini", "gemini2openai", "gemini2anthropic", "openai2anthropic", "anthropic2openai"} {
+			if have[id] {
+				t.Errorf("native converter %s must not appear in /api/plugins", id)
 			}
 		}
 	})
 
 	t.Run("CreateGeminiDownstream", func(t *testing.T) {
 		body := map[string]interface{}{
-			"id":              "test-gemini",
-			"name":            "Test Gemini",
-			"api_formats":     []string{"gemini"},
-			"base_url":        "http://127.0.0.1:9380",
-			"auth":            map[string]interface{}{"type": "api_key", "api_key": "gem-test-key"},
+			"id":               "test-gemini",
+			"name":             "Test Gemini",
+			"api_formats":      []string{"gemini"},
+			"base_url":         "http://127.0.0.1:9380",
+			"auth":             map[string]interface{}{"type": "api_key", "api_key": "gem-test-key"},
 			"output_model_ids": []string{},
 		}
 		b, _ := json.Marshal(body)
@@ -304,7 +304,7 @@ downstreams:
 			"model":      "gemini-2.5-pro",
 			"max_tokens": 100,
 			"system":     "You are helpful.",
-			"messages":    []map[string]interface{}{{"role": "user", "content": "Hi"}},
+			"messages":   []map[string]interface{}{{"role": "user", "content": "Hi"}},
 		}
 		b, _ := json.Marshal(body)
 		req, _ := http.NewRequest("POST", apiBase+"/v1/messages", bytes.NewReader(b))

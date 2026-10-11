@@ -17,6 +17,10 @@ type AppConfig struct {
 	DBPath        string `yaml:"db_path"`
 	AdminPassword string `yaml:"admin_password,omitempty"`
 
+	// PluginCacheDir stores trusted local JS packages and active versions.
+	// Empty defaults to tresor-plugins beside the database.
+	PluginCacheDir string `yaml:"plugin_cache_dir,omitempty"`
+
 	// ProxyMode controls how outbound requests to downstreams are proxied.
 	// Values: "auto" (default, Windows registry > env vars), "env" (env vars only),
 	// "windows" (Windows registry + env fallback), "none" (direct connection).
@@ -153,12 +157,12 @@ type DownstreamAuthCfg struct {
 	DeviceExchangeRedirect string `yaml:"device_redirect_uri,omitempty" json:"device_redirect_uri,omitempty"` // optional redirect_uri sent when exchanging the device authorization code
 
 	// oauth — common
-	ClientID        string            `yaml:"client_id,omitempty" json:"client_id,omitempty"`                  // optional for public clients
-	ClientSecret    string            `yaml:"client_secret,omitempty" json:"client_secret,omitempty"`          // required for confidential clients (sent as Basic auth on token requests)
-	Scopes          string            `yaml:"scopes,omitempty" json:"scopes,omitempty"`                        // space-separated, optional
+	ClientID        string            `yaml:"client_id,omitempty" json:"client_id,omitempty"`                           // optional for public clients
+	ClientSecret    string            `yaml:"client_secret,omitempty" json:"client_secret,omitempty"`                   // required for confidential clients (sent as Basic auth on token requests)
+	Scopes          string            `yaml:"scopes,omitempty" json:"scopes,omitempty"`                                 // space-separated, optional
 	ExtraAuthParams map[string]string `yaml:"extra_authorize_params,omitempty" json:"extra_authorize_params,omitempty"` // extra query params appended to the authorize URL
-	RefreshSkewSecs int               `yaml:"refresh_skew_secs,omitempty" json:"refresh_skew_secs,omitempty"`   // refresh ahead of expiry, default 120
-	ExtraHeaders    map[string]string `yaml:"extra_headers,omitempty" json:"extra_headers,omitempty"`           // static extra headers on LLM requests
+	RefreshSkewSecs int               `yaml:"refresh_skew_secs,omitempty" json:"refresh_skew_secs,omitempty"`           // refresh ahead of expiry, default 120
+	ExtraHeaders    map[string]string `yaml:"extra_headers,omitempty" json:"extra_headers,omitempty"`                   // static extra headers on LLM requests
 
 	// OAuthProvider is a transient field used only during startup migration of
 	// old configs: it carries the name of the recipe in the old top-level
@@ -248,8 +252,9 @@ type RuleCfg struct {
 
 // PipelineStep is one transformer in a rule's pipeline.
 type PipelineStep struct {
-	PluginID string                 `json:"plugin_id" yaml:"plugin_id"`
-	Config   map[string]interface{} `json:"config,omitempty" yaml:"config,omitempty"`
+	PluginID      string                 `json:"plugin_id" yaml:"plugin_id"`
+	Config        map[string]interface{} `json:"config,omitempty" yaml:"config,omitempty"`
+	FailurePolicy string                 `json:"failure_policy,omitempty" yaml:"failure_policy,omitempty"`
 }
 
 // AliasGroupCfg defines an alias group: one input model mapped to a list of
@@ -300,7 +305,7 @@ func Load(configPath string) (*AppConfig, error) {
 	// struct whose fields are exported. The legacy values are aligned to the
 	// primary config by slice index (same order in the YAML).
 	var legacyRaw struct {
-		Downstreams    []struct {
+		Downstreams []struct {
 			LegacyAPIKey string `yaml:"api_key"`
 		} `yaml:"downstreams"`
 		OAuthProviders []OAuthProviderCfg `yaml:"oauth_providers"`
@@ -345,6 +350,9 @@ func Load(configPath string) (*AppConfig, error) {
 	}
 	if cfg.IconCacheDir != "" {
 		cfg.IconCacheDir = expandTilde(cfg.IconCacheDir)
+	}
+	if cfg.PluginCacheDir != "" {
+		cfg.PluginCacheDir = expandTilde(cfg.PluginCacheDir)
 	}
 
 	// Initialize empty slices to avoid nil

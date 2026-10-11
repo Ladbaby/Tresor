@@ -54,8 +54,7 @@ rules:                          # Routing rules (OPTIONAL — only for transform
     match_format: [openai]      # Match input request format
     match_downstream_format: [anthropic]  # Match downstream API format
     match_downstreams: [my-provider]      # Match specific downstreams
-    pipeline_config:            # Transformation steps
-      - plugin_id: openai2anthropic
+    pipeline_config: []         # Optional installed user plugins; format conversion is automatic
     is_enabled: true
 
 aliases:                        # Model name mappings (hot-switchable, ordered by array position)
@@ -115,7 +114,8 @@ The codebase follows a clean layered structure with three core concerns:
 | `internal/config/` | YAML configuration loader with auto-detect path resolution |
 | `internal/store/` | SQLite data layer: `store.go` (schema/migrations/upsert), `rule.go` (CRUD + matching), `downstream.go` (CRUD + model IDs), `alias.go` (alias CRUD + grouping) |
 | `internal/engine/` | Core gateway handler: `engine.go` (proxy, model resolution, auto-translation, model listing, retry on empty response), `pipeline.go` (transformer orchestration), `retry.go` (empty response detection + retry with backoff), `types.go` (interfaces), `logger.go` (request logging + SSE) |
-| `internal/plugins/` | Plugin registry and built-in transformers: `registry.go`, `custom_header.go`, `openai2anthropic.go`, `anthropic2openai.go`, `fix_anthropic_images.go`, `anthropic_usage_fix.go`, `openai2responses.go`, `responses2openai.go`, `responses2anthropic.go`, `anthropic2responses.go` |
+| `internal/plugins/` | Composite registry and eleven native format converters; non-converters are external JS packages, not native factories |
+| `internal/jsplugins/` | API V2 CommonJS runtime, manifests/source digests, advisory AST lint, immutable cache, approved logging, HTTPS bundle verification, permissions and provenance |
 | `internal/api/` | Admin REST API: `router.go` (routing + auth), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list + model fetch), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE + log level), `config.go` (runtime config), `icons.go` (model icon serving), `icons_admin.go` (icon refresh), `embed.go` (embedded web UI) |
 | `internal/middleware/` | Cookie-based session auth middleware for admin API (with rate limiting and multi-session support) |
 | `internal/icons/` | Model icon fetching, pattern matching, and CDN caching via `@lobehub/icons-static-svg` |
@@ -147,13 +147,10 @@ The codebase follows a clean layered structure with three core concerns:
 
 ### Plugin System
 
-Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing requests), `ResponseTransformer` (modifies incoming responses), and `StreamResponseTransformer` (transforms SSE events). Fourteen built-in plugins exist:
+Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing requests), `ResponseTransformer` (modifies incoming responses), and `StreamResponseTransformer` (transforms SSE events). Eleven built-in format converters exist:
 
-- **custom_header**: Injects arbitrary HTTP headers into forwarded requests
 - **openai2anthropic**: Converts OpenAI Chat Completion format to Anthropic Messages format (and vice versa for responses)
-- **fix_anthropic_images**: Extracts image parts from tool_result.content[] and promotes them to top-level message content for Anthropic-compatible backends
 - **anthropic2openai**: Converts Anthropic Messages format to OpenAI Chat Completion format (and vice versa for responses)
-- **fix_anthropic_usage**: Normalizes the Anthropic Messages `usage` block — adds missing `cache_creation_input_tokens` / `cache_read_input_tokens` fields in `message_start` and synthesizes a `usage` block in `message_delta` when the upstream omits it (for providers such as MiniMax-M3 with incomplete usage reporting)
 - **responses2openai**: Converts OpenAI Responses API format to Chat Completions format (and vice versa)
 - **responses2anthropic**: Converts OpenAI Responses API format to Anthropic Messages format (and vice versa)
 - **openai2responses**: Converts OpenAI Chat Completion format to Responses API format
@@ -164,7 +161,14 @@ Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing request
 - **gemini2anthropic**: Converts Google Gemini generateContent format to Anthropic Messages format (and vice versa)
 - **gemini2responses**: Converts Google Gemini generateContent format to OpenAI Responses API format (and vice versa)
 
-Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plugin_id": "...", "config": {...}}]`
+
+External packages use API V2 (`internal/jsplugins/api.d.ts`): immutable `context` distinguishes client/downstream/current formats, requested versus observed HTTP/SSE transport, stage, phase and effective limits. Explicit `upstreamStart/Event/End` hooks process upstream SSE before collection or regular response-event transforms; ordinary stream hooks are not automatically run before collection. Error termination receives sanitized failure metadata and statistics; finish always releases managed storage. 
+
+Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plugin_id": "...", "config": {...}, "failure_policy": "fail_closed"}]`. Missing policy defaults to fail-closed. External-only `safe_passthrough` uses a fresh VM/state per eligible request/header/buffered-response hook; ordinary exceptions preserve the failed hook's input and disable the step for the attempt. Prior successful effects remain. Stream/upstream/collector/finish packages are ineligible; invalid effects, security/resource/deadline faults always fail closed. YAML write-back preserves policy.
+
+Package management and author tools: `plugin lint <dir> [--json] [--strict]`, `plugin pack <dir> --output <new-file>`, `plugin install <dir>`, `plugin install-url <https-url> [--sha256 <canonical-source-digest>] [--signature <base64> --public-key <base64>]`, `plugin approve|revoke <id> <version> <digest> <permission...>`, and `plugin activate <id> <version>`. Lint/pack do not execute JS. Installation, approval and activation are separate. Only `log.v1` is supported; requests need both feature and permission declarations plus an exact-digest grant. In-flight requests/retries pin grants; revocation blocks new snapshots immediately. Logging permits bounded codes and numeric/boolean fields only; it cannot detect malicious secret encoding in trusted code.
+
+Rules includes one Plugins inventory with descriptions/config schemas, provenance, version status and separate activation. Install from a URL or drop/select one `plugin pack` JSON bundle (8 MiB local request limit), with confirmation and no implicit activation/grants; omit the admin-auth-disabled UI warning. Native converters are internal-only: omitted from discovery/candidates, rejected in newly supplied user pipelines and skipped in persisted legacy rule steps. Rule GET/list reports ignored indices; editor explains/removes these only on next save, preserving other unavailable steps. Automatic translation remains host-owned, including a Responses→OpenAI→Gemini chain. HTTPS downloads always compute the source digest; optional caller-supplied expected digest/Ed25519 signature checks complete before JS evaluation. URL-only unsigned provenance is not marked verified; users trust the HTTPS source. Current outbound proxy mode is captured at operation start. Direct DNS addresses are checked and pinned, but configured proxies are administrator-trusted routing/DNS boundaries. Sources, selection, grants and provenance are cache metadata, not YAML. Request diagnostics (identity, rule-local step, hook/attempt, counts, safe codes and cleanup failures) publish after cleanup and appear in Logs independently of payload capture. 
 
 **Auto-translation:** When input format (detected from path) differs from downstream format, the engine automatically inserts the appropriate transformer without any rule needed.
 
@@ -193,7 +197,12 @@ Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plu
 | POST | `/api/downstreams/{id}/models` | Add a model ID to downstream |
 | DELETE | `/api/downstreams/{id}/models/{model_id}` | Remove a model ID from downstream |
 | POST | `/api/downstreams/{id}/fetch-models` | Auto-discover models from provider |
-| GET | `/api/plugins` | List registered plugins |
+| GET | `/api/plugins` | List executable native and selected approved external plugins |
+| GET | `/api/plugin-packages` | List installed versions, digest, provenance, grants, selected/executable/blocked status |
+| POST | `/api/plugin-packages/install` | Install local `{files: {...}}` source without activating |
+| POST | `/api/plugin-packages/install-remote` | Install trusted HTTPS `{url, sha256?, signature?, public_key?}` bundle without approval/activation |
+| POST | `/api/plugin-packages/approve`, `/api/plugin-packages/revoke` | Explicit `{id, version, digest, permissions}` grants; JSON/auth/cross-origin checks |
+| POST | `/api/plugin-packages/activate` | Select installed compatible approved `{id, version}` |
 | GET | `/api/aliases` | List all alias groups (grouped view, ordered by group_order) |
 | POST | `/api/aliases` | Create a new alias option |
 | POST | `/api/aliases/reorder` | Reorder groups: `{"order": ["gpt-4o", "claude-sonnet"]}` |

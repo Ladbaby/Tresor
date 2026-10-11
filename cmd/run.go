@@ -16,6 +16,7 @@ import (
 	"tresor/internal/engine"
 	"tresor/internal/icons"
 	"tresor/internal/inspect"
+	"tresor/internal/jsplugins"
 	"tresor/internal/oauth"
 	"tresor/internal/plugins"
 	"tresor/internal/proxy"
@@ -88,8 +89,16 @@ func runDaemon(cfg *config.AppConfig) error {
 		log.Printf("warning: usage_stats purge failed: %v", err)
 	}
 
-	// Initialize plugin registry and attach to engine
-	reg := plugins.NewRegistry()
+	// Load trusted local packages once; activation publishes immutable snapshots.
+	pluginCacheDir := cfg.PluginCacheDir
+	if pluginCacheDir == "" {
+		pluginCacheDir = filepath.Join(filepath.Dir(cfg.DBPath), "tresor-plugins")
+	}
+	pluginManager, err := jsplugins.NewManager(pluginCacheDir, plugins.BuiltinIDs())
+	if err != nil {
+		return fmt.Errorf("init JS plugin manager: %w", err)
+	}
+	reg := plugins.NewManagedRegistry(pluginManager)
 	eng.SetRegistry(reg)
 
 	// Configure outbound proxy for downstream requests
@@ -156,6 +165,7 @@ func runDaemon(cfg *config.AppConfig) error {
 	// Build admin API router
 	adminRouter := api.NewRouter(s, eng, logger, payloadStore, iconFetcher, cfg, Version, BuildTime)
 	adminRouter.SetOAuthManager(oauthMgr)
+	adminRouter.SetPluginManager(pluginManager)
 	webHandler := api.WebHandler()
 
 	// Configure retry-on-empty setting on the engine

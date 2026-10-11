@@ -24,12 +24,21 @@ func startTresor(t *testing.T, cfg string, port int) (apiBase string, cleanup fu
 	if err != nil {
 		t.Fatalf("temp dir: %v", err)
 	}
+	if !strings.Contains(cfg, "plugin_cache_dir:") {
+		cfg = fmt.Sprintf("plugin_cache_dir: %s\n%s", filepath.ToSlash(filepath.Join(tmpDir, "plugin-cache")), cfg)
+	}
+	if !strings.Contains(cfg, "icon_cache_dir:") {
+		cfg = fmt.Sprintf("icon_cache_dir: %s\n%s", filepath.ToSlash(filepath.Join(tmpDir, "icon-cache")), cfg)
+	}
 	cfgPath := filepath.Join(tmpDir, "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0644); err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("write config: %v", err)
 	}
-	binary, _ := filepath.Abs("../tresor.exe")
+	binary := os.Getenv("TRESOR_TEST_BINARY")
+	if binary == "" {
+		binary, _ = filepath.Abs("../tresor.exe")
+	}
 	cmd := exec.Command(binary, "run", "--config", cfgPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

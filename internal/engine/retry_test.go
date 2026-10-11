@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,68 @@ import (
 
 	"tresor/internal/inspect"
 )
+
+// retryBoundaryPlugin makes accidental reuse of transformed input observable.
+type retryBoundaryPlugin struct {
+	requests int
+}
+
+func (p *retryBoundaryPlugin) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+	p.requests++
+	if req.Header.Get("X-Attempt") != "" || ctx.Variables["attempt-marker"] != nil {
+		return nil, nil, fmt.Errorf("retry reused transformed state")
+	}
+	if string(body) != `{"model":"retry-model","messages":[]}` {
+		return nil, nil, fmt.Errorf("retry reused transformed body: %s", body)
+	}
+	ctx.Variables["attempt-marker"] = true
+	req.Header.Set("X-Attempt", "fresh")
+	return req, []byte(`{"model":"retry-model","messages":[],"changed":true}`), nil
+}
+
+func (p *retryBoundaryPlugin) CreatePlugin(string, map[string]interface{}) (interface{}, error) {
+	return p, nil
+}
+func (*retryBoundaryPlugin) ListPlugins() []PluginInfo { return nil }
+
+func TestEngine_RetryUsesPristineRequestAndSingleFinalLog(t *testing.T) {
+	s := newTestStore(t)
+	var attempts int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		body, _ := io.ReadAll(r.Body)
+		if r.Header.Get("X-Attempt") != "fresh" || !bytes.Contains(body, []byte(`"changed":true`)) {
+			t.Errorf("missing transform on attempt %d: %s", attempts, body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if attempts == 1 {
+			fmt.Fprint(w, `{"choices":[]}`)
+		} else {
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		}
+	}))
+	defer ts.Close()
+	addDownstream(t, s, "retry-ds", "retry-ds", ts.URL, "test-key", "openai")
+	addOutputModelIDs(t, s, "retry-ds", "retry-model")
+	addRule(t, s, "retry-rule", "Retry boundary", "*", "", "retry-ds", `[{"plugin_id":"retry-boundary","config":{}}]`, true)
+	eng := New(s)
+	defer eng.Stop()
+	plugin := &retryBoundaryPlugin{}
+	eng.SetRegistry(plugin)
+	eng.SetRetryOnEmpty(true)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"retry-model","messages":[]}`))
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, req)
+	if w.Code != 200 || attempts != 2 || plugin.requests != 2 {
+		t.Fatalf("status=%d attempts=%d requests=%d body=%s", w.Code, attempts, plugin.requests, w.Body.String())
+	}
+	if req.Header.Get("X-Attempt") != "" {
+		t.Fatal("original headers mutated")
+	}
+	if entries := eng.GetLogger().RecentEntries(10); len(entries) != 1 {
+		t.Fatalf("expected one final log, got %d", len(entries))
+	}
+}
 
 // TestCalculateBackoff verifies the exponential backoff curve, the max-delay
 // cap, and that the result is always at least the base delay.

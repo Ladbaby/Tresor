@@ -641,3 +641,45 @@ func isTerminalEvent(data string, format string) bool {
 		return false
 	}
 }
+
+// isResponseEmpty checks if a raw upstream response body contains no useful
+// content for the given downstream API format.
+func (e *Engine) isResponseEmpty(body []byte, downstreamFormat string) bool {
+	switch downstreamFormat {
+	case "openai":
+		return IsOpenAIChatEmpty(body)
+	case "anthropic":
+		return IsAnthropicEmpty(body)
+	case "openai_responses":
+		return IsOpenAIResponsesEmpty(body)
+	case "gemini":
+		return IsGeminiEmpty(body)
+	default:
+		return false // unknown format, assume not empty
+	}
+}
+
+// shouldRetry determines whether the gateway should retry a failed request.
+// Returns true only if the response meets ALL retry conditions:
+//   - HTTP status is 200 (OK)
+//   - The request path is a generation endpoint (retry_on_empty is
+//     generation-only; utility endpoints like /v1/messages/count_tokens
+//     serve structured data that lacks a `content` field and must not be
+//     classified as empty — see count-tokens-trigger-empty-response.txt)
+//   - The response body is empty for the downstream's API format
+//
+// Non-200 responses are never retried — LLM client apps handle their own
+// retries for HTTP errors (4xx client errors, 5xx server errors), and
+// retrying those is out of Tresor's scope.
+//
+// This method is designed to be extensible for future retry conditions
+// (e.g., retry on 429 rate limits, retry on specific error messages).
+func (e *Engine) shouldRetry(resp *http.Response, body []byte, downstreamFormat string, path string) bool {
+	if resp.StatusCode != http.StatusOK {
+		return false // non-200 responses are not retried
+	}
+	if !isGenerationEndpoint(path) {
+		return false // utility endpoints don't produce conversational content
+	}
+	return e.isResponseEmpty(body, downstreamFormat)
+}

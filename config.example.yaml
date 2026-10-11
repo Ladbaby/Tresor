@@ -46,6 +46,9 @@ retry_on_empty: false
 # Tilde (~) is expanded to the user's home directory.
 icon_cache_dir: "~/.config/tresor/tresor-icons/"
 
+# Trusted local JavaScript plugins.
+plugin_cache_dir: "~/.config/tresor/tresor-plugins/"
+
 # Downstream LLM providers
 # Example downstreams below. You can add more providers using similar format.
 downstreams:
@@ -176,16 +179,6 @@ downstreams:
 #
 # Uncomment to enable optional rules:
 # rules:
-# Example: Fix the image reading problem in Claude Code + llama.cpp. Refer to https://github.com/ggml-org/llama.cpp/pull/22536
-    # - id: anthropic_image_fix
-    #   name: Anthropic Image Fix
-    #   pattern_path: '*'
-    #   match_format:
-    #     - anthropic
-    #   pipeline_config:
-    #     - plugin_id: fix_anthropic_images
-    #   is_enabled: true
-
 # Example: Route OpenAI chat completions through a custom header transformer
 #  - id: chat-custom-header
 #    name: Chat with Custom Header

@@ -292,17 +292,27 @@
                         <tbody id="rules-body"></tbody>
                     </table>
 
-                    <h2 style="margin-top:2rem">Available Plugins</h2>
-                    <table id="plugins-table">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Description</th>
-                                <th>Config Schema</th>
-                            </tr>
-                        </thead>
-                        <tbody id="plugins-body"></tbody>
-                    </table>
+                    <h2 style="margin-top:2rem">Plugins</h2>
+                    <p class="package-help">Install code only from sources you trust. Installation does not activate a plugin. API format conversion is automatic and internal.</p>
+                    <details class="package-install"><summary>Install a remote plugin</summary>
+                        <form id="package-remote-form">
+                            <label for="package-url">HTTPS bundle URL</label>
+                            <div class="package-install-controls">
+                                <input id="package-url" type="url" placeholder="https://raw.githubusercontent.com/owner/repo/tag/dist/plugin.bundle.json" required>
+                                <button type="submit" class="btn-primary">Install plugin</button>
+                            </div>
+                        </form>
+                    </details>
+                    <div id="plugin-drop-zone" class="plugin-drop-zone" aria-labelledby="plugin-local-help">
+                        <p id="plugin-local-help">Drag one plugin JSON bundle here, or choose a file. Maximum 8 MiB.</p>
+                        <input id="plugin-bundle-file" type="file" accept=".json,application/json" hidden>
+                        <button id="plugin-bundle-choose" type="button" class="btn-small">Choose bundle</button>
+                    </div>
+                    <p id="package-management-status" role="status"></p>
+                    <p id="plugin-incompatibility" class="hidden" role="status"></p>
+                    <div class="plugin-table-scroll">
+                        <table id="packages-table"><thead><tr><th>Plugin</th><th>Description / config</th><th>Source</th><th>Permissions / status</th><th>Actions</th></tr></thead><tbody id="package-management-body"></tbody></table>
+                    </div>
 
                     <!-- Rule Editor Modal -->
                     <div id="rule-modal" class="modal hidden">
@@ -346,6 +356,7 @@
 
                                 <label>Pipeline Transformers:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Ordered list of plugins that transform the request/response. Order matters.">?</span>
                                     <div id="pipeline-editor">
+                                        <p id="rule-internal-steps" class="package-help" role="status" hidden></p>
                                         <div id="pipeline-steps"></div>
                                         <button type="button" class="btn-small" id="btn-add-step" style="margin-top:0.3rem">+ Add Step</button>
                                     </div>

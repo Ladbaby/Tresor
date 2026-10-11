@@ -15,13 +15,13 @@ import (
 	"tresor/internal/store"
 )
 
-// mockRegistryImpl supports creating custom_header, pass-through, and translation plugins.
+// mockRegistryImpl supports creating test_headers, pass-through, and translation plugins.
 type mockRegistryImpl struct{}
 
 func (m *mockRegistryImpl) CreatePlugin(pluginID string, config map[string]interface{}) (interface{}, error) {
 	switch pluginID {
-	case "custom_header":
-		return &mockCustomHeader{Config: config}, nil
+	case "test_headers":
+		return &mockNativeHeaders{Config: config}, nil
 	case "pass_through":
 		return &mockPassThrough{}, nil
 	case "openai2anthropic":
@@ -57,12 +57,13 @@ func (m *mockRegistryImpl) ListPlugins() []PluginInfo {
 	return nil
 }
 
-// mockCustomHeader injects headers from config.
-type mockCustomHeader struct {
+// mockNativeHeaders is a test-only native transformer for forwarding regressions.
+// External JS plugins instead use validated patches and cannot override auth.
+type mockNativeHeaders struct {
 	Config map[string]interface{}
 }
 
-func (m *mockCustomHeader) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
+func (m *mockNativeHeaders) TransformRequest(req *http.Request, body []byte, ctx *PipelineContext) (*http.Request, []byte, error) {
 	if headers, ok := m.Config["headers"].(map[string]interface{}); ok {
 		for k, v := range headers {
 			if vs, ok := v.(string); ok {
@@ -471,9 +472,9 @@ func TestEngine_HandleProxy_ModelPriority(t *testing.T) {
 	addOutputModelIDs(t, s, "ds1", "gpt-4o")
 
 	// Path-only rule (lower priority) - sets X-Priority: path-only
-	addRule(t, s, "r1", "PathOnly", "/v1/chat/completions", "", "ds1", `[{"plugin_id":"custom_header","config":{"headers":{"X-Priority":"path-only"}}}]`, true)
+	addRule(t, s, "r1", "PathOnly", "/v1/chat/completions", "", "ds1", `[{"plugin_id":"test_headers","config":{"headers":{"X-Priority":"path-only"}}}]`, true)
 	// Path+model rule (higher priority) - sets X-Priority: model-specific
-	addRule(t, s, "r2", "ModelSpecific", "/v1/chat/completions", "gpt-4o", "ds1", `[{"plugin_id":"custom_header","config":{"headers":{"X-Priority":"model-specific"}}}]`, true)
+	addRule(t, s, "r2", "ModelSpecific", "/v1/chat/completions", "gpt-4o", "ds1", `[{"plugin_id":"test_headers","config":{"headers":{"X-Priority":"model-specific"}}}]`, true)
 
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryImpl{})
@@ -507,7 +508,7 @@ func TestEngine_HandleProxy_PipelineRuns(t *testing.T) {
 	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1")
 	addOutputModelIDs(t, s, "ds1", "gpt-4o")
 	addRule(t, s, "r1", "Debug", "*", "", "ds1",
-		`[{"plugin_id":"custom_header","config":{"headers":{"X-Debug":"true"}}}]`, true)
+		`[{"plugin_id":"test_headers","config":{"headers":{"X-Debug":"true"}}}]`, true)
 
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryImpl{})
@@ -551,7 +552,7 @@ func TestEngine_HandleProxy_AuthHeaderConflict(t *testing.T) {
 	addOutputModelIDs(t, s, "ds1", "gpt-4o")
 	// Pipeline sets x-api-key — engine should NOT add Bearer default-key
 	addRule(t, s, "r1", "CustomAuth", "*", "", "ds1",
-		`[{"plugin_id":"custom_header","config":{"headers":{"x-api-key":"override-key"}}}]`, true)
+		`[{"plugin_id":"test_headers","config":{"headers":{"x-api-key":"override-key"}}}]`, true)
 
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryImpl{})
@@ -1960,6 +1961,116 @@ func TestEngine_HandleProxy_GeminiModelsListing_PageSize(t *testing.T) {
 	}
 	if len(payload.Models) != 2 {
 		t.Errorf("expected 2 models with pageSize=2, got %d", len(payload.Models))
+	}
+}
+
+func TestEngine_HandleProxy_ModelListingsDedupCharacterization(t *testing.T) {
+	s := newTestStore(t)
+	addDownstream(t, s, "a-enabled", "EnabledA", "http://example.invalid", "key", "openai")
+	addOutputModelIDs(t, s, "a-enabled", "shared", "models/prefixed", "output-only")
+	addDownstream(t, s, "b-enabled", "EnabledB", "http://example.invalid", "key", "gemini")
+	addOutputModelIDs(t, s, "b-enabled", "shared", "models/prefixed")
+	if err := s.CreateDownstream(&store.Downstream{ID: "disabled", Name: "Disabled", BaseURL: "http://example.invalid", Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key"}, ApiFormats: []string{"openai"}, OutputModelIDs: []string{"hidden-downstream", "hidden-shared"}, IsEnabled: false}); err != nil {
+		t.Fatalf("create disabled downstream: %v", err)
+	}
+	disabled, err := s.GetDownstream("disabled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled.IsEnabled = false
+	if err := s.UpdateDownstream(disabled); err != nil {
+		t.Fatal(err)
+	}
+	addAlias(t, s, "alias-input", "a-enabled", "alias-output", false)
+	if err := s.CreateAlias(&store.Alias{ID: "regex-option", InputModelID: "^catalog-.*$", DownstreamID: "a-enabled", OutputModelID: "catalog-model", IsRegex: true, AnnouncedNames: []string{"catalog-announced", "catalog-model"}}); err != nil {
+		t.Fatalf("create regex alias: %v", err)
+	}
+	addAlias(t, s, "hidden-alias", "disabled", "hidden-output", false)
+
+	eng := New(s)
+	eng.SetRegistry(&mockRegistryImpl{})
+	openAIReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	openAIRec := httptest.NewRecorder()
+	eng.HandleProxy(openAIRec, openAIReq)
+	var openAI struct {
+		Data []struct {
+			ID      string         `json:"id"`
+			OwnedBy string         `json:"owned_by"`
+			Meta    map[string]any `json:"meta"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(openAIRec.Result().Body).Decode(&openAI); err != nil {
+		t.Fatalf("decode OpenAI listing: %v", err)
+	}
+	openAIByID := make(map[string]struct {
+		OwnedBy string
+		Source  any
+	})
+	for _, m := range openAI.Data {
+		openAIByID[m.ID] = struct {
+			OwnedBy string
+			Source  any
+		}{m.OwnedBy, m.Meta["source"]}
+	}
+	for _, id := range []string{"shared", "models/prefixed", "output-only", "alias-input", "alias-output", "catalog-announced", "catalog-model"} {
+		if _, ok := openAIByID[id]; !ok {
+			t.Errorf("OpenAI listing missing %q", id)
+		}
+	}
+	for _, id := range []string{"hidden-downstream", "hidden-shared", "hidden-alias", "hidden-output", "^catalog-.*$"} {
+		if _, ok := openAIByID[id]; ok {
+			t.Errorf("OpenAI listing unexpectedly contains %q", id)
+		}
+	}
+	if got := openAIByID["shared"].OwnedBy; got != "a-enabled" {
+		t.Errorf("OpenAI shared attribution = %q, want first downstream a-enabled", got)
+	}
+	if got := openAIByID["shared"].Source; got != "downstream" {
+		t.Errorf("OpenAI shared source = %v, want downstream", got)
+	}
+	if got := openAIByID["catalog-model"].Source; got != "alias" {
+		t.Errorf("OpenAI announced/output collision source = %v, want alias", got)
+	}
+
+	geminiReq := httptest.NewRequest(http.MethodGet, "/v1beta/models?pageSize=100", nil)
+	geminiRec := httptest.NewRecorder()
+	eng.HandleProxy(geminiRec, geminiReq)
+	var gemini struct {
+		Models []struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"displayName"`
+			Description string `json:"description"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(geminiRec.Result().Body).Decode(&gemini); err != nil {
+		t.Fatalf("decode Gemini listing: %v", err)
+	}
+	geminiByName := make(map[string]struct{ DisplayName, Description string })
+	for _, m := range gemini.Models {
+		geminiByName[m.Name] = struct{ DisplayName, Description string }{m.DisplayName, m.Description}
+	}
+	for _, id := range []string{"shared", "models/prefixed", "output-only", "alias-input", "catalog-announced", "catalog-model"} {
+		name := id
+		if !strings.HasPrefix(name, "models/") {
+			name = "models/" + name
+		}
+		if _, ok := geminiByName[name]; !ok {
+			t.Errorf("Gemini listing missing %q", name)
+		}
+	}
+	for _, id := range []string{"hidden-downstream", "hidden-shared", "hidden-alias", "hidden-output", "alias-output", "^catalog-.*$"} {
+		if _, ok := geminiByName["models/"+id]; ok {
+			t.Errorf("Gemini listing unexpectedly contains %q", id)
+		}
+	}
+	if got := geminiByName["models/shared"].Description; got != "via EnabledA" {
+		t.Errorf("Gemini shared attribution = %q, want first downstream", got)
+	}
+	if got := geminiByName["models/prefixed"].DisplayName; got != "models/prefixed" {
+		t.Errorf("prefixed Gemini displayName = %q", got)
+	}
+	if got := geminiByName["models/catalog-model"].Description; got != "via EnabledA (alias for catalog-model)" {
+		t.Errorf("Gemini announced/output collision attribution = %q", got)
 	}
 }
 
