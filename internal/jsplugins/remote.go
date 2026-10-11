@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"tresor/internal/proxy"
@@ -118,14 +119,37 @@ func downloadBundle(ctx context.Context, input RemoteInput, mode proxy.Mode, res
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	ips, err := resolve(ctx, u.Hostname())
-	if err != nil || len(ips) == 0 {
-		return nil, fmt.Errorf("destination resolution failed")
-	}
-	for _, ip := range ips {
-		if !publicIP(ip.IP) {
-			return nil, fmt.Errorf("non-public package destination prohibited")
+	// Pins are immutable once established, including when a chain revisits a
+	// hostname. Transport dialing can run concurrently with redirect checks.
+	var pinsMu sync.RWMutex
+	pins := make(map[string][]net.IPAddr)
+	validateDestination := func(target *url.URL) error {
+		if target.Scheme != "https" || target.Hostname() == "" || target.User != nil || target.Fragment != "" || target.Opaque != "" || len(target.String()) > 4096 {
+			return fmt.Errorf("public HTTPS URL without credentials/fragment required")
 		}
+		host := strings.ToLower(target.Hostname())
+		pinsMu.RLock()
+		_, pinned := pins[host]
+		pinsMu.RUnlock()
+		if pinned {
+			return nil
+		}
+		ips, err := resolve(ctx, target.Hostname())
+		if err != nil || len(ips) == 0 {
+			return fmt.Errorf("destination resolution failed")
+		}
+		for _, ip := range ips {
+			if !publicIP(ip.IP) {
+				return fmt.Errorf("non-public package destination prohibited")
+			}
+		}
+		pinsMu.Lock()
+		pins[host] = ips
+		pinsMu.Unlock()
+		return nil
+	}
+	if err := validateDestination(u); err != nil {
+		return nil, err
 	}
 	transport := &http.Transport{Proxy: proxy.ProxyFunc(mode), DisableCompression: true, MaxResponseHeaderBytes: 64 << 10, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second}
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -133,7 +157,10 @@ func downloadBundle(ctx context.Context, input RemoteInput, mode proxy.Mode, res
 		if err != nil {
 			return nil, err
 		}
-		if strings.EqualFold(host, u.Hostname()) {
+		pinsMu.RLock()
+		ips, pinned := pins[strings.ToLower(host)]
+		pinsMu.RUnlock()
+		if pinned {
 			var last error
 			for _, ip := range ips {
 				conn, e := dial(ctx, network, net.JoinHostPort(ip.IP.String(), port))
@@ -151,7 +178,16 @@ func downloadBundle(ctx context.Context, input RemoteInput, mode proxy.Mode, res
 		configure(transport)
 	}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("package redirects prohibited") }}
+	var redirectErr error
+	client := &http.Client{Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) > 5 {
+			redirectErr = fmt.Errorf("package redirect limit exceeded (maximum 5)")
+		} else if err := validateDestination(req.URL); err != nil {
+			redirectErr = fmt.Errorf("package redirect rejected: %w", err)
+		}
+		return redirectErr
+	}}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("invalid download request")
@@ -160,6 +196,10 @@ func downloadBundle(ctx context.Context, input RemoteInput, mode proxy.Mode, res
 	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(req)
 	if err != nil {
+		// Do wraps errors with the URL, which may contain signed query secrets.
+		if redirectErr != nil {
+			return nil, redirectErr
+		}
 		return nil, fmt.Errorf("package download failed")
 	}
 	defer resp.Body.Close()
