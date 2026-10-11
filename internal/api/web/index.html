@@ -328,7 +328,6 @@
                                 <label>Pattern Models:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Leave empty to match any model. Select one or more known model names that can trigger this rule (OR logic — any match fires the rule). Suggestions are drawn from downstream output model IDs, active alias input model IDs, regex alias patterns, and announced names.">?</span>
                                     <div id="rule-match-models" class="model-multi-select rule-model-multi-select"></div>
                                 </label>
-                                <p class="text-muted">Leave empty to match any model.</p>
 
                                 <!-- Match Input Format -->
                                 <label>Match Input Format:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Only apply when the incoming client request uses this format. Leave empty to match any.">?</span></label>
@@ -338,7 +337,6 @@
                                     <label class="format-checkbox"><input type="checkbox" name="match_input_format" value="anthropic"><img class="format-icon icon-anthropic" src="icons/anthropic.svg" alt="" aria-hidden="true"> Anthropic</label>
                                     <label class="format-checkbox"><input type="checkbox" name="match_input_format" value="gemini"><img class="format-icon icon-gemini" src="icons/gemini.svg" alt="" aria-hidden="true"> Gemini</label>
                                 </div>
-                                <p class="text-muted">Leave empty to match any input format.</p>
 
                                 <!-- Match Downstream Format -->
                                 <label>Match Downstream Format:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Only apply when the target downstream speaks this format. Leave empty to match any.">?</span></label>
@@ -348,13 +346,11 @@
                                     <label class="format-checkbox"><input type="checkbox" name="match_downstream_format" value="anthropic"><img class="format-icon icon-anthropic" src="icons/anthropic.svg" alt="" aria-hidden="true"> Anthropic</label>
                                     <label class="format-checkbox"><input type="checkbox" name="match_downstream_format" value="gemini"><img class="format-icon icon-gemini" src="icons/gemini.svg" alt="" aria-hidden="true"> Gemini</label>
                                 </div>
-                                <p class="text-muted">Leave empty to match any downstream format.</p>
 
                                 <!-- Match Downstreams (multi-select) -->
                                 <label>Match Downstreams:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Limit this rule to specific providers. Leave empty to match any downstream.">?</span>
                                     <div id="rule-match-downstreams" class="model-multi-select"></div>
                                 </label>
-                                <p class="text-muted">Leave empty to match any downstream.</p>
 
                                 <label>Pipeline Transformers:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Ordered list of plugins that transform the request/response. Order matters.">?</span>
                                     <div id="pipeline-editor">
