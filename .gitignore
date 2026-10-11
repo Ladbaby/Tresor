@@ -1,6 +1,7 @@
 .pi/*
 .agents/*
 tresor-icons/*
+tresor-plugins/*
 config.yaml
 notes.md
 *.db
