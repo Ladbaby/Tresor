@@ -17,6 +17,28 @@ func fixture(t *testing.T, source string) *Package {
 	}
 	return pkg
 }
+func TestLoggingPackagesRejected(t *testing.T) {
+	for _, tc := range []struct{ name, extra, source string }{
+		{"feature", `,"requires":["log.v1"]`, `module.exports={}`},
+		{"permission", `,"permissions":["log.v1"]`, `module.exports={}`},
+		{"import", "", `const log=require('tresor/log.v1');module.exports={request(){log.info('message')}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := map[string]string{"manifest.json": `{"id":"test/logging","version":"1.0.0","api_version":2,"entry":"plugin.js"` + tc.extra + `}`, "plugin.js": tc.source}
+			if _, err := LoadPackage(files); err == nil {
+				t.Fatal("logging package accepted")
+			}
+			pkg, err := loadPackage(files, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pkg.Compatible || len(pkg.programs) != 0 {
+				t.Fatal("cached logging package executable")
+			}
+		})
+	}
+}
+
 func TestPackageIDs(t *testing.T) {
 	for _, id := range []string{"a", "new_plugin", "my-plugin2", "break_repeat", "custom_header", "acme/plugin", "a-b/c_d2"} {
 		t.Run(id, func(t *testing.T) {

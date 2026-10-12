@@ -26,6 +26,14 @@ type Instance struct {
 	mu           sync.Mutex
 }
 
+// fault enforces native host contract violations independently of telemetry.
+func (i *Instance) fault(code string) {
+	if i.hostFault == "" {
+		i.hostFault = code
+	}
+	panic(i.vm.NewTypeError("Host contract violation"))
+}
+
 func NewInstance(pkg *Package, config map[string]any) (*Instance, error) {
 	return newInstance(pkg, config, true)
 }
