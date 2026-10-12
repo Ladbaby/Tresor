@@ -179,18 +179,15 @@ downstreams:
 #
 # Uncomment to enable optional rules:
 # rules:
-# Example: Route OpenAI chat completions through a custom header transformer
-#  - id: chat-custom-header
-#    name: Chat with Custom Header
+# Example: Prevent repeated assistant turns with an installed break_repeat plugin
+#  - id: chat-break-repeat
+#    name: Prevent Repetition
 #    pattern_path: /v1/chat/completions
 #    match_format: [openai]               # Only match OpenAI-format requests
 #    match_downstream_format: [openai]    # Only match OpenAI-format downstreams
 #    match_downstreams: [openai]          # Only match the "openai" downstream
 #    pipeline_config:
-#      - plugin_id: custom_header
-#        config:
-#          headers:
-#            X-Custom-Header: my-value
+#      - plugin_id: break_repeat
 #    is_enabled: true
 
 # Model aliases — group by input model, list output options
