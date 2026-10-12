@@ -85,8 +85,8 @@ aliases:
 		payload any
 	}{
 		{"/api/plugin-packages/install", map[string]any{"files": map[string]string{
-			"manifest.json": `{"id":"test/headers","version":"1.0.0","api_version":2,"entry":"plugin.js","config_schema":{"type":"object","properties":{"headers":{"type":"object","additionalProperties":{"type":"string"}}},"required":["headers"]}}`,
-			"plugin.js":     `module.exports={request({config:{headers}}){return {request:{setHeaders:Object.fromEntries(Object.entries(headers).map(([k,v])=>[k,[v]]))}}}};`,
+			"manifest.json": `{"id":"test/headers","version":"1.0.0","api_version":2,"entry":"plugin.js"}`,
+			"plugin.js":     `module.exports={request(){return {request:{setHeaders:{'X-Test':['e2e']}}}}};`,
 		}}},
 		{"/api/plugin-packages/activate", map[string]string{"id": "test/headers", "version": "1.0.0"}},
 	} {
@@ -151,7 +151,7 @@ aliases:
 			"pattern_path":      "/v1/chat/completions",
 			"pattern_models":    []string{"gpt-4o"},
 			"match_downstreams": []string{"openai-gpt4o"},
-			"pipeline_config":   `[{"plugin_id":"test/headers","config":{"headers":{"X-Test":"e2e"}}}]`,
+			"pipeline_config":   `[{"plugin_id":"test/headers"}]`,
 			"is_enabled":        true,
 		}
 		body, _ := json.Marshal(newRule)

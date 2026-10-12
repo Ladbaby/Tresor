@@ -22,6 +22,14 @@ func (m *mockRegistryImpl) CreatePlugin(pluginID string, config map[string]inter
 	switch pluginID {
 	case "test_headers":
 		return &mockNativeHeaders{Config: config}, nil
+	case "test_priority_path":
+		return &mockNativeHeaders{Config: map[string]interface{}{"headers": map[string]interface{}{"X-Priority": "path-only"}}}, nil
+	case "test_priority_model":
+		return &mockNativeHeaders{Config: map[string]interface{}{"headers": map[string]interface{}{"X-Priority": "model-specific"}}}, nil
+	case "test_debug":
+		return &mockNativeHeaders{Config: map[string]interface{}{"headers": map[string]interface{}{"X-Debug": "true"}}}, nil
+	case "test_auth":
+		return &mockNativeHeaders{Config: map[string]interface{}{"headers": map[string]interface{}{"x-api-key": "override-key"}}}, nil
 	case "pass_through":
 		return &mockPassThrough{}, nil
 	case "openai2anthropic":
@@ -472,9 +480,9 @@ func TestEngine_HandleProxy_ModelPriority(t *testing.T) {
 	addOutputModelIDs(t, s, "ds1", "gpt-4o")
 
 	// Path-only rule (lower priority) - sets X-Priority: path-only
-	addRule(t, s, "r1", "PathOnly", "/v1/chat/completions", "", "ds1", `[{"plugin_id":"test_headers","config":{"headers":{"X-Priority":"path-only"}}}]`, true)
+	addRule(t, s, "r1", "PathOnly", "/v1/chat/completions", "", "ds1", `[{"plugin_id":"test_priority_path"}]`, true)
 	// Path+model rule (higher priority) - sets X-Priority: model-specific
-	addRule(t, s, "r2", "ModelSpecific", "/v1/chat/completions", "gpt-4o", "ds1", `[{"plugin_id":"test_headers","config":{"headers":{"X-Priority":"model-specific"}}}]`, true)
+	addRule(t, s, "r2", "ModelSpecific", "/v1/chat/completions", "gpt-4o", "ds1", `[{"plugin_id":"test_priority_model"}]`, true)
 
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryImpl{})
@@ -508,7 +516,7 @@ func TestEngine_HandleProxy_PipelineRuns(t *testing.T) {
 	addDownstream(t, s, "ds1", "ds1", ts.URL, "key-ds1")
 	addOutputModelIDs(t, s, "ds1", "gpt-4o")
 	addRule(t, s, "r1", "Debug", "*", "", "ds1",
-		`[{"plugin_id":"test_headers","config":{"headers":{"X-Debug":"true"}}}]`, true)
+		`[{"plugin_id":"test_debug"}]`, true)
 
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryImpl{})
@@ -552,7 +560,7 @@ func TestEngine_HandleProxy_AuthHeaderConflict(t *testing.T) {
 	addOutputModelIDs(t, s, "ds1", "gpt-4o")
 	// Pipeline sets x-api-key — engine should NOT add Bearer default-key
 	addRule(t, s, "r1", "CustomAuth", "*", "", "ds1",
-		`[{"plugin_id":"test_headers","config":{"headers":{"x-api-key":"override-key"}}}]`, true)
+		`[{"plugin_id":"test_auth"}]`, true)
 
 	eng := New(s)
 	eng.SetRegistry(&mockRegistryImpl{})

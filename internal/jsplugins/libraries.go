@@ -6,7 +6,6 @@ var libraries = map[string]string{
 	"tresor/query.v1":    queryLibrary,
 	"tresor/encoding.v1": encodingLibrary,
 	"tresor/buffer.v1":   `module.exports=__tresorBuffers;`,
-	"tresor/log.v1":      `const send=__tresorLog, stringify=JSON.stringify;module.exports=Object.freeze({write({level,code,fields={}}){send(stringify({level,code,fields}));}});`,
 }
 
 const losslessJSON = `

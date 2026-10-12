@@ -295,25 +295,32 @@
                     </table>
 
                     <h2 style="margin-top:2rem">Plugins</h2>
-                    <p class="package-help">Install code only from sources you trust. Installation does not activate a plugin. API format conversion is automatic and internal.</p>
-                    <details class="package-install"><summary>Install a remote plugin</summary>
-                        <form id="package-remote-form">
-                            <label for="package-url">HTTPS bundle URL</label>
-                            <div class="package-install-controls">
-                                <input id="package-url" type="url" placeholder="https://raw.githubusercontent.com/owner/repo/tag/dist/plugin.bundle.json" required>
-                                <button type="submit" class="btn-primary">Install plugin</button>
+                    <p class="package-help">Install code only from sources you trust.</p>
+                    <details class="package-install"><summary>Install a plugin</summary>
+                        <div class="package-install-tabs" role="tablist" aria-label="Plugin source">
+                            <button type="button" class="package-source-btn active" data-source="file" role="tab" aria-selected="true">From file</button>
+                            <button type="button" class="package-source-btn" data-source="url" role="tab" aria-selected="false">From URL</button>
+                        </div>
+                        <div id="package-file-panel" class="package-source-panel" role="tabpanel">
+                            <div id="plugin-drop-zone" class="plugin-drop-zone" aria-labelledby="plugin-local-help">
+                                <p id="plugin-local-help">Choose or drop one plugin JSON bundle (maximum 8 MiB).</p>
+                                <input id="plugin-bundle-file" type="file" accept=".json,application/json" hidden>
+                                <button id="plugin-bundle-choose" type="button" class="btn-small">Choose file</button>
                             </div>
-                        </form>
+                        </div>
+                        <div id="package-url-panel" class="package-source-panel hidden" role="tabpanel" hidden>
+                            <form id="package-remote-form">
+                                <label for="package-url">HTTPS bundle URL</label>
+                                <div class="package-install-controls">
+                                    <input id="package-url" type="url" placeholder="https://…/plugin.bundle.json" required>
+                                    <button type="submit" class="btn-primary">Install plugin</button>
+                                </div>
+                            </form>
+                        </div>
                     </details>
-                    <div id="plugin-drop-zone" class="plugin-drop-zone" aria-labelledby="plugin-local-help">
-                        <p id="plugin-local-help">Drag one plugin JSON bundle here, or choose a file. Maximum 8 MiB.</p>
-                        <input id="plugin-bundle-file" type="file" accept=".json,application/json" hidden>
-                        <button id="plugin-bundle-choose" type="button" class="btn-small">Choose bundle</button>
-                    </div>
                     <p id="package-management-status" role="status"></p>
-                    <p id="plugin-incompatibility" class="hidden" role="status"></p>
                     <div class="plugin-table-scroll">
-                        <table id="packages-table"><thead><tr><th>Plugin</th><th>Description / config</th><th>Source</th><th>Permissions / status</th><th>Actions</th></tr></thead><tbody id="package-management-body"></tbody></table>
+                        <table id="packages-table"><thead><tr><th>Plugin</th><th>Description</th><th>Enabled</th><th>Actions</th></tr></thead><tbody id="package-management-body"></tbody></table>
                     </div>
 
                     <!-- Rule Editor Modal -->

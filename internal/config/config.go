@@ -1,9 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -11,6 +13,7 @@ import (
 // AppConfig is the complete YAML configuration for Tresor.
 // It covers server settings and all routing data (downstreams, rules, aliases).
 type AppConfig struct {
+	LegacyPipelineSettings bool `yaml:"-" json:"-"`
 	// Server settings
 	BindAddr      string `yaml:"bind_addr"`
 	SocketPath    string `yaml:"socket_path,omitempty"`
@@ -250,11 +253,79 @@ type RuleCfg struct {
 	IsEnabled          bool           `yaml:"is_enabled"`
 }
 
-// PipelineStep is one transformer in a rule's pipeline.
+// NormalizePipelineJSON removes legacy user-defined config and failure_policy
+// fields from valid pipeline arrays while preserving step order and IDs.
+func NormalizePipelineJSON(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "[]", nil
+	}
+	var steps []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &steps); err != nil {
+		return "", fmt.Errorf("invalid pipeline_config: %w", err)
+	}
+	if steps == nil {
+		return "[]", nil
+	}
+	normalized := make([]PipelineStep, 0, len(steps))
+	for i, rawStep := range steps {
+		var step map[string]json.RawMessage
+		if err := json.Unmarshal(rawStep, &step); err != nil {
+			return "", fmt.Errorf("pipeline_config step %d: %w", i, err)
+		}
+		var pluginID string
+		if value, ok := step["plugin_id"]; ok {
+			if err := json.Unmarshal(value, &pluginID); err != nil {
+				return "", fmt.Errorf("pipeline_config step %d plugin_id: %w", i, err)
+			}
+		}
+		normalized = append(normalized, PipelineStep{PluginID: pluginID})
+	}
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// ValidatePipeline rejects newly supplied user pipeline settings. Empty legacy
+// config objects and fail_closed are accepted and normalized away.
+func ValidatePipeline(steps []PipelineStep) error {
+	for i, step := range steps {
+		if len(step.legacyConfig) > 0 && string(step.legacyConfig) != "null" && string(step.legacyConfig) != "{}" {
+			return fmt.Errorf("pipeline_config step %d: user plugin config is not supported", i)
+		}
+		if step.legacyPolicy != "" && step.legacyPolicy != "fail_closed" {
+			return fmt.Errorf("pipeline_config step %d: failure_policy must be fail_closed", i)
+		}
+	}
+	return nil
+}
+
+// PipelineStep is one transformer in a rule's pipeline. Legacy settings are
+// parsed only to allow migration and validation; they are never serialized.
 type PipelineStep struct {
-	PluginID      string                 `json:"plugin_id" yaml:"plugin_id"`
-	Config        map[string]interface{} `json:"config,omitempty" yaml:"config,omitempty"`
-	FailurePolicy string                 `json:"failure_policy,omitempty" yaml:"failure_policy,omitempty"`
+	PluginID     string `json:"plugin_id" yaml:"plugin_id"`
+	legacyConfig json.RawMessage
+	legacyPolicy string
+}
+
+func (s *PipelineStep) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		PluginID      string          `json:"plugin_id"`
+		Config        json.RawMessage `json:"config"`
+		FailurePolicy string          `json:"failure_policy"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	s.PluginID, s.legacyConfig, s.legacyPolicy = raw.PluginID, raw.Config, raw.FailurePolicy
+	return nil
+}
+
+func (s PipelineStep) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		PluginID string `json:"plugin_id"`
+	}{s.PluginID})
 }
 
 // AliasGroupCfg defines an alias group: one input model mapped to a list of
@@ -309,9 +380,22 @@ func Load(configPath string) (*AppConfig, error) {
 			LegacyAPIKey string `yaml:"api_key"`
 		} `yaml:"downstreams"`
 		OAuthProviders []OAuthProviderCfg `yaml:"oauth_providers"`
+		Rules          []struct {
+			Pipeline []map[string]interface{} `yaml:"pipeline_config"`
+		} `yaml:"rules"`
 	}
 	if err := yaml.Unmarshal(data, &legacyRaw); err != nil {
 		return nil, fmt.Errorf("parse config file %s (legacy fields): %w", resolved, err)
+	}
+	for _, rule := range legacyRaw.Rules {
+		for _, step := range rule.Pipeline {
+			if _, ok := step["config"]; ok {
+				cfg.LegacyPipelineSettings = true
+			}
+			if _, ok := step["failure_policy"]; ok {
+				cfg.LegacyPipelineSettings = true
+			}
+		}
 	}
 	if len(legacyRaw.Downstreams) != len(cfg.Downstreams) {
 		// Defensive: the two parses must agree on downstream count. If they

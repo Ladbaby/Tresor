@@ -164,13 +164,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if ctx.decode != nil {
 				ctx.decode.failed = true
 			}
-			log.Printf("plugin finish error: %v", err)
 		}
 		if ctx.decode != nil && attemptOutcome != "success" {
 			ctx.decode.failed = true
 		}
 		ctx.decode.finalize(&entry)
-		entry.PluginDiagnostics = ctx.Diagnostics
 	}()
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {

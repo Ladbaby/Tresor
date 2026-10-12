@@ -298,6 +298,11 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("migrate delete legacy session_token: %w", err)
 	}
 
+	// Remove legacy user pipeline settings during every startup.
+	if err := s.migrateRulePipelines(); err != nil {
+		return fmt.Errorf("migrate rule pipelines: %w", err)
+	}
+
 	// Remove UNIQUE constraint from rules.name (allows duplicate rule names)
 	if s.hasUniqueIndex("rules", "name") {
 		if err := s.migrateRemoveRulesUnique(); err != nil {
@@ -794,7 +799,7 @@ func (s *Store) migrateBackfillAuth() error {
 
 // MigrateLegacyOAuthProviders resolves the old top-level oauth_providers
 // recipes into the per-downstream auth column for any DB row still bound to a
-// recipe by name (downstreams.oauth_provider != ''). After this runs, the
+// recipe by name (downstreams.oauth_provider != ”). After this runs, the
 // auth column carries the full recipe and the oauth binding is self-contained.
 // Rows whose name has no matching recipe are left untouched.
 func (s *Store) MigrateLegacyOAuthProviders(legacy []config.OAuthProviderCfg) error {

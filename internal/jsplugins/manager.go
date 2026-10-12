@@ -15,12 +15,11 @@ type Manager struct {
 	reserved   map[string]bool
 	installed  map[string]map[string]*Package
 	active     map[string]string
-	approvals  map[string]Approval
 	provenance map[string]Provenance
 }
 
 func NewManager(dir string, reservedIDs []string) (*Manager, error) {
-	m := &Manager{dir: dir, reserved: map[string]bool{}, installed: map[string]map[string]*Package{}, active: map[string]string{}, approvals: map[string]Approval{}, provenance: map[string]Provenance{}}
+	m := &Manager{dir: dir, reserved: map[string]bool{}, installed: map[string]map[string]*Package{}, active: map[string]string{}, provenance: map[string]Provenance{}}
 	for _, id := range reservedIDs {
 		m.reserved[id] = true
 	}
@@ -63,9 +62,6 @@ func NewManager(dir string, reservedIDs []string) (*Manager, error) {
 		if m.installed[pkg.Manifest.ID] == nil {
 			m.installed[pkg.Manifest.ID] = map[string]*Package{}
 		}
-		if _, exists := m.installed[pkg.Manifest.ID][pkg.Manifest.Version]; exists {
-			return nil, fmt.Errorf("duplicate cache identity")
-		}
 		m.installed[pkg.Manifest.ID][pkg.Manifest.Version] = pkg
 	}
 	if err := readMetadata(filepath.Join(dir, "active.json"), &m.active); err != nil {
@@ -75,8 +71,8 @@ func NewManager(dir string, reservedIDs []string) (*Manager, error) {
 		return nil, fmt.Errorf("active metadata must be an object")
 	}
 	for id, version := range m.active {
-		if m.installed[id][version] == nil {
-			return nil, fmt.Errorf("active package missing: %s@%s", id, version)
+		if m.installed[id][version] == nil || !m.installed[id][version].Compatible {
+			delete(m.active, id)
 		}
 	}
 	if err := m.restoreMetadata(); err != nil {
@@ -125,6 +121,9 @@ func (m *Manager) install(files map[string]string, provenance Provenance) (Manif
 		if existing.Digest != pkg.Digest {
 			return Manifest{}, fmt.Errorf("installed ID/version is immutable")
 		}
+		if err := m.setEnabledLocked(pkg.Manifest.ID, pkg.Manifest.Version, true); err != nil {
+			return Manifest{}, err
+		}
 		return existing.Manifest, nil
 	}
 	data, err := json.Marshal(pkg.files)
@@ -162,31 +161,76 @@ func (m *Manager) install(files map[string]string, provenance Provenance) (Manif
 		m.installed[pkg.Manifest.ID] = map[string]*Package{}
 	}
 	m.installed[pkg.Manifest.ID][pkg.Manifest.Version] = pkg
+	if err := m.setEnabledLocked(pkg.Manifest.ID, pkg.Manifest.Version, true); err != nil {
+		delete(m.installed[pkg.Manifest.ID], pkg.Manifest.Version)
+		if removeErr := os.Remove(packagePath); removeErr != nil {
+			return Manifest{}, fmt.Errorf("enable persistence failed and package rollback failed")
+		}
+		return Manifest{}, err
+	}
 	return pkg.Manifest, nil
 }
-func (m *Manager) Activate(id, version string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (m *Manager) setEnabledLocked(id, version string, enabled bool) error {
 	if m.installed[id][version] == nil {
 		return fmt.Errorf("package version not installed")
 	}
-	if !m.installed[id][version].Compatible {
-		return fmt.Errorf("incompatible API version: explicitly install and activate an API V2 package")
+	if enabled && !m.installed[id][version].Compatible {
+		return fmt.Errorf("plugin is unavailable")
 	}
-	if !m.approved(m.installed[id][version]) {
-		return fmt.Errorf("explicit digest-bound permission approval required")
+	next := map[string]string{}
+	for k, v := range m.active {
+		if k != id || (!enabled && v != version) {
+			next[k] = v
+		}
 	}
-	next := make(map[string]string, len(m.active)+1)
-	for id, v := range m.active {
-		next[id] = v
+	if enabled {
+		next[id] = version
 	}
-	next[id] = version
 	data, err := json.Marshal(next)
 	if err != nil {
 		return err
 	}
 	if err := atomicFile(filepath.Join(m.dir, "active.json"), data); err != nil {
 		return err
+	}
+	m.active = next
+	return nil
+}
+func (m *Manager) SetEnabled(id, version string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.setEnabledLocked(id, version, enabled)
+}
+func (m *Manager) Activate(id, version string) error { return m.SetEnabled(id, version, true) }
+func (m *Manager) Delete(id, version string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pkg := m.installed[id][version]
+	if pkg == nil {
+		return fmt.Errorf("package version not installed")
+	}
+	next := map[string]string{}
+	for k, v := range m.active {
+		if k != id || v != version {
+			next[k] = v
+		}
+	}
+	if next[id] == "" {
+		delete(next, id)
+	}
+	data, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	if err = atomicFile(filepath.Join(m.dir, "active.json"), data); err != nil {
+		return err
+	}
+	if err = os.Remove(filepath.Join(m.dir, "packages", pkg.Digest+".json")); err != nil {
+		return err
+	}
+	delete(m.installed[id], version)
+	if len(m.installed[id]) == 0 {
+		delete(m.installed, id)
 	}
 	m.active = next
 	return nil
@@ -203,17 +247,17 @@ func (m *Manager) List() []PackageInfo {
 		for version, pkg := range versions {
 			diagnostic := ""
 			if !pkg.Compatible {
-				diagnostic = "Unsupported API version; explicitly install and activate an API V2 package."
+				diagnostic = "This plugin uses unsupported capabilities. Delete it and install a compatible version."
 			}
-			if pkg.Compatible && !m.approved(pkg) {
-				diagnostic = "Explicit digest-bound permission approval required."
+			if pkg.Compatible && len(pkg.Manifest.Permissions) != 0 {
+				diagnostic = "Package requests unsupported permissions."
 			}
-			approved := append([]string{}, m.approvals[pkg.Digest].Permissions...)
+			approved := []string{}
 			provenance, ok := m.provenance[pkg.Digest]
 			if !ok {
 				provenance = Provenance{Source: "local"}
 			}
-			out = append(out, PackageInfo{Manifest: pkg.Manifest, Digest: pkg.Digest, Active: m.active[id] == version && pkg.Compatible && m.approved(pkg), Selected: m.active[id] == version, Compatible: pkg.Compatible, Diagnostic: diagnostic, Executable: pkg.Compatible && m.approved(pkg), Approved: approved, Provenance: provenance})
+			out = append(out, PackageInfo{Manifest: pkg.Manifest, Digest: pkg.Digest, Active: m.active[id] == version && pkg.Compatible && len(pkg.Manifest.Permissions) == 0, Selected: m.active[id] == version, Compatible: pkg.Compatible, Diagnostic: diagnostic, Executable: pkg.Compatible && len(pkg.Manifest.Permissions) == 0, Approved: approved, Provenance: provenance})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {

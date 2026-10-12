@@ -31,8 +31,6 @@ type ExternalPlugin struct {
 	ctx                          *PipelineContext
 	ruleID                       string
 	stepIndex                    int
-	failurePolicy                string
-	disabled                     bool
 }
 
 func NewExternalPlugin(runtime ExternalRuntime) *ExternalPlugin {
@@ -116,43 +114,15 @@ func (p *ExternalPlugin) input(ctx *PipelineContext) map[string]any {
 	return map[string]any{"context": ctx.invocationContext(), "attempt": map[string]any{"index": ctx.AttemptIndex}}
 }
 func (p *ExternalPlugin) call(name string, input map[string]any) (map[string]any, error) {
-	if p.disabled || !p.runtime.HasHook(name) {
+	if !p.runtime.HasHook(name) {
 		return nil, nil
-	}
-	if p.failurePolicy == "safe_passthrough" {
-		p.releaseBuffers()
-		if err := p.runtime.Reset(); err != nil {
-			return nil, p.invocationFailure(name, err)
-		}
 	}
 	if configured, ok := p.runtime.(interface{ SetLimits(jsplugins.Limits) }); ok && p.ctx != nil {
 		configured.SetLimits(jsplugins.EffectiveLimits(p.ctx.execution().Large))
 	}
 	result, err := p.runtime.Invoke(name, input)
-	disposition := "completed"
 	if err != nil {
-		disposition = "failed_closed"
-		if p.safeFallback(name, err) {
-			disposition = "passed_through"
-		}
-	}
-	if logger, ok := p.runtime.(interface{ DrainLogs() []jsplugins.LogEvent }); ok {
-		for _, event := range logger.DrainLogs() {
-			p.diagnostic(name, disposition, nil, &event)
-		}
-	}
-	if err != nil {
-		if disposition == "passed_through" {
-			p.diagnostic(name, disposition, err, nil)
-			p.disabled = true
-			p.releaseBuffers()
-			return nil, nil
-		}
 		return nil, p.invocationFailure(name, err)
-	}
-	p.diagnostic(name, "completed", nil, nil)
-	if p.failurePolicy == "safe_passthrough" {
-		p.releaseBuffers()
 	}
 	return result, nil
 }
@@ -413,13 +383,13 @@ func (p *Pipeline) beginAttempt(ctx *PipelineContext, req *http.Request, index i
 	for _, step := range p.ExternalSteps {
 		step.ctx = ctx
 		step.upstream, step.stream, step.collection = Session{}, Session{}, Session{}
-		step.finished, step.begun, step.disabled = false, false, false
+		step.finished, step.begun = false, false
 		step.request = req
 		step.releaseBuffers()
 	}
 	for _, step := range p.ExternalSteps {
 		if err := step.runtime.Reset(); err != nil {
-			step.invocationFailure("initialize", err)
+			err = step.invocationFailure("initialize", err)
 			step.releaseBuffers() // Reset may have allocated storage before failing.
 			return err
 		}
@@ -446,7 +416,7 @@ func (p *Pipeline) finishAttempt(ctx *PipelineContext, reason string) error {
 		}
 	}
 	for _, step := range p.ExternalSteps {
-		if !step.begun || step.finished || step.disabled {
+		if !step.begun || step.finished {
 			step.releaseBuffers()
 			continue
 		}

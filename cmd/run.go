@@ -78,6 +78,11 @@ func runDaemon(cfg *config.AppConfig) error {
 	if err := s.LoadConfigData(cfg); err != nil {
 		return fmt.Errorf("failed to load config data: %w", err)
 	}
+	if cfg.LegacyPipelineSettings {
+		if err := s.WriteConfig(cfg); err != nil {
+			return fmt.Errorf("migrate legacy pipeline YAML: %w", err)
+		}
+	}
 
 	// Build engine
 	eng := engine.New(s)

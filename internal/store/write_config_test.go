@@ -80,8 +80,11 @@ func TestWriteConfig_RoundTrip(t *testing.T) {
 	if len(parsed.Rules[0].PatternModels) != 2 || parsed.Rules[0].PatternModels[0] != "model-a" {
 		t.Fatalf("expected plural pattern models, got %#v", parsed.Rules[0].PatternModels)
 	}
-	if len(parsed.Rules[0].PipelineConfig) != 1 || parsed.Rules[0].PipelineConfig[0].FailurePolicy != "safe_passthrough" {
-		t.Fatalf("failure policy lost in YAML round-trip: %#v", parsed.Rules[0].PipelineConfig)
+	if len(parsed.Rules[0].PipelineConfig) != 1 || parsed.Rules[0].PipelineConfig[0].PluginID != "custom_header" {
+		t.Fatalf("pipeline step lost in YAML round-trip: %#v", parsed.Rules[0].PipelineConfig)
+	}
+	if strings.Contains(string(data), "failure_policy:") || strings.Contains(string(data), " config:") {
+		t.Fatalf("legacy pipeline settings were written:\n%s", data)
 	}
 	if strings.Contains(string(data), "pattern_model:") {
 		t.Fatalf("deprecated pattern_model was written:\n%s", data)

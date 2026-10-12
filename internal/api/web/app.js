@@ -500,7 +500,7 @@ async function loadRules() {
  * Build the visual pipeline editor UI.
  * - Loads available plugins
  * - Renders existing steps or starts empty
- * - Each step has a plugin selector + dynamic config fields
+ * - Each step has a plugin selector; plugins do not expose configuration fields here
  */
 async function initPipelineEditor(steps) {
     const plugins = await fetchPlugins();
@@ -510,7 +510,7 @@ async function initPipelineEditor(steps) {
     // Always set up the "Add Step" button first
     const addBtn = document.getElementById('btn-add-step');
     addBtn.disabled = plugins.length === 0;
-    addBtn.title = plugins.length ? '' : 'Install and activate a plugin first';
+    addBtn.title = plugins.length ? '' : 'Install and enable a plugin first';
     addBtn.onclick = () => addPipelineStep(plugins);
 
     if (!steps || steps.length === 0) {
@@ -527,7 +527,7 @@ async function initPipelineEditor(steps) {
  * Create a DOM card for a single pipeline step.
  */
 function createStepCard(container, step, plugins, idx) {
-    const pluginInfo = plugins.find(p => p.id === step.plugin_id) || { id: step.plugin_id, description: 'Unavailable plugin: existing configuration is preserved.', config_schema: null, unavailable: true };
+    const pluginInfo = plugins.find(p => p.id === step.plugin_id) || { id: step.plugin_id, description: 'Unavailable plugin. Its rule reference is preserved.', unavailable: true };
 
     const card = document.createElement('div');
     card.className = 'pipeline-step-card';
@@ -539,7 +539,7 @@ function createStepCard(container, step, plugins, idx) {
 
     const select = document.createElement('select');
     select.className = 'step-plugin-select';
-    card._originalStep = structuredClone(step);
+    card._originalStep = { plugin_id: step.plugin_id };
     if (pluginInfo.unavailable) { const option = document.createElement('option'); option.value = step.plugin_id; option.textContent = step.plugin_id + ' (unavailable)'; select.appendChild(option); }
     plugins.forEach(p => {
         const opt = document.createElement('option');
@@ -570,125 +570,10 @@ function createStepCard(container, step, plugins, idx) {
     descEl.textContent = pluginInfo.description;
     card.appendChild(descEl);
 
-    // Config section
-    const configDiv = document.createElement('div');
-    configDiv.className = 'pipeline-step-config';
-    configDiv.id = 'step-config-' + idx;
-
-    buildConfigUI(configDiv, pluginInfo, step.config || {}, plugins);
-
-    // When plugin selector changes, rebuild config UI
     select.onchange = () => {
-        const newPlugin = plugins.find(p => p.id === select.value);
-        if (!newPlugin) return;
-        descEl.textContent = newPlugin.description;
-        configDiv.innerHTML = '';
-        buildConfigUI(configDiv, newPlugin, {}, plugins);
+        descEl.textContent = plugins.find(p => p.id === select.value)?.description || 'Unavailable plugin';
     };
-
-    card.appendChild(configDiv);
-    const policyLabel = document.createElement('label');
-    policyLabel.textContent = 'Failure policy: ';
-    const policySelect = document.createElement('select'); policySelect.className = 'step-failure-policy';
-    [['fail_closed', 'Fail closed (default)'], ['safe_passthrough', 'Safe passthrough (fresh buffered hooks only)']].forEach(([value, text]) => { const option = document.createElement('option'); option.value = value; option.textContent = text; policySelect.appendChild(option); });
-    policySelect.value = step.failure_policy || 'fail_closed';
-    policyLabel.appendChild(policySelect); card.appendChild(policyLabel);
-    const policyHelp = document.createElement('p'); policyHelp.className = 'text-muted'; policyHelp.textContent = 'Passthrough returns unchanged pre-step content on ordinary exceptions. Never use for mandatory redaction/security filtering. Streaming, collection, invalid outputs and safety faults still fail closed.'; card.appendChild(policyHelp);
     container.appendChild(card);
-}
-
-/**
- * Build config input fields based on plugin schema.
- */
-function buildConfigUI(container, pluginInfo, currentConfig, plugins) {
-    const schema = pluginInfo.config_schema;
-    if (!schema || !schema.properties || Object.keys(schema.properties).length === 0) {
-        // No config needed (e.g. openai2anthropic, anthropic2openai)
-        container.innerHTML = '<div style="color:#8b949e;font-size:0.75rem;font-style:italic">No configuration required</div>';
-        return;
-    }
-
-    const required = schema.required || [];
-
-    // Handle custom_header plugin specially (key-value map)
-    if (pluginInfo.id === 'custom_header') {
-        buildHeaderPairs(container, currentConfig);
-        return;
-    }
-
-    // Generic: render one input per property
-    Object.entries(schema.properties).forEach(([key, prop]) => {
-        const row = document.createElement('div');
-        row.className = 'config-row';
-
-        const label = document.createElement('label');
-        label.textContent = key + (required.includes(key) ? '*' : '');
-        row.appendChild(label);
-
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.className = 'step-config-input';
-        input.dataset.key = key;
-        input.placeholder = prop.description || '';
-
-        // Restore current value
-        if (currentConfig[key] !== undefined) {
-            input.value = String(currentConfig[key]);
-        }
-
-        row.appendChild(input);
-        container.appendChild(row);
-    });
-}
-
-/**
- * Build header key-value pairs editor for custom_header plugin.
- */
-function buildHeaderPairs(container, currentConfig) {
-    const headersObj = currentConfig.headers || {};
-    const pairsContainer = document.createElement('div');
-    pairsContainer.className = 'header-pairs-container';
-
-    if (Object.keys(headersObj).length === 0) {
-        pairsContainer.innerHTML = '<div style="color:#8b949e;font-size:0.75rem;font-style:italic">No headers configured</div>';
-    } else {
-        Object.entries(headersObj).forEach(([k, v]) => {
-            addHeaderPairRow(pairsContainer, k, v);
-        });
-    }
-
-    container.appendChild(pairsContainer);
-
-    const addBtn = document.createElement('button');
-    addBtn.className = 'btn-add-header';
-    addBtn.textContent = '+ Add Header';
-    addBtn.onclick = () => addHeaderPairRow(pairsContainer, '', '');
-    container.appendChild(addBtn);
-}
-
-function addHeaderPairRow(container, key, value) {
-    const row = document.createElement('div');
-    row.className = 'header-pair-row';
-
-    const keyInput = document.createElement('input');
-    keyInput.placeholder = 'Header name';
-    keyInput.className = 'header-key';
-    keyInput.value = key;
-
-    const valInput = document.createElement('input');
-    valInput.placeholder = 'Value';
-    valInput.className = 'header-value';
-    valInput.value = value;
-
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'header-pair-remove';
-    removeBtn.textContent = '×';
-    removeBtn.onclick = () => row.remove();
-
-    row.appendChild(keyInput);
-    row.appendChild(valInput);
-    row.appendChild(removeBtn);
-    container.appendChild(row);
 }
 
 /**
@@ -730,35 +615,7 @@ function serializePipeline() {
     cards.forEach(card => {
         const select = card.querySelector('.step-plugin-select');
         const pluginId = select.value;
-        const configDiv = card.querySelector('.pipeline-step-config');
-        const pluginInfo = cachedPlugins.find(p => p.id === pluginId);
-
-        const failurePolicy = card.querySelector('.step-failure-policy')?.value || 'fail_closed';
-        if (!pluginInfo || !pluginId) { if (pluginId) steps.push({ ...card._originalStep, plugin_id: pluginId, failure_policy: failurePolicy }); return; }
-
-        const config = {};
-
-        // custom_header: collect header key-value pairs
-        if (pluginInfo.id === 'custom_header') {
-            const headers = {};
-            const pairRows = configDiv.querySelectorAll('.header-pair-row');
-            pairRows.forEach(row => {
-                const k = row.querySelector('.header-key').value.trim();
-                const v = row.querySelector('.header-value').value.trim();
-                if (k) headers[k] = v;
-            });
-            if (Object.keys(headers).length > 0) config.headers = headers;
-        } else {
-            // Generic: collect input values
-            const inputs = configDiv.querySelectorAll('.step-config-input');
-            inputs.forEach(input => {
-                if (input.value.trim()) {
-                    config[input.dataset.key] = input.value.trim();
-                }
-            });
-        }
-
-        steps.push({ plugin_id: pluginId, config, failure_policy: failurePolicy });
+        if (pluginId) steps.push({ plugin_id: pluginId });
     });
 
     return JSON.stringify(steps);
@@ -2024,14 +1881,10 @@ async function loadPlugins() {
     try {
         const plugins = (await api('/plugins')).slice().sort((a, b) => a.id.localeCompare(b.id));
         const packages = await api('/plugin-packages');
-        const incompatible = packages.filter(p => p.diagnostic);
-        const notice = document.getElementById('plugin-incompatibility');
-        notice.textContent = incompatible.length ? 'Unavailable installed plugins: ' + incompatible.map(p => `${p.id}@${p.version}${p.selected ? ' (selected)' : ''}: ${p.diagnostic}`).join('; ') : '';
-        notice.classList.toggle('hidden', incompatible.length === 0);
         renderPackageManagement(packages);
         cachedPlugins = plugins;
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="5" class="loading">Error: ${esc(err.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="loading">Unable to load plugins: ${esc(err.message)}</td></tr>`;
     }
 }
 
@@ -2040,40 +1893,56 @@ function renderPackageManagement(packages) {
     body.replaceChildren();
     if (!packages.length) {
         const row = document.createElement('tr'); const cell = document.createElement('td');
-        cell.colSpan = 5; cell.className = 'loading'; cell.textContent = 'No plugins installed. Install a bundle, then activate it to use it in rules.';
+        cell.colSpan = 4; cell.className = 'loading'; cell.textContent = 'No plugins installed.';
         row.appendChild(cell); body.appendChild(row);
     }
     for (const p of packages) {
         const row = document.createElement('tr');
         const identity = document.createElement('td');
-        const name = document.createElement('div'); name.textContent = `${p.id}@${p.version}`; identity.appendChild(name);
-        const digest = document.createElement('details'); digest.className = 'package-digest';
-        const summary = document.createElement('summary'); summary.textContent = 'Source digest';
-        const value = document.createElement('code'); value.textContent = p.digest;
-        digest.append(summary, value); identity.appendChild(digest); row.appendChild(identity);
+        const name = document.createElement('strong'); name.textContent = `${p.id}@${p.version}`; identity.appendChild(name); row.appendChild(identity);
         const description = document.createElement('td');
-        const text = document.createElement('div'); text.textContent = p.description || 'No description'; description.appendChild(text);
-        const schema = document.createElement('details');
-        const schemaTitle = document.createElement('summary'); schemaTitle.textContent = 'Config schema';
-        const schemaText = document.createElement('pre'); schemaText.className = 'schema-hint'; schemaText.textContent = formatSchema(p.config_schema);
-        schema.append(schemaTitle, schemaText); description.appendChild(schema); row.appendChild(description);
-        const provenance = document.createElement('td'); const source = p.provenance || {};
-        const verification = source.signed ? 'Signature verified against supplied key ' + source.publisher : source.verified ? 'Expected digest matched; no publisher signature' : 'Downloaded over HTTPS; no publisher verification';
-        provenance.textContent = source.source === 'remote' ? `${verification}\n${source.url || ''}` : 'Local source (no publisher verification)'; row.appendChild(provenance);
-        const state = document.createElement('td'); state.textContent = `Requested: ${(p.permissions || []).join(', ') || 'none'}\nApproved: ${(p.approved || []).join(', ') || 'none'}\n${p.active ? 'Active' : p.selected ? 'Selected but blocked' : 'Installed, not selected'}${p.diagnostic ? '\n' + p.diagnostic : ''}`; row.appendChild(state);
-        const actions = document.createElement('td'); actions.className = 'package-actions';
-        function action(label, endpoint, payload, disabled) { const button = document.createElement('button'); button.type = 'button'; button.className = 'btn-small'; button.textContent = label; button.disabled = disabled; button.onclick = async () => { if (!confirm(`${label} ${p.id}@${p.version}?\nExact digest: ${p.digest}\nRunning requests keep their pinned version and grants.`)) return; button.disabled = true; try { await api('/plugin-packages/' + endpoint, {method:'POST', body:JSON.stringify(payload)}); document.getElementById('package-management-status').textContent = label + ' succeeded'; await loadPlugins(); } catch (error) { document.getElementById('package-management-status').textContent = error.message; button.disabled = disabled; } }; actions.appendChild(button); }
-        const permissionPayload = { id:p.id, version:p.version, digest:p.digest, permissions:p.permissions || [] };
-        if ((p.permissions || []).length) { action('Approve permissions', 'approve', permissionPayload, !p.compatible || p.executable); action('Revoke permissions', 'revoke', permissionPayload, !(p.approved || []).length); }
-        action('Activate version', 'activate', {id:p.id, version:p.version}, !p.executable || p.active);
-        row.appendChild(actions); body.appendChild(row);
+        description.textContent = p.description || 'No description';
+        if (!p.compatible || !p.executable) {
+            const unavailable = document.createElement('div'); unavailable.className = 'package-unavailable';
+            unavailable.textContent = 'Unavailable'; description.appendChild(unavailable);
+        }
+        row.appendChild(description);
+        const enabledCell = document.createElement('td');
+        const toggle = document.createElement('label'); toggle.className = 'ds-toggle rule-toggle';
+        toggle.title = p.active ? 'Plugin is enabled — click to disable' : 'Plugin is disabled — click to enable';
+        const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = !!p.active; checkbox.setAttribute('aria-label', `Enable ${p.id}@${p.version}`);
+        const track = document.createElement('span'); track.className = 'ds-toggle-track';
+        checkbox.addEventListener('change', async () => {
+            checkbox.disabled = true;
+            try { await api('/plugin-packages/enabled', {method:'POST', body:JSON.stringify({id:p.id, version:p.version, enabled:checkbox.checked})}); await loadPlugins(); }
+            catch (error) { checkbox.checked = !checkbox.checked; document.getElementById('package-management-status').textContent = 'Could not update plugin.'; checkbox.disabled = false; }
+        });
+        toggle.append(checkbox, track); enabledCell.appendChild(toggle); row.appendChild(enabledCell);
+        const actions = document.createElement('td');
+        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn-danger'; remove.textContent = 'Delete';
+        remove.addEventListener('click', async () => {
+            if (!confirm(`Delete ${p.id}@${p.version}?`)) return;
+            remove.disabled = true;
+            try { await api('/plugin-packages/delete', {method:'POST', body:JSON.stringify({id:p.id, version:p.version})}); document.getElementById('package-management-status').textContent = 'Plugin deleted.'; await loadPlugins(); }
+            catch (error) { document.getElementById('package-management-status').textContent = 'Could not delete plugin.'; remove.disabled = false; }
+        });
+        actions.appendChild(remove); row.appendChild(actions); body.appendChild(row);
     }
 }
+
+document.querySelectorAll('.package-source-btn').forEach(button => button.addEventListener('click', () => {
+    const isFile = button.dataset.source === 'file';
+    document.querySelectorAll('.package-source-btn').forEach(tab => { const selected = tab === button; tab.classList.toggle('active', selected); tab.setAttribute('aria-selected', String(selected)); });
+    const filePanel = document.getElementById('package-file-panel');
+    const urlPanel = document.getElementById('package-url-panel');
+    filePanel.hidden = !isFile; filePanel.classList.toggle('hidden', !isFile);
+    urlPanel.hidden = isFile; urlPanel.classList.toggle('hidden', isFile);
+}));
 document.getElementById('package-remote-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button');
     const input = {url:document.getElementById('package-url').value.trim()};
     const status = document.getElementById('package-management-status');
-    if (!confirm('Install code from this trusted source? Only continue if you trust the publisher. The plugin will not be activated automatically.\n' + input.url)) return;
+    if (!confirm('Install code only from a source you trust. Installation enables the plugin immediately.\\n' + input.url)) return;
     button.disabled = true; status.textContent = 'Downloading and installing...';
     try { await api('/plugin-packages/install-remote', {method:'POST',body:JSON.stringify(input)}); status.textContent = 'Installed.'; await loadPlugins(); } catch(error) { status.textContent = error.message; } finally { button.disabled = false; }
 });
@@ -2091,7 +1960,7 @@ async function installLocalBundle(files) {
     const file = files[0];
     if (!file.name.toLowerCase().endsWith('.json')) { status.textContent = 'Choose a .json bundle produced by plugin pack, not a ZIP or source file.'; return; }
     if (!file.size || file.size > 8 * 1024 * 1024) { status.textContent = 'Bundle must be non-empty and no larger than 8 MiB.'; return; }
-    if (!confirm(`Install trusted plugin code from ${file.name}? Installation does not approve permissions or activate the plugin.`)) return;
+    if (!confirm(`Install code from ${file.name} only if you trust its source. Installation enables it for rules, but does not grant permissions or activate it.`)) return;
     pluginInstallBusy = true; pluginBundleChoose.disabled = true; pluginDropZone.setAttribute('aria-busy', 'true');
     status.textContent = 'Installing local bundle...';
     try {
@@ -2117,20 +1986,6 @@ pluginDropZone.addEventListener('drop', event => {
 // Prevent accidental file navigation outside the explicit drop target.
 document.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); });
 document.addEventListener('drop', event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); });
-
-function formatSchema(schema) {
-    if (!schema) return '(none)';
-    if (schema.type === 'object' && schema.properties) {
-        const entries = Object.entries(schema.properties);
-        if (entries.length === 0) return '(no config)';
-        const lines = entries.map(([key, val]) => {
-            const req = schema.required && schema.required.includes(key) ? ' (required)' : '';
-            return `${key}: ${val.type || 'any'}${req}`;
-        });
-        return lines.join('\n');
-    }
-    return JSON.stringify(schema, null, 2);
-}
 
 // ---- Modal close handlers ----
 function onModalHidden(modal) {
@@ -3437,12 +3292,6 @@ async function openLogInspect(id) {
     statusEl.style.display = 'none';
     bodyEl.innerHTML = '<div class="inspect-empty">Loading\u2026</div>';
     modal.classList.remove('hidden');
-    let diagnostics = modal.querySelector('.plugin-diagnostic-details');
-    if (!diagnostics) { diagnostics = document.createElement('section'); diagnostics.className = 'plugin-diagnostic-details'; bodyEl.before(diagnostics); }
-    diagnostics.replaceChildren();
-    const logRecord = logEntries.find(entry => entry.id === id);
-    if (logRecord?.plugin_diagnostics) { const title = document.createElement('h3'); title.textContent = 'Plugin execution diagnostics'; const details = document.createElement('pre'); details.style.whiteSpace = 'pre-wrap'; details.textContent = JSON.stringify(logRecord.plugin_diagnostics, null, 2); diagnostics.append(title, details); }
-
     let data;
     try {
         const resp = await fetch(API_BASE + '/logs/' + id + '/inspect', { credentials: 'same-origin' });
@@ -4863,7 +4712,7 @@ function buildLogEntry(entry, isNew) {
     // this via a delegated click handler on the container (see
     // setupLogInspect) rather than per-row listeners, so streaming SSE
     // updates do not pile up listeners.
-    if ((capturePayloadsEnabled || entry.plugin_diagnostics) && entry.id !== undefined && entry.level !== 'debug') {
+    if (capturePayloadsEnabled && entry.id !== undefined && entry.level !== 'debug') {
         // Only request-level entries (not debug system messages) get the
         // clickable class. Debug entries are router/rule/pipeline trace
         // messages, not full request/response captures — clicking them
@@ -5014,7 +4863,7 @@ function applyLogFilter(query) {
 
         const text = [entry.model, entry.resolved_model, entry.path, entry.downstream_name,
             entry.downstream_id, entry.error, entry.alias_group, entry.method,
-            String(entry.status), entry.message, entry.level, JSON.stringify(entry.plugin_diagnostics || {})].join(' ').toLowerCase();
+            String(entry.status), entry.message, entry.level].join(' ').toLowerCase();
         div.style.display = (q === '' || text.indexOf(q) !== -1) ? '' : 'none';
     });
 }

@@ -290,10 +290,7 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 					reason = "cancelled"
 				}
 				_, _ = eventLifecycle(pipeline.UpstreamSteps, "upstreamEnd", reason, resp, ctx)
-				_, err := pipeline.streamLifecycle("streamEnd", reason, resp, ctx)
-				if err != nil {
-					log.Printf("plugin stream cleanup: %v", err)
-				}
+				_, _ = pipeline.streamLifecycle("streamEnd", reason, resp, ctx)
 			}
 		}()
 		fail := func(err error) streamOutcome {

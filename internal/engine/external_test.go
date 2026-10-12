@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -57,17 +58,9 @@ func TestEngine_FinishOncePerRetryBeforePublication(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatal("missing final publication")
 	}
-	if entries[0].PluginDiagnostics == nil {
-		t.Fatal("cleanup diagnostics missing from published request")
-	}
-	var finishAttempts []int
-	for _, d := range entries[0].PluginDiagnostics.Entries {
-		if d.Hook == "finish" {
-			finishAttempts = append(finishAttempts, d.Attempt)
-		}
-	}
-	if len(finishAttempts) != 2 || finishAttempts[0] != 0 || finishAttempts[1] != 1 {
-		t.Fatalf("finish diagnostics: %v", finishAttempts)
+	data, err := json.Marshal(entries[0])
+	if err != nil || strings.Contains(string(data), "plugin_diagnostics") {
+		t.Fatalf("plugin diagnostics must not be published: %s %v", data, err)
 	}
 }
 

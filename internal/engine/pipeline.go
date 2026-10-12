@@ -10,9 +10,7 @@ import (
 
 // PipelineStepConfig represents one step in a pipeline_config JSON array.
 type PipelineStepConfig struct {
-	PluginID      string                 `json:"plugin_id"`
-	Config        map[string]interface{} `json:"config,omitempty"`
-	FailurePolicy string                 `json:"failure_policy,omitempty"`
+	PluginID string `json:"plugin_id"`
 }
 
 // Pipeline describes the transformation steps for a matched rule.
@@ -89,23 +87,13 @@ func ParsePipelineConfig(jsonConfig string, registry PluginRegistry) (*Pipeline,
 		if IsInternalPlugin(registry, step.PluginID) {
 			continue
 		}
-		if step.FailurePolicy != "" && step.FailurePolicy != "fail_closed" && step.FailurePolicy != "safe_passthrough" {
-			return nil, fmt.Errorf("step %d: unknown failure_policy", index)
-		}
-		plugin, err := registry.CreatePlugin(step.PluginID, step.Config)
+		plugin, err := registry.CreatePlugin(step.PluginID, nil)
 		if err != nil {
 			return nil, fmt.Errorf("create plugin %s: %w", step.PluginID, err)
 		}
 
 		if external, ok := plugin.(*ExternalPlugin); ok {
 			external.stepIndex = index
-			external.failurePolicy = step.FailurePolicy
-			if step.FailurePolicy == "safe_passthrough" {
-				eligible, ok := external.runtime.(interface{ SafePolicyEligible() bool })
-				if !ok || !eligible.SafePolicyEligible() {
-					return nil, fmt.Errorf("step %d: safe_passthrough requires stateless buffered hooks", index)
-				}
-			}
 			p.ExternalSteps = append(p.ExternalSteps, external)
 			// Every step records the current request, even response-only plugins.
 			p.RequestSteps = append(p.RequestSteps, externalRequest{external})
@@ -119,9 +107,6 @@ func ParsePipelineConfig(jsonConfig string, registry PluginRegistry) (*Pipeline,
 				p.UpstreamSteps = append(p.UpstreamSteps, externalStream{p: external, upstream: true})
 			}
 			continue
-		}
-		if step.FailurePolicy == "safe_passthrough" {
-			return nil, fmt.Errorf("step %d: native plugins cannot use safe_passthrough", index)
 		}
 		if rt, ok := plugin.(RequestTransformer); ok {
 			p.RequestSteps = append(p.RequestSteps, rt)

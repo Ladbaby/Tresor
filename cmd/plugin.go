@@ -120,7 +120,7 @@ func pluginAPIRequest(cfg *config.AppConfig, method, path string, value any) ([]
 
 func init() {
 	group := &cobra.Command{Use: "plugin", Short: "Manage trusted local JavaScript packages"}
-	group.AddCommand(&cobra.Command{Use: "install <directory>", Short: "Install a package version without activating it", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	group.AddCommand(&cobra.Command{Use: "install <directory>", Short: "Install and enable a package version", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		files, err := readPluginDirectory(args[0])
 		if err != nil {
 			return err
@@ -160,6 +160,27 @@ func init() {
 		cmd.Println(string(data))
 		return nil
 	}})
+	for _, action := range []string{"enable", "disable", "delete"} {
+		action := action
+		group.AddCommand(&cobra.Command{Use: action + " <id> <version>", Short: action + " an installed plugin version", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(cfgFile)
+			if err != nil {
+				return err
+			}
+			payload := map[string]any{"id": args[0], "version": args[1]}
+			endpoint := "/api/plugin-packages/delete"
+			if action != "delete" {
+				endpoint = "/api/plugin-packages/enabled"
+				payload["enabled"] = action == "enable"
+			}
+			data, err := pluginAPIRequest(cfg, http.MethodPost, endpoint, payload)
+			if err != nil {
+				return err
+			}
+			cmd.Println(string(data))
+			return nil
+		}})
+	}
 	addPluginAuthorCommands(group)
 	rootCmd.AddCommand(group)
 }

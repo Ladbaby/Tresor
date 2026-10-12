@@ -35,7 +35,6 @@ type PipelineContext struct {
 	decode            *decodeMeasurement
 	ClientFormat      string
 	Execution         *AttemptExecution
-	Diagnostics       *PluginDiagnostics
 	Committed         bool
 	AttemptIndex      int
 	ExternalCollector *ExternalPlugin

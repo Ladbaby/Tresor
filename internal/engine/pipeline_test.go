@@ -1,7 +1,11 @@
 package engine
 
 import (
+	"errors"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"tresor/internal/jsplugins"
 )
 
 type mockRegistry struct{}
@@ -38,6 +42,28 @@ func TestParsePipelineConfig_Invalid(t *testing.T) {
 	_, err := ParsePipelineConfig("{invalid}", reg)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestLegacySkipPolicyAlwaysRaisesError(t *testing.T) {
+	f := &fakeExternal{hooks: map[string]func(map[string]any) (map[string]any, error){"request": func(map[string]any) (map[string]any, error) {
+		return nil, &jsplugins.InvocationError{Code: "plugin_exception", Plugin: "test/fail", Hook: "request", Cause: errors.New("SECRET plugin exception")}
+	}}}
+	p, err := ParsePipelineConfig(`[{"plugin_id":"test/fail","config":{"legacy":true},"failure_policy":"safe_passthrough"}]`, finishPublicationRegistry{NewExternalPlugin(f)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &PipelineContext{}
+	req := httptest.NewRequest("POST", "/", nil)
+	if err := p.beginAttempt(ctx, req, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = ExecuteRequestPipeline(req, []byte("{}"), ctx, p.RequestSteps)
+	if err == nil {
+		t.Fatal("legacy skip suppressed plugin failure")
+	}
+	if strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("plugin-authored text leaked: %v", err)
 	}
 }
 

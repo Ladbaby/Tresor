@@ -59,25 +59,24 @@ func (d *DurationMs) UnmarshalJSON(data []byte) error {
 
 // RequestLogEntry captures a single gateway request.
 type RequestLogEntry struct {
-	ID                int                `json:"id"`
-	Timestamp         time.Time          `json:"timestamp"`
-	Method            string             `json:"method"`
-	Path              string             `json:"path"`
-	Model             string             `json:"model"`
-	ResolvedModel     string             `json:"resolved_model,omitempty"`
-	DownstreamID      string             `json:"downstream_id"`
-	DownstreamName    string             `json:"downstream_name"`
-	AliasGroup        string             `json:"alias_group,omitempty"`
-	RuleIDs           []string           `json:"rule_ids,omitempty"`
-	ClientIP          string             `json:"client_ip,omitempty"`
-	Status            int                `json:"status"`
-	Duration          DurationMs         `json:"duration"`
-	Error             string             `json:"error,omitempty"`
-	Level             string             `json:"level,omitempty"`
-	Message           string             `json:"message,omitempty"`
-	PluginDiagnostics *PluginDiagnostics `json:"plugin_diagnostics,omitempty"`
-	deferRecord       bool
-	capture           *pendingCapture
+	ID             int        `json:"id"`
+	Timestamp      time.Time  `json:"timestamp"`
+	Method         string     `json:"method"`
+	Path           string     `json:"path"`
+	Model          string     `json:"model"`
+	ResolvedModel  string     `json:"resolved_model,omitempty"`
+	DownstreamID   string     `json:"downstream_id"`
+	DownstreamName string     `json:"downstream_name"`
+	AliasGroup     string     `json:"alias_group,omitempty"`
+	RuleIDs        []string   `json:"rule_ids,omitempty"`
+	ClientIP       string     `json:"client_ip,omitempty"`
+	Status         int        `json:"status"`
+	Duration       DurationMs `json:"duration"`
+	Error          string     `json:"error,omitempty"`
+	Level          string     `json:"level,omitempty"`
+	Message        string     `json:"message,omitempty"`
+	deferRecord    bool
+	capture        *pendingCapture
 
 	// Usage is a sparse accumulation of the request's prompt/output
 	// token counts, intentionally shaped the same way as the inspect
@@ -122,18 +121,6 @@ func (e RequestLogEntry) logSeverity() LogLevel {
 	}
 	if e.Status >= 400 {
 		return LogLevelWarn
-	}
-	if e.PluginDiagnostics != nil {
-		severity := LogLevelInfo
-		for _, d := range e.PluginDiagnostics.Entries {
-			if d.Level == "error" {
-				return LogLevelError
-			}
-			if d.Level == "warn" {
-				severity = LogLevelWarn
-			}
-		}
-		return severity
 	}
 	return LogLevelInfo
 }

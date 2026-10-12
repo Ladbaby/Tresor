@@ -27,14 +27,14 @@ func EffectiveLimits(large bool) Limits {
 }
 func (l Limits) Deadline() time.Duration { return time.Duration(l.DeadlineMs) * time.Millisecond }
 
-// InvocationError retains the original cause internally. Public details must
-// use Code, not Error(), which may include plugin exception text.
+// InvocationError exposes only host-selected fault metadata. The cause remains
+// available to internal errors.Is/As, never to logs or client messages.
 type InvocationError struct {
 	Code, Plugin, Hook string
 	Cause              error
 }
 
 func (e *InvocationError) Error() string {
-	return "plugin " + e.Plugin + " hook " + e.Hook + ": " + e.Cause.Error()
+	return "plugin " + e.Plugin + " hook " + e.Hook + ": " + e.Code
 }
 func (e *InvocationError) Unwrap() error { return e.Cause }

@@ -140,8 +140,55 @@ func (s *Store) GetRule(id string) (*Rule, error) {
 	return scanRule(rowId, name, patternPath, pipelineConfig, enabled, createdAt, matchFormat, matchDownstreamFmt, matchDownstreams, patternModelsRaw), nil
 }
 
+func (s *Store) migrateRulePipelines() error {
+	rows, err := s.db.Query(`SELECT id, pipeline_config FROM rules`)
+	if err != nil {
+		return err
+	}
+	type item struct{ id, raw string }
+	var items []item
+	for rows.Next() {
+		var v item
+		if err := rows.Scan(&v.id, &v.raw); err != nil {
+			rows.Close()
+			return err
+		}
+		items = append(items, v)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, v := range items {
+		normalized, err := config.NormalizePipelineJSON(v.raw)
+		if err != nil {
+			return fmt.Errorf("rule %s: %w", v.id, err)
+		}
+		if normalized != v.raw {
+			if _, err := tx.Exec(`UPDATE rules SET pipeline_config = ? WHERE id = ?`, normalized, v.id); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
 // CreateRule inserts a new rule.
 func (s *Store) CreateRule(r *Rule) error {
+	if r.PipelineConfig == "" {
+		r.PipelineConfig = "[]"
+	}
+	normalized, err := config.NormalizePipelineJSON(r.PipelineConfig)
+	if err != nil {
+		return err
+	}
+	r.PipelineConfig = normalized
 	if r.ID == "" {
 		r.ID = uuid.New().String()[:8]
 	}
@@ -173,7 +220,7 @@ func (s *Store) CreateRule(r *Rule) error {
 	mdsJSON, _ := json.Marshal(mds)
 	pmJSON, _ := json.Marshal(pm)
 
-	_, err := s.db.Exec(
+	_, err = s.db.Exec(
 		`INSERT INTO rules (id, name, pattern_path, pipeline_config, is_enabled,
 			match_format, match_downstream_format, match_downstreams, pattern_models)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -204,6 +251,11 @@ func (s *Store) UpdateRuleEnabled(ruleID string, enabled bool) error {
 
 // UpdateRule updates all mutable fields of a rule.
 func (s *Store) UpdateRule(r *Rule) error {
+	normalized, err := config.NormalizePipelineJSON(r.PipelineConfig)
+	if err != nil {
+		return err
+	}
+	r.PipelineConfig = normalized
 	enabled := 0
 	if r.IsEnabled {
 		enabled = 1
@@ -385,6 +437,9 @@ func (s *Store) upsertRules(rules []config.RuleCfg) error {
 	defer tx.Rollback()
 
 	for _, r := range rules {
+		if err := config.ValidatePipeline(r.PipelineConfig); err != nil {
+			return fmt.Errorf("rule %s: %w", r.ID, err)
+		}
 		// Marshal pipeline config to JSON string for storage
 		pipelineJSON := "[]"
 		if len(r.PipelineConfig) > 0 {

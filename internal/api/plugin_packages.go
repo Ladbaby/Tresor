@@ -69,8 +69,20 @@ func (r *Router) handlePluginPackages(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		items := r.pluginManager.List()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(items)
+		type packageView struct {
+			ID          string `json:"id"`
+			Version     string `json:"version"`
+			Description string `json:"description"`
+			Active      bool   `json:"active"`
+			Compatible  bool   `json:"compatible"`
+			Executable  bool   `json:"executable"`
+			Diagnostic  string `json:"diagnostic,omitempty"`
+		}
+		views := make([]packageView, 0, len(items))
+		for _, p := range items {
+			views = append(views, packageView{p.ID, p.Version, p.Description, p.Active, p.Compatible, p.Executable, p.Diagnostic})
+		}
+		writeJSON(w, http.StatusOK, views)
 	case "/install":
 		if req.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -90,7 +102,7 @@ func (r *Router) handlePluginPackages(w http.ResponseWriter, req *http.Request) 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(manifest)
-	case "/install-remote", "/approve", "/revoke":
+	case "/install-remote":
 		if req.Method != http.MethodPost {
 			writeError(w, 405, "method not allowed")
 			return
@@ -99,36 +111,49 @@ func (r *Router) handlePluginPackages(w http.ResponseWriter, req *http.Request) 
 			writeError(w, 415, "JSON required")
 			return
 		}
-		if action == "/install-remote" {
-			var input jsplugins.RemoteInput
-			if !decodePackageRequest(w, req, &input) {
-				return
-			}
-			runtimeCfgMu.RLock()
-			mode := proxy.Mode(runtimeCfg.ProxyMode)
-			runtimeCfgMu.RUnlock()
-			manifest, err := r.pluginManager.InstallRemote(req.Context(), input, mode)
-			if err != nil {
-				writeError(w, 400, err.Error())
-				return
-			}
-			writeJSON(w, http.StatusCreated, manifest)
+		var input jsplugins.RemoteInput
+		if !decodePackageRequest(w, req, &input) {
+			return
+		}
+		runtimeCfgMu.RLock()
+		mode := proxy.Mode(runtimeCfg.ProxyMode)
+		runtimeCfgMu.RUnlock()
+		manifest, err := r.pluginManager.InstallRemote(req.Context(), input, mode)
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, manifest)
+	case "/enabled", "/delete":
+		if req.Method != http.MethodPost {
+			writeError(w, 405, "method not allowed")
+			return
+		}
+		if media, _, err := mime.ParseMediaType(req.Header.Get("Content-Type")); err != nil || media != "application/json" {
+			writeError(w, 415, "JSON required")
 			return
 		}
 		var input struct {
-			ID          string   `json:"id"`
-			Version     string   `json:"version"`
-			Digest      string   `json:"digest"`
-			Permissions []string `json:"permissions"`
+			ID      string `json:"id"`
+			Version string `json:"version"`
+			Enabled *bool  `json:"enabled,omitempty"`
 		}
 		if !decodePackageRequest(w, req, &input) {
 			return
 		}
 		var err error
-		if action == "/approve" {
-			err = r.pluginManager.Approve(input.ID, input.Version, input.Digest, input.Permissions)
+		if action == "/delete" {
+			if input.Enabled != nil {
+				writeError(w, 400, "enabled is not a delete field")
+				return
+			}
+			err = r.pluginManager.Delete(input.ID, input.Version)
 		} else {
-			err = r.pluginManager.Revoke(input.ID, input.Version, input.Digest, input.Permissions)
+			if input.Enabled == nil {
+				writeError(w, 400, "enabled is required")
+				return
+			}
+			err = r.pluginManager.SetEnabled(input.ID, input.Version, *input.Enabled)
 		}
 		if err != nil {
 			writeError(w, 400, err.Error())

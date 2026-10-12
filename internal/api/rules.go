@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"tresor/internal/config"
 	"tresor/internal/engine"
 	"tresor/internal/jsplugins"
 	"tresor/internal/store"
@@ -15,6 +16,13 @@ import (
 func (r *Router) validateJSPipeline(raw string) error {
 	if raw == "" {
 		return nil
+	}
+	var supplied []config.PipelineStep
+	if err := json.Unmarshal([]byte(raw), &supplied); err != nil {
+		return fmt.Errorf("invalid pipeline: %w", err)
+	}
+	if err := config.ValidatePipeline(supplied); err != nil {
+		return err
 	}
 	var steps []engine.PipelineStepConfig
 	if err := json.Unmarshal([]byte(raw), &steps); err != nil {
@@ -30,23 +38,17 @@ func (r *Router) validateJSPipeline(raw string) error {
 	}
 	active, blocked := r.pluginManager.ExecutionSnapshot()
 	for index, step := range steps {
-		if step.FailurePolicy != "" && step.FailurePolicy != "fail_closed" && step.FailurePolicy != "safe_passthrough" {
-			return fmt.Errorf("step %d: unknown failure_policy", index)
-		}
 		if reason := blocked[step.PluginID]; reason != "" {
 			return fmt.Errorf("step %d: plugin %s %s", index, step.PluginID, reason)
 		}
 		pkg := active[step.PluginID]
 		if pkg == nil {
 			if jsplugins.ValidPackageID(step.PluginID) {
-				return fmt.Errorf("step %d: JS plugin %s is not active", index, step.PluginID)
+				return fmt.Errorf("step %d: plugin %s is not enabled", index, step.PluginID)
 			}
 			continue
 		}
-		if _, err := jsplugins.NewInstance(pkg, step.Config); err != nil {
-			return fmt.Errorf("step %d: %w", index, err)
-		}
-		if err := jsplugins.ValidatePolicy(pkg, step.Config, step.FailurePolicy); err != nil {
+		if _, err := jsplugins.NewInstance(pkg, nil); err != nil {
 			return fmt.Errorf("step %d: %w", index, err)
 		}
 	}

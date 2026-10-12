@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/dop251/goja"
-	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 const MaxSourceBytes = 8 << 20
@@ -24,7 +23,7 @@ const MaxFiles = 128
 const MaxEvents = 256
 
 var hooks = map[string]bool{"request": true, "responseHeaders": true, "response": true, "streamStart": true, "streamEvent": true, "streamEnd": true, "collectStart": true, "collectEvent": true, "collectEnd": true, "finish": true, "upstreamStart": true, "upstreamEvent": true, "upstreamEnd": true}
-var features = map[string]bool{"sse.events.v2": true, "sse.collect.v2": true, "sse.upstream.v2": true, "buffer.v1": true, "json.lossless.v1": true, "query.v1": true, "encoding.v1": true, "json.patch.v1": true, "log.v1": true}
+var features = map[string]bool{"sse.events.v2": true, "sse.collect.v2": true, "sse.upstream.v2": true, "buffer.v1": true, "json.lossless.v1": true, "query.v1": true, "encoding.v1": true, "json.patch.v1": true}
 var identity = regexp.MustCompile(`^[a-z][a-z0-9_-]*(?:/[a-z][a-z0-9_-]*)?$`)
 var versionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?$`)
 
@@ -43,7 +42,6 @@ type Package struct {
 	Digest     string
 	files      map[string]string
 	programs   map[string]*goja.Program
-	schema     *jsonschema.Schema
 	Compatible bool
 	granted    map[string]bool
 }
@@ -79,6 +77,37 @@ func safeFile(name string) bool {
 // are handled separately by Manager; namespacing is recommended for third parties.
 func ValidPackageID(id string) bool {
 	return identity.MatchString(id)
+}
+
+func emptyLegacySchema(schema map[string]interface{}) bool {
+	if len(schema) == 0 {
+		return true
+	}
+	for key, value := range schema {
+		switch key {
+		case "type":
+			if value != "object" {
+				return false
+			}
+		case "properties":
+			m, ok := value.(map[string]interface{})
+			if !ok || len(m) != 0 {
+				return false
+			}
+		case "required":
+			a, ok := value.([]interface{})
+			if !ok || len(a) != 0 {
+				return false
+			}
+		case "additionalProperties":
+			if value != false {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func LoadPackage(files map[string]string) (*Package, error) {
@@ -118,42 +147,39 @@ func loadPackage(files map[string]string, discover bool) (*Package, error) {
 	if _, ok := files[manifest.Entry]; !ok {
 		return nil, fmt.Errorf("entry missing")
 	}
-	permissions := map[string]bool{}
-	for _, permission := range manifest.Permissions {
-		if permission != "log.v1" || permissions[permission] {
-			return nil, fmt.Errorf("unsupported/duplicate permission %q", permission)
+	if len(manifest.Permissions) != 0 {
+		if !discover {
+			return nil, fmt.Errorf("permissions are unsupported")
 		}
-		permissions[permission] = true
+		compatible = false
 	}
 	seen := map[string]bool{}
 	for _, feature := range manifest.Requires {
-		if (compatible && !features[feature]) || seen[feature] {
-			return nil, fmt.Errorf("unsupported/duplicate feature %q", feature)
+		if !features[feature] || seen[feature] {
+			if !discover {
+				return nil, fmt.Errorf("unsupported/duplicate feature %q", feature)
+			}
+			compatible = false
 		}
 		seen[feature] = true
 	}
-	if seen["log.v1"] != permissions["log.v1"] {
-		return nil, fmt.Errorf("log.v1 requires matching capability and permission")
+	// Configuration is not part of the executable package contract. Empty legacy
+	// object schemas remain discoverable, while configurable packages are blocked.
+	if !emptyLegacySchema(manifest.ConfigSchema) {
+		if !discover {
+			return nil, fmt.Errorf("plugin configuration is unsupported")
+		}
+		compatible = false
 	}
-	if manifest.ConfigSchema == nil {
-		manifest.ConfigSchema = map[string]any{"type": "object"}
+	for _, text := range copied {
+		if strings.Contains(text, "tresor/log.v1") {
+			if !discover {
+				return nil, fmt.Errorf("plugin logging is unsupported")
+			}
+			compatible = false
+		}
 	}
-	// Schema compilation has no network loader: remote references must be bundled
-	// into the schema itself. Fix the dialect rather than trusting a package URL.
-	if dialect, ok := manifest.ConfigSchema["$schema"]; ok && dialect != "https://json-schema.org/draft/2020-12/schema" {
-		return nil, fmt.Errorf("schema must use draft 2020-12")
-	}
-	compiler := jsonschema.NewCompiler()
-	compiler.DefaultDraft(jsonschema.Draft2020)
-	compiler.UseLoader(noSchemaLoader{})
-	if err := compiler.AddResource("https://tresor.invalid/plugin-config", manifest.ConfigSchema); err != nil {
-		return nil, fmt.Errorf("schema: %w", err)
-	}
-	schema, err := compiler.Compile("https://tresor.invalid/plugin-config")
-	if err != nil {
-		return nil, fmt.Errorf("schema: %w", err)
-	}
-	pkg := &Package{Manifest: manifest, files: copied, programs: map[string]*goja.Program{}, schema: schema, Compatible: compatible}
+	pkg := &Package{Manifest: manifest, files: copied, programs: map[string]*goja.Program{}, Compatible: compatible}
 	sort.Strings(names)
 	for _, name := range names {
 		if compatible && strings.HasSuffix(name, ".js") {

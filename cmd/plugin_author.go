@@ -72,7 +72,7 @@ func addPluginAuthorCommands(group *cobra.Command) {
 	pack.Flags().StringVar(&output, "output", "", "New bundle output file")
 	group.AddCommand(pack)
 	var digest, signature, key string
-	remote := &cobra.Command{Use: "install-url <https-url>", Short: "Install a trusted HTTPS package without approval or activation", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	remote := &cobra.Command{Use: "install-url <https-url>", Short: "Install and enable a trusted HTTPS package", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load(cfgFile)
 		if err != nil {
 			return err
@@ -88,20 +88,4 @@ func addPluginAuthorCommands(group *cobra.Command) {
 	remote.Flags().StringVar(&signature, "signature", "", "Base64 Ed25519 signature")
 	remote.Flags().StringVar(&key, "public-key", "", "Base64 publisher public key supplied out of band")
 	group.AddCommand(remote)
-	for _, action := range []string{"approve", "revoke"} {
-		action := action
-		command := &cobra.Command{Use: action + " <id> <version> <digest> <permission...>", Short: action + " explicit digest-bound permissions", Args: cobra.MinimumNArgs(4), RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgFile)
-			if err != nil {
-				return err
-			}
-			data, err := pluginAPIRequest(cfg, http.MethodPost, "/api/plugin-packages/"+action, map[string]any{"id": args[0], "version": args[1], "digest": args[2], "permissions": args[3:]})
-			if err != nil {
-				return err
-			}
-			cmd.Println(string(data))
-			return nil
-		}}
-		group.AddCommand(command)
-	}
 }

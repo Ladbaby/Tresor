@@ -21,23 +21,19 @@ func TestJSPipelineConfigurationValidatedOnSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.SetPluginManager(manager)
-	files := map[string]string{"manifest.json": `{"id":"test/config","version":"1.0.0","api_version":2,"entry":"plugin.js","config_schema":{"type":"object","required":["value"],"properties":{"value":{"type":"string"}},"additionalProperties":false}}`, "plugin.js": `module.exports={request(){}}`}
+	files := map[string]string{"manifest.json": `{"id":"test/config","version":"1.0.0","api_version":2,"entry":"plugin.js"}`, "plugin.js": `module.exports={request(){}}`}
 	if _, err := manager.Install(files); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Activate("test/config", "1.0.0"); err != nil {
-		t.Fatal(err)
-	}
-	for _, pipeline := range []string{`[{"plugin_id":"test/config"}]`, `[{"plugin_id":"test/missing"}]`, `[{"plugin_id":"test/config","config":{"value":3}}}]`} {
+	for _, pipeline := range []string{`[{"plugin_id":"test/config","config":{"value":"valid"}}]`, `[{"plugin_id":"test/missing"}]`, `[{"plugin_id":"test/config","failure_policy":"safe_passthrough"}]`} {
 		body, _ := json.Marshal(map[string]any{"name": "Invalid", "pattern_path": "*", "pipeline_config": pipeline})
-		req := httptest.NewRequest("POST", "/api/rules", bytes.NewReader(body))
 		w := httptest.NewRecorder()
-		r.Handler().ServeHTTP(w, req)
+		r.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/api/rules", bytes.NewReader(body)))
 		if w.Code != 400 {
-			t.Fatalf("invalid config saved: %d %s", w.Code, w.Body)
+			t.Fatalf("removed settings accepted: %d %s", w.Code, w.Body)
 		}
 	}
-	if err := r.validateJSPipeline(`[{"plugin_id":"test/config","config":{"value":"valid"}}]`); err != nil {
+	if err := r.validateJSPipeline(`[{"plugin_id":"test/config"}]`); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -56,6 +52,7 @@ func TestPluginPackagesInstallActivateDiscovery(t *testing.T) {
 		t.Helper()
 		data, _ := json.Marshal(value)
 		req := httptest.NewRequest(method, path, bytes.NewReader(data))
+		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		return w
@@ -67,8 +64,11 @@ func TestPluginPackagesInstallActivateDiscovery(t *testing.T) {
 		t.Fatalf("install: %d %s", w.Code, w.Body)
 	}
 	w = request(http.MethodGet, "/api/plugins", nil)
-	if bytes.Contains(w.Body.Bytes(), []byte(`test/headers`)) {
-		t.Fatal("install activated package implicitly")
+	if !bytes.Contains(w.Body.Bytes(), []byte(`test/headers`)) {
+		t.Fatal("installed package was not enabled")
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("config_schema")) {
+		t.Fatal("configuration metadata exposed")
 	}
 	w = request(http.MethodPost, "/api/plugin-packages/activate", map[string]string{"id": "test/headers", "version": "1.0.0"})
 	if w.Code != 200 {
@@ -89,6 +89,61 @@ func TestPluginPackagesInstallActivateDiscovery(t *testing.T) {
 	w = request(http.MethodGet, "/api/plugin-packages", nil)
 	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte(`test/headers`)) {
 		t.Fatalf("list: %d %s", w.Code, w.Body)
+	}
+	for _, forbidden := range []string{"config_schema", "digest", "provenance", "permissions"} {
+		if bytes.Contains(w.Body.Bytes(), []byte(forbidden)) {
+			t.Fatalf("technical metadata exposed: %s", forbidden)
+		}
+	}
+	w = request(http.MethodPost, "/api/plugin-packages/enabled", map[string]any{"id": "test/headers", "version": "1.0.0", "enabled": false})
+	if w.Code != 200 {
+		t.Fatalf("disable: %d %s", w.Code, w.Body)
+	}
+	w = request(http.MethodGet, "/api/plugins", nil)
+	if bytes.Contains(w.Body.Bytes(), []byte("test/headers")) {
+		t.Fatal("disabled plugin discoverable")
+	}
+	w = request(http.MethodPost, "/api/plugin-packages/enabled", map[string]any{"id": "test/headers", "version": "1.0.0", "enabled": true})
+	if w.Code != 200 {
+		t.Fatalf("enable: %d %s", w.Code, w.Body)
+	}
+	w = request(http.MethodPost, "/api/plugin-packages/delete", map[string]any{"id": "test/headers", "version": "1.0.0"})
+	if w.Code != 200 {
+		t.Fatalf("delete: %d %s", w.Code, w.Body)
+	}
+	w = request(http.MethodGet, "/api/plugin-packages", nil)
+	if bytes.Contains(w.Body.Bytes(), []byte("test/headers")) {
+		t.Fatal("deleted plugin listed")
+	}
+}
+
+func TestPluginLifecycleMutationsStrict(t *testing.T) {
+	r := newTestRouter(t)
+	defer r.Stop()
+	manager, err := jsplugins.NewManager(t.TempDir(), plugins.BuiltinIDs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetPluginManager(manager)
+	for _, path := range []string{"/api/plugin-packages/enabled", "/api/plugin-packages/delete"} {
+		for _, tc := range []struct {
+			body, content, origin string
+			want                  int
+		}{
+			{body: `{}`, want: 415},
+			{body: `{"id":"a","id":"b","version":"1"}`, content: "application/json", want: 400},
+			{body: `{}`, content: "application/json", origin: "https://other.example", want: 403},
+			{body: `{"id":"test/a","version":"1.0.0","extra":true}`, content: "application/json", want: 400},
+		} {
+			req := httptest.NewRequest("POST", path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", tc.content)
+			req.Header.Set("Origin", tc.origin)
+			w := httptest.NewRecorder()
+			r.Handler().ServeHTTP(w, req)
+			if w.Code != tc.want {
+				t.Fatalf("%s: wanted %d got %d %s", path, tc.want, w.Code, w.Body)
+			}
+		}
 	}
 }
 
@@ -143,7 +198,7 @@ func TestPluginPackageRoutesProtectedAndStrict(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatalf("unsafe package accepted: %d", w.Code)
 	}
-	for _, path := range []string{"/api/plugin-packages/install", "/api/plugin-packages/activate", "/api/plugin-packages/install-remote", "/api/plugin-packages/approve", "/api/plugin-packages/revoke"} {
+	for _, path := range []string{"/api/plugin-packages/install", "/api/plugin-packages/activate", "/api/plugin-packages/install-remote", "/api/plugin-packages/enabled", "/api/plugin-packages/delete"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)

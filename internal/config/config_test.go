@@ -1,10 +1,69 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestNormalizePipelineJSONStripsLegacySettings(t *testing.T) {
+	got, err := NormalizePipelineJSON(`[{"plugin_id":"one","config":{"x":1},"failure_policy":"safe_passthrough"},{"plugin_id":"two","config":{},"failure_policy":"fail_closed"}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `[{"plugin_id":"one"},{"plugin_id":"two"}]` {
+		t.Fatalf("unexpected normalized pipeline: %s", got)
+	}
+}
+
+func TestValidatePipelineLegacySettings(t *testing.T) {
+	var steps []PipelineStep
+	if err := json.Unmarshal([]byte(`[{"plugin_id":"p","config":{},"failure_policy":"fail_closed"}]`), &steps); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePipeline(steps); err != nil {
+		t.Fatalf("legacy empty settings should be accepted: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`[{"plugin_id":"p","config":{"x":1}}]`), &steps); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePipeline(steps); err == nil {
+		t.Fatal("expected non-empty config rejection")
+	}
+}
+
+func TestLoad_LegacyPipelineMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`rules:
+  - id: old
+    name: Keep me
+    pipeline_config:
+      - plugin_id: first
+        config: {secret: obsolete}
+        failure_policy: safe_passthrough
+      - plugin_id: second
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.LegacyPipelineSettings {
+		t.Fatal("legacy settings not detected")
+	}
+	if err := ValidatePipeline(cfg.Rules[0].PipelineConfig); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(cfg.Rules[0].PipelineConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `[{"plugin_id":"first"},{"plugin_id":"second"}]` {
+		t.Fatalf("migration lost order: %s", data)
+	}
+}
 
 func TestLoad_Defaults(t *testing.T) {
 	dir := t.TempDir()

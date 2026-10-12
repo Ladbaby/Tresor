@@ -15,7 +15,6 @@ const executionTimeout = 250 * time.Millisecond
 
 type Instance struct {
 	pkg          *Package
-	config       map[string]any
 	vm           *goja.Runtime
 	exports      *goja.Object
 	invoke       goja.Callable
@@ -24,7 +23,6 @@ type Instance struct {
 	detachedBody map[string]any
 	invoking     bool
 	hostFault    string
-	logs         []LogEvent
 	mu           sync.Mutex
 }
 
@@ -35,23 +33,10 @@ func newInstance(pkg *Package, config map[string]any, validate bool) (*Instance,
 	if !pkg.Compatible {
 		return nil, fmt.Errorf("incompatible API: require V2 migration")
 	}
-	if config == nil {
-		config = map[string]any{}
+	if len(config) != 0 {
+		return nil, fmt.Errorf("plugin configuration is unsupported")
 	}
-	data, err := json.Marshal(config)
-	if err != nil || len(data) > MaxValueBytes {
-		return nil, fmt.Errorf("invalid/oversized configuration")
-	}
-	var detached map[string]any
-	if err := json.Unmarshal(data, &detached); err != nil {
-		return nil, err
-	}
-	if validate {
-		if err := pkg.schema.Validate(detached); err != nil {
-			return nil, fmt.Errorf("%s config: %w", pkg.Manifest.ID, err)
-		}
-	}
-	instance := &Instance{pkg: pkg, config: detached}
+	instance := &Instance{pkg: pkg}
 	if err := instance.Reset(); err != nil {
 		return nil, err
 	}
@@ -74,13 +59,17 @@ func (i *Instance) boundedFor(timeout time.Duration, fn func() error) error {
 	}()
 	return fn()
 }
-func (i *Instance) Reset() error {
+func (i *Instance) Reset() (result error) {
+	defer func() {
+		if result != nil {
+			result = &InvocationError{Code: "initialization_failed", Plugin: i.PluginName(), Hook: "initialize", Cause: result}
+		}
+	}()
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.vm = goja.New()
 	i.invoking = false
 	i.hostFault = ""
-	i.logs = nil
 	i.limits = EffectiveLimits(false)
 	i.vm.SetMaxCallStackSize(512)
 	return i.bounded(func() error {
@@ -90,7 +79,19 @@ func (i *Instance) Reset() error {
 		if err != nil {
 			return err
 		}
-		i.bindLogging()
+		i.vm.Set("__tresorFaultNative", func(call goja.FunctionCall) goja.Value {
+			code, ok := call.Argument(0).Export().(string)
+			if !ok {
+				i.fault("invalid_effect")
+			}
+			switch code {
+			case "buffer_bytes", "buffer_handles", "buffer_fragments", "state_bytes", "input_limit", "invalid_effect", "permission_denied", "log_limit":
+			default:
+				code = "invalid_effect"
+			}
+			i.fault(code)
+			return goja.Undefined()
+		})
 		i.vm.Set("__tresorQuote", func(call goja.FunctionCall) goja.Value {
 			if len(call.Arguments) != 1 {
 				panic(i.vm.NewTypeError("quote expects text"))
@@ -165,17 +166,6 @@ func (i *Instance) Reset() error {
 				} else if _, ok := libraries[spec]; !ok {
 					panic(i.vm.NewTypeError("forbidden import: %s", spec))
 				}
-				if spec == "tresor/log.v1" {
-					declared := false
-					for _, permission := range i.pkg.Manifest.Permissions {
-						if permission == "log.v1" {
-							declared = true
-						}
-					}
-					if !declared {
-						i.fault("permission_denied")
-					}
-				}
 				out, err := load(resolved)
 				if err != nil {
 					panic(i.vm.NewGoError(err))
@@ -214,9 +204,8 @@ func (i *Instance) Reset() error {
 		if _, err := freeze(goja.Undefined(), i.exports); err != nil {
 			return err
 		}
-		data, _ := json.Marshal(i.config)
 		init, _ := goja.AssertFunction(i.vm.Get("__tresorInit"))
-		if _, err = init(goja.Undefined(), i.vm.ToValue(string(data))); err != nil {
+		if _, err := init(goja.Undefined()); err != nil {
 			return err
 		}
 		if i.hostFault != "" {
@@ -243,7 +232,6 @@ func (i *Instance) Invoke(name string, input map[string]any) (map[string]any, er
 	limits := i.limits
 	i.invoking = true
 	i.hostFault = ""
-	i.logs = nil
 	defer func() { i.invoking = false }()
 	i.detachedBody = nil
 	inputCopy := make(map[string]any, len(input))
@@ -361,9 +349,9 @@ const __tresorBuffers=(()=>{
  const append=(h,s)=>{const b=get(h);if(typeof s!=='string')__tresorFault('invalid_effect');if(s==='')return;const first=s.charCodeAt(0),last=s.charCodeAt(s.length-1);const bytes=__tresorUTF8(s)-(b.tail>=55296&&b.tail<=56319&&first>=56320&&first<=57343?2:0);if(bytes>__tresorBufferLimit-__tresorBufferBytes)__tresorFault('buffer_bytes');if(__tresorFragments>=__tresorFragmentLimit)__tresorFault('buffer_fragments');b.parts.push(s);b.tail=last;b.bytes+=bytes;__tresorBufferBytes+=bytes;__tresorFragments++;};
  return Object.freeze({create,append,byteLength:h=>get(h).bytes,materialize:h=>get(h).parts.join(''),release:h=>{const b=get(h);__tresorBufferBytes-=b.bytes;__tresorFragments-=b.parts.length;__tresorBufferCount--;__tresorBufferStore.delete(h);},isBuffer:h=>__tresorBufferStore.has(h)});
 })();
-let __tresorConfig, __tresorState;
+let __tresorState;
 function __tresorDeepFreeze(x){ if(x && typeof x==='object'){for(const k of __tresorKeys(x))__tresorDeepFreeze(x[k]);__tresorFreeze(x);}return x; }
-function __tresorInit(config){__tresorConfig=__tresorDeepFreeze(__tresorJSONParse(config));__tresorState={};}
+function __tresorInit(){__tresorState={};}
 function __tresorStateSize(x){
  const seen=new Set();let total=0;
  const utf8=s=>{if(!/[^\x00-\x7f]/.test(s))return s.length;let n=0;for(let i=0;i<s.length;i++){const c=s.charCodeAt(i);if(c<128)n++;else if(c<2048)n+=2;else if(c>=55296&&c<=56319&&i+1<s.length&&s.charCodeAt(i+1)>=56320&&s.charCodeAt(i+1)<=57343){n+=4;i++;}else n+=3;}return n;};
@@ -373,7 +361,7 @@ function __tresorStateSize(x){
 function __tresorInvoke(exports,name,raw,limit,stateLimit,maxEvents,body){
  const parsed=__tresorJSONParse(raw);if(body!==undefined)parsed.body=body;
  const input=__tresorDeepFreeze(parsed);
- const args={...input,config:__tresorConfig,state:__tresorState};__tresorFreeze(args);
+ const args={...input,config:Object.freeze({}),state:__tresorState};__tresorFreeze(args);
  let result;
  try{result=exports[name](args);}catch(e){if(__tresorStateSize(__tresorState)>stateLimit)__tresorFault('state_bytes');throw e;}
  if(__tresorStateSize(__tresorState)>stateLimit)__tresorFault('state_bytes');
@@ -382,7 +370,7 @@ function __tresorInvoke(exports,name,raw,limit,stateLimit,maxEvents,body){
  if(!result || typeof result!=='object' || Array.isArray(result) || typeof result.then==='function')__tresorFault('invalid_effect');
  const allowed={request:['request','body','transport'],responseHeaders:['response'],response:['response','body'],upstreamStart:['events'],upstreamEvent:['events'],upstreamEnd:['events'],streamStart:['events'],streamEvent:['events'],streamEnd:['events'],collectStart:[],collectEvent:[],collectEnd:['body','response'],finish:[]}[name];
  for(const k of __tresorKeys(result))if(!allowed.includes(k))__tresorFault('invalid_effect');
- if(name==='finish'||name==='collectStart'||name==='collectEvent')__tresorFault('invalid_effect');
+
  if(result.events!==undefined&&(!Array.isArray(result.events)||result.events.length>maxEvents))__tresorFault('invalid_effect');
  if(result.body!==undefined){const b=result.body;if(!b||typeof b!=='object'||Array.isArray(b)||__tresorKeys(b).length!==2||typeof b.data!=='string')__tresorFault('invalid_effect');__tresorDetachBody(b.encoding,b.data);}
  const detached={};for(const k of __tresorKeys(result))if(k!=='body')Object.defineProperty(detached,k,{value:result[k],enumerable:true});

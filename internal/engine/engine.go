@@ -20,7 +20,7 @@ type PluginRegistry interface {
 type PluginInfo struct {
 	ID           string      `json:"id"`
 	Description  string      `json:"description"`
-	ConfigSchema interface{} `json:"config_schema,omitempty"`
+	ConfigSchema interface{} `json:"-"` // Internal host metadata; never user configuration.
 }
 
 // Engine is the core proxy handler. It matches incoming requests against

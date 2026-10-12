@@ -1336,13 +1336,27 @@ form .btn-primary {
 .plugin-drop-zone.drag-over, .plugin-drop-zone:focus-within { border-color: var(--accent); }
 .plugin-drop-zone[aria-busy="true"] { opacity: 0.65; }
 .plugin-table-scroll { overflow-x: auto; }
-#packages-table { min-width: 760px; }
-#packages-table details > summary { cursor: pointer; }
-#packages-table .schema-hint { white-space: pre-wrap; }
-
-#plugin-incompatibility.hidden {
-    display: none;
+#packages-table { min-width: 520px; }
+.package-install-tabs {
+    display: inline-flex;
+    gap: 0;
+    margin-top: 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    overflow: hidden;
 }
+.package-source-btn {
+    padding: 0.4rem 0.8rem;
+    border: 0;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.82rem;
+}
+.package-source-btn.active { background: var(--accent); color: #fff; }
+.package-source-panel.hidden { display: none; }
+.package-unavailable { color: var(--text-secondary); font-size: 0.78rem; font-style: italic; }
 
 /* Rules identifiers are readable labels, not source-code blocks. */
 #tab-rules table code {
@@ -1389,8 +1403,16 @@ form .btn-primary {
     display: block;
     margin-top: 0.25rem;
 }
+#packages-table th:last-child,
+#packages-table td:last-child {
+    width: 8rem;
+    min-width: 8rem;
+    white-space: nowrap;
+    overflow-wrap: normal;
+}
 .package-actions button {
     display: block;
+    white-space: nowrap;
     margin-bottom: 0.4rem;
 }
 #package-management-status:not(:empty) {
@@ -3870,6 +3892,10 @@ td .ds-toggle.rule-toggle {
     letter-spacing: 0.04em;
     background: var(--bg-tertiary);
     font-weight: 600;
+}
+
+.dash-models-table th:not(:first-child) {
+    text-align: right;
 }
 
 .dash-models-table tbody tr:last-child td {

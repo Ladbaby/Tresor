@@ -1,9 +1,11 @@
 package jsplugins
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -56,7 +58,7 @@ func TestPackageIDs(t *testing.T) {
 }
 
 func TestRuntimeIsolationAndValidation(t *testing.T) {
-	pkg := fixture(t, `let globalCount=0;module.exports={request({state,config,body}){state.count=(state.count||0)+1;globalCount++;return {body:{encoding:'utf8',data:String(state.count)+':'+globalCount}}}}`)
+	pkg := fixture(t, `let globalCount=0;module.exports={request({state,body}){state.count=(state.count||0)+1;globalCount++;return {body:{encoding:'utf8',data:String(state.count)+':'+globalCount}}}}`)
 	instance, err := NewInstance(pkg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +95,49 @@ func TestRuntimeRejectsFailures(t *testing.T) {
 		}
 	}
 }
+func TestInitializationExceptionSanitized(t *testing.T) {
+	_, err := LoadPackage(map[string]string{"manifest.json": `{"id":"test/error","version":"1.0.0","api_version":2,"entry":"plugin.js"}`, "plugin.js": `throw new Error('SECRET_PAYLOAD')`})
+	if err == nil || strings.Contains(err.Error(), "SECRET_PAYLOAD") {
+		t.Fatalf("unsafe initialization error: %v", err)
+	}
+}
+
+func TestLegacyConfigCacheBlockedAndDeletable(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{"manifest.json": `{"id":"test/legacy","version":"1.0.0","api_version":2,"entry":"plugin.js","config_schema":{"type":"object","properties":{"secret":{"type":"string"}}}}`, "plugin.js": `throw new Error('must not evaluate')`}
+	if _, err := m.Install(files); err == nil {
+		t.Fatal("configurable install accepted")
+	}
+	digest, err := SourceDigest(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "packages", digest+".json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	m, err = NewManager(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.List()) != 1 || m.List()[0].Executable {
+		t.Fatal("legacy package not blocked")
+	}
+	if err := m.SetEnabled("test/legacy", "1.0.0", true); err == nil {
+		t.Fatal("blocked enable accepted")
+	}
+	if err := m.Delete("test/legacy", "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManagerDurableAndImmutable(t *testing.T) {
 	dir := t.TempDir()
 	manager, err := NewManager(dir, []string{"native"})
@@ -103,8 +148,8 @@ func TestManagerDurableAndImmutable(t *testing.T) {
 	if _, err := manager.Install(files); err != nil {
 		t.Fatal(err)
 	}
-	if len(manager.Snapshot()) != 0 {
-		t.Fatal("install activated")
+	if len(manager.Snapshot()) != 1 {
+		t.Fatal("install did not enable plugin")
 	}
 	if err := manager.Activate("test/installed", "1.0.0"); err != nil {
 		t.Fatal(err)

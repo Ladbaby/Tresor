@@ -537,5 +537,5 @@ func collectExternalPipeline(resp *http.Response, ctx *PipelineContext, pipeline
 	if err == nil {
 		e.Statistics.CollectedBytes = int64(len(body))
 	}
-	return body, err
+	return body, owner.invocationFailure("collectEnd", err)
 }
