@@ -33,12 +33,19 @@ func installThinkingPackage(t *testing.T, base string) {
 		}
 		files[name] = string(data)
 	}
+	var manifest struct {
+		ID      string `json:"id"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(files["manifest.json"]), &manifest); err != nil {
+		t.Fatal(err)
+	}
 	for _, setup := range []struct {
 		path  string
 		value any
 	}{
 		{"/api/plugin-packages/install", map[string]any{"files": files}},
-		{"/api/plugin-packages/activate", map[string]string{"id": "remove_thinking", "version": "2.0.0"}},
+		{"/api/plugin-packages/activate", map[string]string{"id": manifest.ID, "version": manifest.Version}},
 	} {
 		data, _ := json.Marshal(setup.value)
 		resp, err := http.Post(base+setup.path, "application/json", bytes.NewReader(data))

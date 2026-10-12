@@ -268,18 +268,22 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			// An explicit error event is a definitive answer, never an empty
 			// response — do not retry it.
 			if outcome.streamErr != nil {
+				label := "upstream stream error"
+				if outcome.pluginFailure {
+					label = "plugin stream error"
+				}
 				if outcome.committed {
 					// Bytes already reached the client, so the 200 status cannot
 					// be recalled; the error event was passed through verbatim.
 					// Record it as a failure so it does not log as a success.
 					entry.Status = cw.status
-					entry.Error = "upstream stream error"
+					entry.Error = label
 					entry.Duration = DurationMs(time.Since(start))
 					e.logger.Record(&entry)
-					log.Printf("upstream stream error after content: %s", outcome.streamErr.Message)
+					log.Printf("%s after content: %s", label, outcome.streamErr.Message)
 					return
 				}
-				e.logAndReturnError(cw, &entry, start, &gatewayError{outcome.streamErr.Status, "upstream stream error", outcome.streamErr.Message, "upstream stream error", nil})
+				e.logAndReturnError(cw, &entry, start, &gatewayError{outcome.streamErr.Status, label, outcome.streamErr.Message, label, nil})
 				return
 			}
 

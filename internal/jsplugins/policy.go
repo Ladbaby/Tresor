@@ -1,7 +1,5 @@
 package jsplugins
 
-import "time"
-
 // Limits is selected by the host, never by package source. It bounds decoded
 // values independently from JSON envelope expansion; it is not a memory sandbox.
 type Limits struct {
@@ -13,19 +11,17 @@ type Limits struct {
 	BufferFragments int `json:"bufferFragments"`
 	Events          int `json:"events"`
 	WireBytes       int `json:"wireBytes"`
-	DeadlineMs      int `json:"deadlineMs"`
 }
 
 func EffectiveLimits(large bool) Limits {
-	body, deadline := MaxValueBytes, 250
+	body := MaxValueBytes
 	if large {
-		body, deadline = MaxCollectionBytes, 10000
+		body = MaxCollectionBytes
 	}
 	return Limits{BodyBytes: body, EventBytes: body, StateBytes: MaxValueBytes,
 		BufferBytes: body, BufferHandles: 65536, BufferFragments: 1 << 20, Events: MaxEvents,
-		WireBytes: 6*body + (1 << 20), DeadlineMs: deadline}
+		WireBytes: 6*body + (1 << 20)}
 }
-func (l Limits) Deadline() time.Duration { return time.Duration(l.DeadlineMs) * time.Millisecond }
 
 // InvocationError exposes only host-selected fault metadata. The cause remains
 // available to internal errors.Is/As, never to logs or client messages.

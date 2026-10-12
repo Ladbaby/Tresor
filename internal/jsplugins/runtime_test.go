@@ -100,13 +100,42 @@ func TestRuntimeIsolationAndValidation(t *testing.T) {
 		}
 	}
 }
+func TestRuntimeExecutionIsUntimed(t *testing.T) {
+	// Deliberately finite work exceeding the removed ordinary 250 ms cutoff.
+	// Do not test infinite loops: trusted authors are responsible for termination.
+	pkg := fixture(t, `const until=Date.now()+350;while(Date.now()<until){};module.exports={request({context}){if('deadlineMs' in context.limits)throw Error('stale deadline');const end=Date.now()+350;while(Date.now()<end){};return {body:{encoding:'utf8',data:'completed'}}}}`)
+	instance, err := NewInstance(pkg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, large := range []bool{false, true} {
+		limits := EffectiveLimits(large)
+		instance.SetLimits(limits)
+		metadata, err := json.Marshal(limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(metadata, &fields); err != nil {
+			t.Fatal(err)
+		}
+		out, err := instance.Invoke("request", map[string]any{"context": map[string]any{"limits": fields}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out["body"].(map[string]any)["data"] != "completed" {
+			t.Fatal(out)
+		}
+	}
+}
+
 func TestRuntimeRejectsFailures(t *testing.T) {
-	for _, source := range []string{`module.exports={typo(){}}`, `require('fs');module.exports={}`, `while(true){}`, `module.exports={request:1}`} {
+	for _, source := range []string{`module.exports={typo(){}}`, `require('fs');module.exports={}`, `throw new Error('finite initialization failure')`, `module.exports={request:1}`} {
 		if _, err := LoadPackage(map[string]string{"manifest.json": `{"id":"test/failure","version":"1.0.0","api_version":2,"entry":"plugin.js"}`, "plugin.js": source}); err == nil {
 			t.Fatalf("accepted %s", source)
 		}
 	}
-	for _, result := range []string{`null`, `{routing:'evil'}`, `{then(){}}`, `(()=>{while(true){}})()`, `{get body(){while(true){}}}`} {
+	for _, result := range []string{`null`, `{routing:'evil'}`, `{then(){}}`, `(()=>{throw new Error('finite hook failure')})()`, `{get body(){throw new Error('finite getter failure')}}`} {
 		pkg := fixture(t, fmt.Sprintf(`module.exports={request(){return %s}}`, result))
 		instance, err := NewInstance(pkg, nil)
 		if err != nil {
@@ -199,6 +228,47 @@ func TestManagerDurableAndImmutable(t *testing.T) {
 		t.Fatal("failed activation changed state")
 	}
 }
+func TestLosslessLargeUnicodeStreamEvent(t *testing.T) {
+	// Many numeric tokens ahead of Unicode strings exposed quadratic suffix
+	// copying. Include large escaped tool arguments as well as structured data.
+	items := strings.Repeat(`{"n":9007199254740993,"decimal":1.2300e+05,"text":"工具\\\"argument"},`, 900)
+	raw := `{"output":[` + strings.TrimSuffix(items, ",") + `],"arguments":` + fmt.Sprintf("%q", strings.Repeat("工具\\\"", 12000)) + `}`
+	pkg := fixture(t, `const j=require('tresor/json.v1');module.exports={streamEvent({event}){const p=j.parseLossless(event.data);if(p.output[0].n.toString()!=='9007199254740993'||p.output[0].decimal.toString()!=='1.2300e+05')throw Error('number changed');}}`)
+	instance, err := NewInstance(pkg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := instance.Invoke("streamEvent", map[string]any{"event": map[string]any{"data": raw}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLosslessStringSemantics(t *testing.T) {
+	pkg := fixture(t, `const j=require('tresor/json.v1');module.exports={request({body}){const p=j.parseLossless(body.data);if(typeof p==='string'&&p!==JSON.parse(body.data)&&!/[\ud800-\udfff]/.test(p))throw Error('string semantics changed');if(body.data==='"\\ud800"'&&p.charCodeAt(0)!==0xd800)throw Error('high surrogate changed');if(body.data==='"\\udc00"'&&p.charCodeAt(0)!==0xdc00)throw Error('low surrogate changed');if(p&&typeof p==='object'&&Object.prototype.hasOwnProperty.call(p,'__proto__')&&(Object.getPrototypeOf(p)!==Object.prototype||p.polluted!==undefined))throw Error('prototype changed');return {body:{encoding:'utf8',data:j.stringifyLossless(p)}}}}`)
+	instance, err := NewInstance(pkg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{`{"__proto__":{"polluted":true},"n":-0,"d":1.2300e+05}`, `"\\\"\\\\\\/\\b\\f\\n\\r\\t"`, `"\ud800"`, `"\udc00"`, `"\ud83d\ude00"`, `"工具😀"`} {
+		out, err := instance.Invoke("request", map[string]any{"body": map[string]any{"encoding": "utf8", "data": raw}})
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		result := out["body"].(map[string]any)["data"].(string)
+		if raw[0] == '{' && result != raw {
+			t.Fatalf("lossless object changed: %s", result)
+		}
+		if !json.Valid([]byte(result)) {
+			t.Fatalf("invalid result: %s", result)
+		}
+	}
+	for _, raw := range []string{`"\x"`, `"\u12xz"`, `"\u123"`, `"unterminated`, "\"control\n\"", `01`, `1e`, `+1`, `1.`, `--1`, "\u00a01"} {
+		if _, err := instance.Invoke("request", map[string]any{"body": map[string]any{"encoding": "utf8", "data": raw}}); err == nil {
+			t.Fatalf("accepted invalid JSON %q", raw)
+		}
+	}
+}
+
 func TestLosslessLibraryPatch(t *testing.T) {
 	pkg := fixture(t, `const j=require('tresor/json.v1');module.exports={request(){const raw='{"big":9007199254740993,"decimal":1.234567890123456789,"array":[1,2]}';const out=j.patch(raw,[{op:'add',path:'/array/-',value:'tail'},{op:'replace',path:'/new',value:1}]);return {body:{encoding:'utf8',data:out}}}}`)
 	instance, _ := NewInstance(pkg, nil)

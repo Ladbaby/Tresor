@@ -20,6 +20,57 @@ type resetFailureRuntime struct {
 func (r *resetFailureRuntime) Reset() error    { r.resets++; return r.resetErr }
 func (r *resetFailureRuntime) ReleaseBuffers() { r.releases++ }
 
+func TestPluginStreamFailureReachesAnthropicClient(t *testing.T) {
+	for _, afterContent := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before_content", true: "after_content"}[afterContent], func(t *testing.T) {
+			s := newTestStore(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"local\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			}))
+			defer server.Close()
+			addDownstream(t, s, "failure-ds", "failure-ds", server.URL, "test-key", "anthropic")
+			addOutputModelIDs(t, s, "failure-ds", "failure-model")
+			addRule(t, s, "failure-rule", "failure", "*", "", "failure-ds", `[{"plugin_id":"test/failure"}]`, true)
+			eng := New(s)
+			defer eng.Stop()
+			ends, finishes, calls := 0, 0, 0
+			f := &fakeExternal{hooks: map[string]func(map[string]any) (map[string]any, error){
+				"streamEvent": func(map[string]any) (map[string]any, error) {
+					calls++
+					if afterContent && calls == 1 {
+						return nil, nil
+					}
+					return nil, &jsplugins.InvocationError{Code: "plugin_failure", Plugin: "test/failure@1.0.0", Hook: "streamEvent", Cause: errors.New("PRIVATE_PAYLOAD")}
+				},
+				"streamEnd": func(map[string]any) (map[string]any, error) { ends++; return nil, nil },
+				"finish":    func(map[string]any) (map[string]any, error) { finishes++; return nil, nil },
+			}}
+			eng.SetRegistry(finishPublicationRegistry{NewExternalPlugin(f)})
+			w := httptest.NewRecorder()
+			eng.HandleProxy(w, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"failure-model","stream":true,"messages":[]}`)))
+			body := w.Body.String()
+			want := http.StatusBadGateway
+			if afterContent {
+				want = http.StatusOK
+			}
+			if w.Code != want || strings.Contains(body, "PRIVATE_PAYLOAD") || strings.Contains(body, "event: message_stop") || !strings.Contains(body, "plugin_failure") {
+				t.Fatalf("status=%d body=%s", w.Code, body)
+			}
+			if afterContent && (!strings.Contains(body, "event: error") || !strings.Contains(body, `"type":"api_error"`)) {
+				t.Fatalf("missing Anthropic error: %s", body)
+			}
+			entries := eng.GetLogger().RecentEntries(10)
+			if len(entries) != 1 || entries[0].Error != "plugin stream error" {
+				t.Fatalf("wrong logs: %+v", entries)
+			}
+			if ends != 1 || finishes != 1 {
+				t.Fatalf("cleanup ends=%d finishes=%d", ends, finishes)
+			}
+		})
+	}
+}
+
 func TestPartialAttemptInitializationCleanup(t *testing.T) {
 	primary := errors.New("reset failed")
 	var finishes [3]int
@@ -94,7 +145,7 @@ func TestResponseHeadersObserveOriginalContentTypeAndClassification(t *testing.T
 func TestResponseHeaderFailureReachesFinish(t *testing.T) {
 	for _, invalid := range []bool{false, true} {
 		t.Run(map[bool]string{false: "exception", true: "invalid_effect"}[invalid], func(t *testing.T) {
-			primary := &jsplugins.InvocationError{Code: "deadline", Plugin: "test/header@2.0.0", Hook: "responseHeaders", Cause: errors.New("private cause")}
+			primary := &jsplugins.InvocationError{Code: "plugin_failure", Plugin: "test/header@2.0.0", Hook: "responseHeaders", Cause: errors.New("private cause")}
 			var outcome map[string]any
 			r := &fakeExternal{hooks: map[string]func(map[string]any) (map[string]any, error){
 				"responseHeaders": func(map[string]any) (map[string]any, error) {
@@ -120,7 +171,7 @@ func TestResponseHeaderFailureReachesFinish(t *testing.T) {
 				t.Fatal(err)
 			}
 			detail := outcome["error"].(map[string]any)
-			code := "deadline"
+			code := "plugin_failure"
 			if invalid {
 				code = "invalid_effect"
 			}

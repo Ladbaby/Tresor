@@ -6,12 +6,9 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/dop251/goja"
 )
-
-const executionTimeout = 250 * time.Millisecond
 
 type Instance struct {
 	pkg          *Package
@@ -50,23 +47,66 @@ func newInstance(pkg *Package, config map[string]any, validate bool) (*Instance,
 	}
 	return instance, nil
 }
-func (i *Instance) PluginName() string { return i.pkg.Manifest.ID + "@" + i.pkg.Manifest.Version }
-func (i *Instance) bounded(fn func() error) error {
-	return i.boundedFor(executionTimeout, fn)
+
+// decodeJSONString scans a bounded ECMAScript string without converting numbers
+// or replacing unpaired UTF-16 surrogates. Callers validate the opening quote.
+func decodeJSONString(text goja.String, start int) (int, goja.String, error) {
+	units := make([]uint16, 0, 64)
+	for p := start + 1; p < text.Length(); p++ {
+		c := text.CharAt(p)
+		switch {
+		case c == '"':
+			return p + 1, goja.StringFromUTF16(units), nil
+		case c < 0x20:
+			return 0, nil, fmt.Errorf("unescaped control character")
+		case c == '\\':
+			p++
+			if p >= text.Length() {
+				return 0, nil, fmt.Errorf("unfinished escape")
+			}
+			switch text.CharAt(p) {
+			case '"', '\\', '/':
+				c = text.CharAt(p)
+			case 'b':
+				c = '\b'
+			case 'f':
+				c = '\f'
+			case 'n':
+				c = '\n'
+			case 'r':
+				c = '\r'
+			case 't':
+				c = '\t'
+			case 'u':
+				c = 0
+				for n := 0; n < 4; n++ {
+					p++
+					if p >= text.Length() {
+						return 0, nil, fmt.Errorf("unfinished unicode escape")
+					}
+					h := text.CharAt(p)
+					switch {
+					case h >= '0' && h <= '9':
+						h -= '0'
+					case h >= 'a' && h <= 'f':
+						h = h - 'a' + 10
+					case h >= 'A' && h <= 'F':
+						h = h - 'A' + 10
+					default:
+						return 0, nil, fmt.Errorf("invalid unicode escape")
+					}
+					c = c*16 + h
+				}
+			default:
+				return 0, nil, fmt.Errorf("invalid escape")
+			}
+		}
+		units = append(units, c)
+	}
+	return 0, nil, fmt.Errorf("unterminated string")
 }
 
-// Larger collection values still run under a finite synchronous deadline.
-func (i *Instance) boundedFor(timeout time.Duration, fn func() error) error {
-	done := make(chan struct{})
-	timer := time.AfterFunc(timeout, func() { i.vm.Interrupt("plugin execution deadline"); close(done) })
-	defer func() {
-		if !timer.Stop() {
-			<-done
-		}
-		i.vm.ClearInterrupt()
-	}()
-	return fn()
-}
+func (i *Instance) PluginName() string { return i.pkg.Manifest.ID + "@" + i.pkg.Manifest.Version }
 func (i *Instance) Reset() (result error) {
 	defer func() {
 		if result != nil {
@@ -80,9 +120,10 @@ func (i *Instance) Reset() (result error) {
 	i.hostFault = ""
 	i.limits = EffectiveLimits(false)
 	i.vm.SetMaxCallStackSize(512)
-	return i.bounded(func() error {
+	// Initialization is deliberately untimed, like plugin hook execution.
+	return func() error {
 		// Every value crossing the boundary is JSON-detached. No reflection or live
-		// Go objects are exposed to source. Conversion/getters stay under deadline.
+		// Go objects are exposed to source; plugin authors control execution time.
 		_, err := i.vm.RunString(runtimePrelude)
 		if err != nil {
 			return err
@@ -99,6 +140,40 @@ func (i *Instance) Reset() (result error) {
 			}
 			i.fault(code)
 			return goja.Undefined()
+		})
+		// Decode only string tokens natively. No JSON numbers cross this boundary;
+		// UTF-16 code units preserve lone surrogates and JS JSON.parse semantics.
+		i.vm.Set("__tresorJSONString", func(call goja.FunctionCall) goja.Value {
+			text, ok := call.Argument(0).(goja.String)
+			start := call.Argument(1).ToInteger()
+			if !ok || text.Length() > MaxCollectionBytes || start < 0 || start >= int64(text.Length()) || text.CharAt(int(start)) != '"' {
+				panic(i.vm.NewTypeError("invalid JSON string input"))
+			}
+			end, decoded, err := decodeJSONString(text, int(start))
+			if err != nil {
+				panic(i.vm.NewTypeError("invalid JSON string"))
+			}
+			return i.vm.NewArray(end, decoded)
+		})
+		i.vm.Set("__tresorJSONNumber", func(call goja.FunctionCall) goja.Value {
+			text, ok := call.Argument(0).(goja.String)
+			start := int(call.Argument(1).ToInteger())
+			if !ok || text.Length() > MaxCollectionBytes || start < 0 || start >= text.Length() {
+				panic(i.vm.NewTypeError("invalid JSON number input"))
+			}
+			p := start
+			for p < text.Length() {
+				c := text.CharAt(p)
+				if (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' {
+					p++
+				} else {
+					break
+				}
+			}
+			if p == start {
+				panic(i.vm.NewTypeError("invalid JSON number"))
+			}
+			return text.Substring(start, p)
 		})
 		i.vm.Set("__tresorQuote", func(call goja.FunctionCall) goja.Value {
 			if len(call.Arguments) != 1 {
@@ -221,7 +296,7 @@ func (i *Instance) Reset() (result error) {
 		}
 		i.invoke, _ = goja.AssertFunction(i.vm.Get("__tresorCheckedInvoke"))
 		return nil
-	})
+	}()
 }
 func (i *Instance) HasHook(name string) bool {
 	i.mu.Lock()
@@ -279,7 +354,7 @@ func (i *Instance) Invoke(name string, input map[string]any) (map[string]any, er
 		return nil, &InvocationError{Code: "input_limit", Plugin: i.PluginName(), Hook: name, Cause: fmt.Errorf("input exceeds limit")}
 	}
 	var result map[string]any
-	err = i.boundedFor(limits.Deadline(), func() error {
+	err = func() error {
 		out, err := i.invoke(goja.Undefined(), i.exports, i.vm.ToValue(name), i.vm.ToValue(string(data)), i.vm.ToValue(limits.WireBytes), i.vm.ToValue(limits.StateBytes), i.vm.ToValue(limits.Events), inputBody)
 		if err != nil {
 			return err
@@ -292,7 +367,7 @@ func (i *Instance) Invoke(name string, input map[string]any) (map[string]any, er
 			return fmt.Errorf("result exceeds limit")
 		}
 		return json.Unmarshal([]byte(text), &result)
-	})
+	}()
 	if name == "finish" {
 		release, _ := goja.AssertFunction(i.vm.Get("__tresorReleaseBuffers"))
 		if release != nil {
@@ -303,11 +378,7 @@ func (i *Instance) Invoke(name string, input map[string]any) (map[string]any, er
 		return nil, &InvocationError{Code: i.hostFault, Plugin: i.PluginName(), Hook: name, Cause: fmt.Errorf("host contract violation")}
 	}
 	if err != nil {
-		code := "plugin_failure"
-		if _, ok := err.(*goja.InterruptedError); ok {
-			code = "deadline"
-		}
-		return nil, &InvocationError{Code: code, Plugin: i.PluginName(), Hook: name, Cause: err}
+		return nil, &InvocationError{Code: "plugin_failure", Plugin: i.PluginName(), Hook: name, Cause: err}
 	}
 	if code, ok := result["__hostFailure"].(string); ok {
 		return nil, &InvocationError{Code: code, Plugin: i.PluginName(), Hook: name, Cause: fmt.Errorf("hook contract failed")}

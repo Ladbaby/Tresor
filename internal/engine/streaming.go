@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,9 +18,9 @@ type streamOutcome struct {
 	// empty is true when no real content was produced and retry-on-empty is
 	// enabled, signalling HandleProxy to retry the upstream.
 	empty bool
-	// streamErr is non-nil when the downstream delivered a fatal error event
-	// in-band on an otherwise-200 stream.
-	streamErr *StreamError
+	// streamErr reports fatal upstream events or plugin execution failures.
+	streamErr     *StreamError
+	pluginFailure bool
 	// committed reports whether the HTTP status reached the client. When false,
 	// the caller can still replace it with an error status.
 	committed bool
@@ -107,6 +108,30 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	// streamErr is set when a fatal in-band error event is seen. Scanning stops
 	// at that point — nothing after the error is meaningful.
 	var streamErr *StreamError
+	pluginFailure := false
+	writePluginFailure := func(err error) {
+		if !w.IsFlushed() {
+			return
+		}
+		message := err.Error()
+		format := ctx.ClientFormat
+		var payload []byte
+		switch format {
+		case "anthropic":
+			payload, _ = json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "api_error", "message": message}})
+			_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", payload)
+		case "responses", "openai_responses":
+			payload, _ = json.Marshal(map[string]any{"type": "error", "code": "server_error", "message": message})
+			_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", payload)
+		case "gemini":
+			payload, _ = json.Marshal(map[string]any{"error": map[string]any{"code": 500, "status": "INTERNAL", "message": message}})
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+		default:
+			payload, _ = json.Marshal(map[string]any{"error": map[string]string{"type": "server_error", "code": "plugin_failure", "message": message}})
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+		}
+		SafeFlush(w)
+	}
 
 	// releaseHeld and commitStatus are assigned below, once the write helpers
 	// exist. finish() is declared first because the early-exit paths that run
@@ -145,9 +170,10 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 			w.Flush()
 		}
 		return streamOutcome{
-			empty:     empty,
-			streamErr: streamErr,
-			committed: w.IsFlushed(),
+			empty:         empty,
+			streamErr:     streamErr,
+			pluginFailure: pluginFailure,
+			committed:     w.IsFlushed(),
 		}
 	}
 
@@ -294,11 +320,13 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 			}
 		}()
 		fail := func(err error) streamOutcome {
+			pluginFailure = true
 			if ctx.execution().Failure == nil {
 				ctx.execution().Failure = err
 			}
-			streamErr = &StreamError{Status: http.StatusBadGateway, Message: fmt.Sprintf("plugin stream error: %v", err)}
+			streamErr = &StreamError{Status: http.StatusBadGateway, Message: err.Error()}
 			discardPending()
+			writePluginFailure(err)
 			record()
 			return finish()
 		}

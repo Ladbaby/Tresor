@@ -1,6 +1,7 @@
 package jsplugins
 
-// Versioned pure libraries have no engine access or native Go bindings.
+// Versioned libraries have no engine access. JSON token helpers are bounded,
+// pure host operations; plugins receive no filesystem or network capabilities.
 var libraries = map[string]string{
 	"tresor/json.v1":     losslessJSON,
 	"tresor/query.v1":    queryLibrary,
@@ -12,14 +13,16 @@ const losslessJSON = `
 const tokens=new WeakMap();
 class NumberToken {constructor(raw){if(typeof raw!=='string'||!/^[-]?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/.test(raw))throw Error('invalid number token');tokens.set(this,raw);__tresorOpaqueSizes.set(this,__tresorUTF8(raw)+16);Object.freeze(this);}toString(){return tokens.get(this);}valueOf(){throw Error('explicit numeric conversion required');}}
 function parseLossless(text){
- let p=0;function ws(){while(/\s/.test(text[p]||'')&&p<text.length)p++;}
- function str(){const match=/^"(?:[^"\\]|\\.)*"/.exec(text.slice(p));if(!match)throw Error('unterminated string');p+=match[0].length;return JSON.parse(match[0]);}
+ let p=0;function ws(){while(p<text.length&&(text[p]===' '||text[p]==='\t'||text[p]==='\r'||text[p]==='\n'))p++;}
+ // Decode only string tokens through the bounded host helper. Numeric tokens
+ // remain lossless; UTF-16 offsets and lone surrogates retain JS semantics.
+ function str(){const token=__tresorJSONString(text,p);p=token[0];return token[1];}
  function value(){ws();const c=text[p];if(c==='"')return str();if(c==='['){p++;const a=[];ws();if(text[p]===']'){p++;return a;}for(;;){a.push(value());ws();const end=text[p++];if(end===']')return a;if(end!==',')throw Error('invalid array');}}
  if(c==='{'){p++;const o={};ws();if(text[p]==='}'){p++;return o;}for(;;){ws();if(text[p]!=='"')throw Error('invalid key');const k=str();ws();if(text[p++]!==':')throw Error('missing colon');Object.defineProperty(o,k,{value:value(),writable:true,enumerable:true,configurable:true});ws();const end=text[p++];if(end==='}')return o;if(end!==',')throw Error('invalid object');}}
  for(const [word,v]of [['true',true],['false',false],['null',null]])if(text.slice(p,p+word.length)===word){p+=word.length;return v;}
- const match=text.slice(p).match(/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/);if(!match)throw Error('invalid JSON');p+=match[0].length;
+ const raw=__tresorJSONNumber(text,p);p+=raw.length;
  // Preserve every source number spelling, including decimals and exponents.
- return new NumberToken(match[0]);
+ return new NumberToken(raw);
  }
  const out=value();ws();if(p!==text.length)throw Error('trailing JSON');return out;
 }

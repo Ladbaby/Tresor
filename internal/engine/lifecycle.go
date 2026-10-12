@@ -103,9 +103,6 @@ func (ctx *PipelineContext) termination(reason string) map[string]any {
 			if code == "buffer_bytes" || code == "buffer_handles" || code == "buffer_fragments" || code == "state_bytes" || code == "input_limit" {
 				category = "resource_limit"
 			}
-			if code == "deadline" {
-				category = "deadline"
-			}
 		}
 		if errors.As(e.Failure, &status) {
 			category, code = "upstream", "upstream_error"
