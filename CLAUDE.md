@@ -164,11 +164,10 @@ Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing request
 
 External packages use API V2 (`internal/jsplugins/api.d.ts`): immutable `context` distinguishes client/downstream/current formats, requested versus observed HTTP/SSE transport, stage, phase and effective limits. Explicit `upstreamStart/Event/End` hooks process upstream SSE before collection or regular response-event transforms; ordinary stream hooks are not automatically run before collection. Error termination receives sanitized failure metadata and statistics; finish always releases managed storage. 
 
-Pipeline config is stored as JSON in the `rules.pipeline_config` column: `[{"plugin_id": "...", "config": {...}, "failure_policy": "fail_closed"}]`. Missing policy defaults to fail-closed. External-only `safe_passthrough` uses a fresh VM/state per eligible request/header/buffered-response hook; ordinary exceptions preserve the failed hook's input and disable the step for the attempt. Prior successful effects remain. Stream/upstream/collector/finish packages are ineligible; invalid effects, security/resource/deadline faults always fail closed. YAML write-back preserves policy.
+Pipeline config is stored as ordered JSON steps in `rules.pipeline_config`: `[{"plugin_id":"..."}]`. External plugins have no user configuration and always raise errors on failure. Legacy configuration and failure-policy fields are migrated away. New configurable or logging-capable packages are rejected; cached legacy packages remain unavailable and deletable without breaking startup. Plugin logs and execution diagnostics are neither collected nor published.
 
-Package management and author tools: `plugin lint <dir> [--json] [--strict]`, `plugin pack <dir> --output <new-file>`, `plugin install <dir>`, `plugin install-url <https-url> [--sha256 <canonical-source-digest>] [--signature <base64> --public-key <base64>]`, `plugin approve|revoke <id> <version> <digest> <permission...>`, and `plugin activate <id> <version>`. Lint/pack do not execute JS. Installation, approval and activation are separate. Only `log.v1` is supported; requests need both feature and permission declarations plus an exact-digest grant. In-flight requests/retries pin grants; revocation blocks new snapshots immediately. Logging permits bounded codes and numeric/boolean fields only; it cannot detect malicious secret encoding in trusted code.
+Package management and author tools: `plugin lint <dir> [--json] [--strict]`, `plugin pack <dir> --output <new-file>`, `plugin install <dir>`, `plugin install-url <https-url> [--sha256 <canonical-source-digest>] [--signature <base64> --public-key <base64>]`, and `plugin enable|disable|delete <id> <version>`. Install enables the version immediately; only one version per ID is enabled. `plugin activate` remains an enable-compatible command. In-flight requests retain their pinned package; changes affect future snapshots. Lint/pack do not execute JS.
 
-Rules includes one Plugins inventory with descriptions/config schemas, provenance, version status and separate activation. Install from a URL or drop/select one `plugin pack` JSON bundle (8 MiB local request limit), with confirmation and no implicit activation/grants; omit the admin-auth-disabled UI warning. Native converters are internal-only: omitted from discovery/candidates, rejected in newly supplied user pipelines and skipped in persisted legacy rule steps. Rule GET/list reports ignored indices; editor explains/removes these only on next save, preserving other unavailable steps. Automatic translation remains host-owned, including a Responses→OpenAI→Gemini chain. HTTPS downloads always compute the source digest; optional caller-supplied expected digest/Ed25519 signature checks complete before JS evaluation. URL-only unsigned provenance is not marked verified; users trust the HTTPS source. Current outbound proxy mode is captured at operation start. Direct DNS addresses are checked and pinned, but configured proxies are administrator-trusted routing/DNS boundaries. Sources, selection, grants and provenance are cache metadata, not YAML. Request diagnostics (identity, rule-local step, hook/attempt, counts, safe codes and cleanup failures) publish after cleanup and appear in Logs independently of payload capture. 
 
 **Auto-translation:** When input format (detected from path) differs from downstream format, the engine automatically inserts the appropriate transformer without any rule needed.
 
@@ -197,12 +196,13 @@ Rules includes one Plugins inventory with descriptions/config schemas, provenanc
 | POST | `/api/downstreams/{id}/models` | Add a model ID to downstream |
 | DELETE | `/api/downstreams/{id}/models/{model_id}` | Remove a model ID from downstream |
 | POST | `/api/downstreams/{id}/fetch-models` | Auto-discover models from provider |
-| GET | `/api/plugins` | List executable native and selected approved external plugins |
-| GET | `/api/plugin-packages` | List installed versions, digest, provenance, grants, selected/executable/blocked status |
-| POST | `/api/plugin-packages/install` | Install local `{files: {...}}` source without activating |
-| POST | `/api/plugin-packages/install-remote` | Install trusted HTTPS `{url, sha256?, signature?, public_key?}` bundle without approval/activation |
-| POST | `/api/plugin-packages/approve`, `/api/plugin-packages/revoke` | Explicit `{id, version, digest, permissions}` grants; JSON/auth/cross-origin checks |
-| POST | `/api/plugin-packages/activate` | Select installed compatible approved `{id, version}` |
+| GET | `/api/plugins` | List enabled executable external plugins (native converters are internal-only) |
+| GET | `/api/plugin-packages` | List installed versions and availability |
+| POST | `/api/plugin-packages/install` | Install and enable local `{files: {...}}` source |
+| POST | `/api/plugin-packages/install-remote` | Install and enable trusted HTTPS `{url, sha256?, signature?, public_key?}` bundle |
+| POST | `/api/plugin-packages/enabled` | Set `{id, version, enabled}` for future requests |
+| POST | `/api/plugin-packages/delete` | Delete installed `{id, version}` |
+| POST | `/api/plugin-packages/activate` | Compatibility alias for enabling an installed version |
 | GET | `/api/aliases` | List all alias groups (grouped view, ordered by group_order) |
 | POST | `/api/aliases` | Create a new alias option |
 | POST | `/api/aliases/reorder` | Reorder groups: `{"order": ["gpt-4o", "claude-sonnet"]}` |
