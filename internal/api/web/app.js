@@ -1942,7 +1942,7 @@ document.getElementById('package-remote-form').addEventListener('submit', async 
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button');
     const input = {url:document.getElementById('package-url').value.trim()};
     const status = document.getElementById('package-management-status');
-    if (!confirm('Install code only from a source you trust. Installation enables the plugin immediately.\\n' + input.url)) return;
+    if (!confirm('Install code only from a source you trust.\nDo you want to proceed?\n' + input.url)) return;
     button.disabled = true; status.textContent = 'Downloading and installing...';
     try { await api('/plugin-packages/install-remote', {method:'POST',body:JSON.stringify(input)}); status.textContent = 'Installed.'; await loadPlugins(); } catch(error) { status.textContent = error.message; } finally { button.disabled = false; }
 });
