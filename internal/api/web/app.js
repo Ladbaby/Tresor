@@ -310,32 +310,35 @@ async function populateRuleMatchModels(containerEl, selectedModels) {
     const selSet = new Set(sel);
 
     const suggestions = new Set();
-
-    try {
-        const downstreams = await fetchDownstreams();
-        for (const ds of (downstreams || [])) {
-            for (const m of (ds.output_model_ids || [])) {
-                if (m) suggestions.add(m);
-            }
+    const disabledModels = new Set();
+    const downstreams = await fetchDownstreams();
+    const enabledIds = new Set((downstreams || []).filter(ds => ds.is_enabled !== false).map(ds => ds.id));
+    for (const ds of (downstreams || [])) {
+        const target = ds.is_enabled === false ? disabledModels : suggestions;
+        for (const m of (ds.output_model_ids || [])) {
+            if (m) target.add(m);
         }
-    } catch { /* ignore */ }
+    }
 
     try {
         const groups = await api('/aliases');
         for (const g of (groups || [])) {
-            if (g.input_model_id) suggestions.add(g.input_model_id);
+            const active = (g.options || []).find(option => option.id === g.active_id || option.is_active);
+            const target = active && enabledIds.has(active.downstream_id) ? suggestions : disabledModels;
+            if (g.input_model_id) target.add(g.input_model_id);
             if (g.is_regex) {
                 for (const n of (g.announced_names || [])) {
-                    if (n) suggestions.add(n);
+                    if (n) target.add(n);
                 }
             }
         }
     } catch { /* ignore */ }
 
-    // Also add any user-selected models that aren't in the suggestion set
-    // (custom arbitrary model IDs typed by the user).
+    // Preserve hidden selections without offering disabled-only models as choices.
+    // Unknown custom model IDs remain visible and editable.
+    containerEl._hiddenSelectedModels = sel.filter(s => disabledModels.has(s) && !suggestions.has(s));
     for (const s of sel) {
-        if (!suggestions.has(s)) suggestions.add(s);
+        if (!disabledModels.has(s)) suggestions.add(s);
     }
 
     // Sort case-insensitively for stable order.
@@ -411,7 +414,7 @@ async function populateRuleMatchModels(containerEl, selectedModels) {
  * Returns deduplicated array.
  */
 function getSelectedRuleModels(containerEl) {
-    const models = [];
+    const models = [...(containerEl._hiddenSelectedModels || [])];
     containerEl.querySelectorAll('.model-tag.selected').forEach(tag => {
         models.push(tag.dataset.model);
     });
@@ -641,8 +644,10 @@ function parsePipeline(configStr) {
  */
 function populateRuleMatchDownstreams(containerEl, selectedIds) {
     containerEl.innerHTML = '';
-    const dsList = cachedDownstreams || [];
+    const dsList = (cachedDownstreams || []).filter(ds => ds.is_enabled !== false);
     const sel = selectedIds || [];
+    const disabledIds = new Set((cachedDownstreams || []).filter(ds => ds.is_enabled === false).map(ds => ds.id));
+    containerEl._hiddenSelectedDownstreams = sel.filter(id => disabledIds.has(id));
 
     if (dsList.length === 0) {
         containerEl.innerHTML = '<div class="model-multi-empty">No downstreams available</div>';
@@ -702,7 +707,7 @@ function populateRuleMatchDownstreams(containerEl, selectedIds) {
  * Collect checked downstream IDs from the multi-select.
  */
 function getSelectedMatchDownstreams(containerEl) {
-    const ids = [];
+    const ids = [...(containerEl._hiddenSelectedDownstreams || [])];
     containerEl.querySelectorAll('.model-tag.selected').forEach(tag => {
         ids.push(tag.dataset.id);
     });
