@@ -2259,7 +2259,11 @@ function populateDownstreamSelect(selectEl) {
 /**
  * Load and render alias groups from the API.
  */
+let closeAliasRouteMenu = null;
+let aliasRouteMenuId = 0;
+
 async function loadAliasGroups() {
+    if (closeAliasRouteMenu) closeAliasRouteMenu();
     const container = document.getElementById('alias-groups-container');
     try {
         // Refresh downstream cache for labels
@@ -2318,42 +2322,119 @@ function renderAliasGroup(container, group) {
     const actions = document.createElement('div');
     actions.className = 'alias-group-actions';
 
-    const modeWrap = document.createElement('label');
+    const modeWrap = document.createElement('div');
     modeWrap.className = 'alias-route-mode-control';
     const modeLabel = document.createElement('span');
     modeLabel.textContent = 'Routing';
-    const modeSelect = document.createElement('select');
-    modeSelect.setAttribute('aria-label', `Routing mode for ${group.input_model_id}`);
-    [['default', 'Default'], ['load_balance', 'Load Balance'], ['fallback', 'Fallback']].forEach(([value, label]) => {
-        const option = document.createElement('option');
-        option.value = value;
-        option.textContent = label;
-        modeSelect.appendChild(option);
-    });
     const routeMode = group.route_mode || 'default';
+    const modes = [['default', 'Default'], ['load_balance', 'Load Balance'], ['fallback', 'Fallback']];
+    const picker = document.createElement('div');
+    picker.className = 'alias-route-picker';
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'alias-route-trigger';
+    trigger.textContent = modes.find(([value]) => value === routeMode)[1];
+    trigger.setAttribute('aria-label', `Routing mode for ${group.input_model_id}: ${trigger.textContent}`);
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    const menu = document.createElement('div');
+    menu.className = 'alias-route-menu';
+    menu.id = `alias-route-menu-${++aliasRouteMenuId}`;
+    menu.hidden = true;
+    menu.setAttribute('role', 'listbox');
+    menu.setAttribute('aria-label', `Routing mode for ${group.input_model_id}`);
+    trigger.setAttribute('aria-controls', menu.id);
     const modeError = document.createElement('span');
     modeError.className = 'alias-route-mode-error';
     modeError.setAttribute('role', 'alert');
     modeError.setAttribute('aria-live', 'polite');
-    modeSelect.value = routeMode;
-    modeSelect.onchange = async () => {
-        const previous = routeMode;
-        modeSelect.disabled = true;
+    let saving = false;
+    const options = modes.map(([value, label]) => {
+        const option = document.createElement('div');
+        option.className = 'alias-route-option';
+        option.tabIndex = -1;
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', String(value === routeMode));
+        option.textContent = label;
+        option.onclick = () => saveMode(value);
+        menu.appendChild(option);
+        return option;
+    });
+    const dismiss = (restoreFocus = false) => {
+        menu.hidden = true;
+        trigger.setAttribute('aria-expanded', 'false');
+        document.removeEventListener('pointerdown', outside);
+        window.removeEventListener('resize', dismissOnResize);
+        window.removeEventListener('scroll', dismissOnScroll, true);
+        if (closeAliasRouteMenu === dismiss) closeAliasRouteMenu = null;
+        if (restoreFocus && trigger.isConnected) trigger.focus();
+    };
+    const outside = event => { if (!picker.contains(event.target)) dismiss(); };
+    const dismissOnResize = () => dismiss();
+    const dismissOnScroll = event => { if (!menu.contains(event.target)) dismiss(); };
+    const open = () => {
+        if (saving) return;
+        if (closeAliasRouteMenu) closeAliasRouteMenu();
+        menu.hidden = false;
+        trigger.setAttribute('aria-expanded', 'true');
+        const rect = trigger.getBoundingClientRect();
+        menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`;
+        menu.style.top = `${rect.bottom + menu.offsetHeight + 12 > window.innerHeight ? Math.max(8, rect.top - menu.offsetHeight - 6) : rect.bottom + 6}px`;
+        closeAliasRouteMenu = dismiss;
+        document.addEventListener('pointerdown', outside);
+        window.addEventListener('resize', dismissOnResize);
+        window.addEventListener('scroll', dismissOnScroll, true);
+        options[modes.findIndex(([value]) => value === routeMode)].focus();
+    };
+    const saveMode = async value => {
+        if (saving) return;
+        if (value === routeMode) { dismiss(true); return; }
+        dismiss(true);
+        saving = true;
+        // Keep the trigger focusable while blocking further interaction.
+        trigger.setAttribute('aria-disabled', 'true');
+        trigger.setAttribute('aria-busy', 'true');
         modeError.textContent = '';
         try {
             await api('/aliases/group/' + encodeURIComponent(group.input_model_id), {
-                method: 'PUT', body: JSON.stringify({ route_mode: modeSelect.value }),
+                method: 'PUT', body: JSON.stringify({ route_mode: value }),
             });
+            const hadFocus = document.activeElement === trigger;
             await loadAliasGroups();
+            if (hadFocus && (document.activeElement === document.body || document.activeElement === trigger)) {
+                const replacement = Array.from(container.querySelectorAll('.alias-group-card'))
+                    .find(item => item.dataset.inputModel === group.input_model_id);
+                replacement?.querySelector('.alias-route-trigger')?.focus();
+            }
         } catch (err) {
             modeError.textContent = err.message || String(err);
             showToast('Could not save routing mode: ' + modeError.textContent);
-            modeSelect.value = previous;
-            modeSelect.disabled = false;
-            loadAliasGroups();
+        } finally {
+            saving = false;
+            trigger.removeAttribute('aria-disabled');
+            trigger.removeAttribute('aria-busy');
         }
     };
-    modeWrap.append(modeLabel, modeSelect);
+    trigger.onclick = () => { if (!saving) { if (menu.hidden) open(); else dismiss(true); } };
+    picker.onkeydown = event => {
+        if (saving) return;
+        if (event.key === 'Escape') { if (!menu.hidden) { event.preventDefault(); dismiss(true); } return; }
+        if (event.key === 'Tab') { dismiss(true); return; }
+        if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+            event.preventDefault();
+            if (menu.hidden) { open(); if (!['Home', 'End'].includes(event.key)) return; }
+            const current = options.indexOf(document.activeElement);
+            const index = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+                : (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+            options[index].focus();
+        } else if (!menu.hidden && ['Enter', ' '].includes(event.key)) {
+            const index = options.indexOf(document.activeElement);
+            if (index >= 0) { event.preventDefault(); saveMode(modes[index][0]); }
+        }
+    };
+    picker.onfocusout = event => { if (!picker.contains(event.relatedTarget)) dismiss(); };
+    picker.append(trigger, menu);
+    modeWrap.append(modeLabel, picker);
     actions.appendChild(modeWrap);
     actions.appendChild(modeError);
     group._routeModeError = modeError;
