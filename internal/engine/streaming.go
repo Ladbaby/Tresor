@@ -13,6 +13,67 @@ import (
 	"tresor/internal/inspect"
 )
 
+// startupSSEBytes holds a batch only when every event is startup metadata.
+func startupSSEBytes(data []byte) bool {
+	startup := true
+	err := scanEvents(bytes.NewReader(data), func(event SSEChunk) error {
+		if !streamStartupEvent(event.EventType, event.Data) {
+			startup = false
+		}
+		return nil
+	})
+	return err == nil && startup
+}
+
+// streamStartupEvent recognizes preambles, not reasoning, tools, completion,
+// or errors, so an early upstream failure can still replace the HTTP status.
+func streamStartupEvent(eventType string, data []byte) bool {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return eventType == "" || eventType == "ping"
+	}
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(data, &payload) != nil {
+		return false
+	}
+	if eventType == "" {
+		_ = json.Unmarshal(payload["type"], &eventType)
+	}
+	switch eventType {
+	case "ping", "message_start", "response.created", "response.in_progress":
+		return true
+	case "content_block_start":
+		var block struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		return json.Unmarshal(payload["content_block"], &block) == nil && block.Type == "text" && block.Text == ""
+	case "":
+		var choices []struct {
+			Delta        map[string]json.RawMessage `json:"delta"`
+			FinishReason json.RawMessage            `json:"finish_reason"`
+		}
+		if json.Unmarshal(payload["choices"], &choices) != nil || len(choices) == 0 {
+			return false
+		}
+		for _, choice := range choices {
+			if len(choice.FinishReason) > 0 && string(choice.FinishReason) != "null" {
+				return false
+			}
+			if choice.Delta == nil {
+				return false
+			}
+			for key, value := range choice.Delta {
+				if key != "role" && string(value) != "null" && string(value) != `""` {
+					return false
+				}
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 // streamOutcome reports how a streamed response ended.
 type streamOutcome struct {
 	// empty is true when no real content was produced and retry-on-empty is
