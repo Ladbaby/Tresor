@@ -159,21 +159,21 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	var groupOrder []string
 
 	rows, err = s.db.Query(
-		`SELECT id, input_model_id, downstream_id, output_model_id, is_regex, announced_names FROM aliases ORDER BY group_order, rowid`)
+		`SELECT id, input_model_id, downstream_id, output_model_id, is_regex, announced_names, route_mode FROM aliases ORDER BY group_order, option_order, rowid`)
 	if err != nil {
 		return fmt.Errorf("query aliases: %w", err)
 	}
 	for rows.Next() {
-		var id, inputModelID, downstreamID, outputModelID, announcedJSON string
+		var id, inputModelID, downstreamID, outputModelID, announcedJSON, routeMode string
 		var isRegex int
-		if err := rows.Scan(&id, &inputModelID, &downstreamID, &outputModelID, &isRegex, &announcedJSON); err != nil {
+		if err := rows.Scan(&id, &inputModelID, &downstreamID, &outputModelID, &isRegex, &announcedJSON, &routeMode); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan alias: %w", err)
 		}
 
 		g, exists := groupMap[inputModelID]
 		if !exists {
-			g = &config.AliasGroupCfg{InputModelID: inputModelID}
+			g = &config.AliasGroupCfg{InputModelID: inputModelID, RouteMode: routeMode}
 			if isRegex == 1 {
 				g.IsRegex = true
 			}

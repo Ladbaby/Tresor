@@ -48,6 +48,37 @@ func createAliasViaAPI(t *testing.T, handler http.Handler, alias store.Alias) (i
 	return w.Code, created, w.Body.String()
 }
 
+func TestAliasGroupModeOrderAndActivationInvariants(t *testing.T) {
+	h := newTestRouter(t).Handler()
+	ds1 := setupDownstream(t, h, "One", "https://one.test")
+	ds2 := setupDownstream(t, h, "Two", "https://two.test")
+	_, first, _ := createAliasViaAPI(t, h, store.Alias{InputModelID: "group/a", DownstreamID: ds1.ID, OutputModelID: "one", IsActive: true})
+	_, second, _ := createAliasViaAPI(t, h, store.Alias{InputModelID: "group/a", DownstreamID: ds2.ID, OutputModelID: "two"})
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	orderBody := `{"route_mode":"load_balance","option_order":["` + second.ID + `","` + first.ID + `"]}`
+	if w := request(http.MethodPut, "/api/aliases/group/group%2Fa", orderBody); w.Code != http.StatusOK {
+		t.Fatalf("group update: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(http.MethodPut, "/api/aliases/"+first.ID, `{"is_active":true}`); w.Code != http.StatusConflict {
+		t.Fatalf("expected activation update rejection, got %d", w.Code)
+	}
+	if w := request(http.MethodPut, "/api/aliases/"+second.ID+"/activate", ""); w.Code != http.StatusConflict {
+		t.Fatalf("expected activate conflict, got %d", w.Code)
+	}
+	if w := request(http.MethodPut, "/api/aliases/group/missing", `{"route_mode":"fallback"}`); w.Code != http.StatusNotFound {
+		t.Fatalf("expected missing group 404, got %d", w.Code)
+	}
+	badOrder := `{"option_order":["` + first.ID + `","` + first.ID + `"]}`
+	if w := request(http.MethodPut, "/api/aliases/group/group%2Fa", badOrder); w.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid permutation 400, got %d", w.Code)
+	}
+}
+
 // TestCreateAlias_Success verifies POST /api/aliases creates an alias with 201.
 func TestCreateAlias_Success(t *testing.T) {
 	router := newTestRouter(t)

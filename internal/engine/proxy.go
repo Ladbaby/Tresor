@@ -63,16 +63,20 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	cw := newStatusCaptureWriter(w)
-	entry := RequestLogEntry{Timestamp: start, Method: r.Method, Path: r.URL.Path}
+	entry := &RequestLogEntry{Timestamp: start, Method: r.Method, Path: r.URL.Path}
 
 	// ClientIP: trust forwarded headers when connected via localhost (reverse proxy).
 	entry.ClientIP = middleware.ExtractClientIP(r)
 
+	namespace := ""
+	if e.proxyAuth != nil && e.proxyAuth.enabled {
+		namespace = proxyNamespace(r)
+	}
 	if !e.validateProxyAuth(r, cw) {
 		entry.Status = http.StatusUnauthorized
 		entry.Error = "unauthorized"
 		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(&entry)
+		e.logger.Record(entry)
 		return
 	}
 
@@ -80,7 +84,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		e.handleModels(cw)
 		entry.Status = cw.status
 		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(&entry)
+		e.logger.Record(entry)
 		return
 	}
 
@@ -91,18 +95,53 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		e.handleGeminiModels(r, cw)
 		entry.Status = cw.status
 		entry.Duration = DurationMs(time.Since(start))
-		e.logger.Record(&entry)
+		e.logger.Record(entry)
 		return
 	}
 
+	r = withRouteNamespace(r, namespace)
 	// Resolve model → downstream (reads body, extracts model, tries alias then direct lookup)
 	result, ge := e.resolveModel(r)
 	if ge != nil {
 		entry.Model = result.model
-		e.logAndReturnError(cw, &entry, start, ge)
+		e.logAndReturnError(cw, entry, start, ge)
 		return
 	}
+	r.Header.Del("x-tresor-session-id")
+	entry.deferRecord = true
+	defer e.publishRequest(entry)
+	if result.release == nil {
+		result.release = e.routes.reserve(result.ds.ID + "\x00" + result.resolvedModel)
+	}
+	defer func() {
+		result.release()
+		if result.sessionDone != nil {
+			result.sessionDone()
+		}
+	}()
+	registry := e.registry
+	if snapshots, ok := registry.(interface{ Snapshot() PluginRegistry }); ok {
+		registry = snapshots.Snapshot()
+	}
+	for {
+		result.retry = false
+		e.executeSelection(cw, r, result, entry, start, registry)
+		if !result.retry {
+			return
+		}
+		result.release()
+		result.routeIndex++
+		x := result.candidates[result.routeIndex]
+		result.ds, result.alias, result.resolvedModel = x.ds, x.alias, x.alias.OutputModelID
+		result.body = rewriteModelInBody(result.originalBody, result.resolvedModel)
+		result.release = e.routes.reserve(x.target)
+	}
+}
+
+func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, result *modelResult, entry *RequestLogEntry, start time.Time, registry PluginRegistry) {
 	entry.Model = result.model
+	entry.RuleIDs, entry.Usage = nil, nil
+	entry.Error = ""
 	entry.ResolvedModel = result.resolvedModel
 	if result.alias != nil {
 		entry.AliasGroup = result.alias.InputModelID
@@ -116,9 +155,9 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Build transformation pipeline (rule matching + auto-translation)
 	inputFormat := detectInputFormat(r.URL.Path)
-	pipeline, rules, ge := e.buildPipeline(r.URL.Path, result.model, inputFormat, result.ds, result.alias)
+	pipeline, rules, ge := e.buildPipelineWithRegistry(r.URL.Path, result.model, inputFormat, result.ds, result.alias, registry)
 	if ge != nil {
-		e.logAndReturnError(cw, &entry, start, ge)
+		e.logAndReturnError(cw, entry, start, ge)
 		return
 	}
 
@@ -136,7 +175,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	ctx, ge := e.prepareDownstreamContext(r, result, inputFormat)
 	if ge != nil {
 		entry.Duration = DurationMs(time.Since(start))
-		e.logAndReturnError(cw, &entry, start, ge)
+		e.logAndReturnError(cw, entry, start, ge)
 		return
 	}
 
@@ -148,8 +187,6 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	downstreamFormat := ctx.DownstreamFormat
 
-	entry.deferRecord = true
-	defer e.publishRequest(&entry)
 	var cancelFn context.CancelFunc
 	attemptOutcome := "error"
 	defer func() {
@@ -169,7 +206,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		if ctx.decode != nil && attemptOutcome != "success" {
 			ctx.decode.failed = true
 		}
-		ctx.decode.finalize(&entry)
+		ctx.decode.finalize(entry)
 	}()
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -179,7 +216,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				entry.Status = http.StatusBadGateway
 				entry.Error = "client disconnected during retry"
 				entry.Duration = DurationMs(time.Since(start))
-				e.recordAndCapture(&entry, rawReq, nil, r.Header.Get("Content-Type"), "", false, inputFormat, downstreamFormat)
+				e.recordAndCapture(entry, rawReq, nil, r.Header.Get("Content-Type"), "", false, inputFormat, downstreamFormat)
 				return
 			default:
 			}
@@ -199,7 +236,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		ctx.RequestPathOverride = ""
 		cleanReq, _ := CopyRequest(r, result.body)
 		if err := pipeline.beginAttempt(ctx, cleanReq, attempt); err != nil {
-			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "plugin initialization error", "plugin initialization error", "plugin initialization error", err})
+			e.logAndReturnError(cw, entry, start, &gatewayError{http.StatusBadGateway, "plugin initialization error", "plugin initialization error", "plugin initialization error", err})
 			return
 		}
 		// Execute request transformers with pristine headers on every attempt.
@@ -208,7 +245,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if cancelFn != nil {
 				cancelFn()
 			}
-			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "request pipeline error", fmt.Sprintf("request pipeline error: %v", err), "request pipeline error", err})
+			e.logAndReturnError(cw, entry, start, &gatewayError{http.StatusBadGateway, "request pipeline error", fmt.Sprintf("request pipeline error: %v", err), "request pipeline error", err})
 			return
 		}
 
@@ -221,7 +258,10 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		resp, cancel, err := e.forwardRequest(currentReq, currentBody, ctx)
 		if err != nil {
 			cancel()
-			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "forward error", fmt.Sprintf("upstream error: %v", err), "upstream error", err})
+			if isNetworkFailure(err) && e.tryFallback(r, result, 502, "", err) {
+				return
+			}
+			e.logAndReturnError(cw, entry, start, &gatewayError{http.StatusBadGateway, "forward error", fmt.Sprintf("upstream error: %v", err), "upstream error", err})
 			return
 		}
 		cancelFn = cancel
@@ -232,7 +272,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			attemptOutcome = "error"
 			resp.Body.Close()
 			cancel()
-			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "response header pipeline error", fmt.Sprintf("response header pipeline error: %v", err), "pipeline error", err})
+			e.logAndReturnError(cw, entry, start, &gatewayError{http.StatusBadGateway, "response header pipeline error", fmt.Sprintf("response header pipeline error: %v", err), "pipeline error", err})
 			return
 		}
 
@@ -265,7 +305,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			// retried transparently by holding the terminal [DONE]
 			// marker until end-of-stream.
 			hw := newHeaderDelayWriter(cw)
-			outcome := e.handleStreamingResponse(hw, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), &entry, e.retryOnEmpty && !ctx.CodexBackend, inputFormat, downstreamFormat)
+			outcome := e.handleStreamingResponse(hw, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), entry, e.retryOnEmpty && !ctx.CodexBackend, inputFormat, downstreamFormat)
 			// An explicit error event is a definitive answer, never an empty
 			// response — do not retry it.
 			if outcome.streamErr != nil {
@@ -305,6 +345,13 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 						label += ": " + message
 					}
 				}
+				if !outcome.committed && !outcome.pluginFailure && e.tryFallback(r, result, outcome.streamErr.Status, outcome.streamErr.Message, nil) {
+					if err := pipeline.finishAttempt(ctx, "error"); err != nil {
+						result.retry = false
+						e.logAndReturnError(cw, entry, start, &gatewayError{502, "plugin finish error", "plugin finish error", "pipeline error", err})
+					}
+					return
+				}
 				if outcome.committed {
 					// Bytes already reached the client, so the 200 status cannot
 					// be recalled; the error event was passed through verbatim.
@@ -312,11 +359,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 					entry.Status = cw.status
 					entry.Error = label
 					entry.Duration = DurationMs(time.Since(start))
-					e.logger.Record(&entry)
+					e.logger.Record(entry)
 					log.Printf("%s after content", label)
 					return
 				}
-				e.logAndReturnError(cw, &entry, start, &gatewayError{outcome.streamErr.Status, label, outcome.streamErr.Message, label, nil})
+				e.logAndReturnError(cw, entry, start, &gatewayError{outcome.streamErr.Status, label, outcome.streamErr.Message, label, nil})
 				return
 			}
 
@@ -325,30 +372,46 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				if attempt >= maxRetries {
 					entry.Status = cw.status
 					entry.Duration = DurationMs(time.Since(start))
-					e.recordAndCapture(&entry, rawReq, nil, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), false, inputFormat, downstreamFormat)
-					e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "empty response after retries exhausted", "empty response after retries exhausted", "empty response", nil})
+					e.recordAndCapture(entry, rawReq, nil, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), false, inputFormat, downstreamFormat)
+					e.logAndReturnError(cw, entry, start, &gatewayError{http.StatusBadGateway, "empty response after retries exhausted", "empty response after retries exhausted", "empty response", nil})
 					return
 				}
 				// Close upstream response before retrying
 				resp.Body.Close()
 				cancel()
 				if err := pipeline.finishAttempt(ctx, "retry"); err != nil {
-					e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "plugin finish error", "plugin finish error", "pipeline error", err})
+					e.logAndReturnError(cw, entry, start, &gatewayError{http.StatusBadGateway, "plugin finish error", "plugin finish error", "pipeline error", err})
 					return
 				}
 				continue
 			}
 			// Response had content or non-200 status — done
 			attemptOutcome = "success"
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				e.confirmRoute(result)
+			}
 			return
 		}
 
 		buffered, ge := e.readBufferedResponse(resp, ctx, &pipeline, cancel, r.Context(), collectStream, upstreamContentType)
 		if ge != nil {
-			e.logAndReturnError(cw, &entry, start, ge)
+			if ge.cause != nil && isNetworkFailure(ge.cause) && e.tryFallback(r, result, http.StatusBadGateway, "", ge.cause) {
+				if finishErr := pipeline.finishAttempt(ctx, "retry"); finishErr == nil {
+					return
+				}
+				result.retry = false
+			}
+			e.logAndReturnError(cw, entry, start, ge)
 			return
 		}
 		respBody := buffered.body
+		if e.tryFallback(r, result, resp.StatusCode, string(respBody), nil) {
+			if err := pipeline.finishAttempt(ctx, "error"); err != nil {
+				result.retry = false
+				e.logAndReturnError(cw, entry, start, &gatewayError{502, "plugin finish error", "plugin finish error", "pipeline error", err})
+			}
+			return
+		}
 		transformedBody := buffered.transformed
 		rawResp := buffered.captured
 		respTrunc := buffered.truncated
@@ -364,19 +427,19 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if attempt >= maxRetries {
 				entry.Status = resp.StatusCode
 				entry.Duration = DurationMs(time.Since(start))
-				e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), inspectRespCT, respTrunc, inputFormat, downstreamFormat)
-				e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "empty response after retries exhausted", "empty response after retries exhausted", "empty response", nil})
+				e.recordAndCapture(entry, rawReq, rawResp, r.Header.Get("Content-Type"), inspectRespCT, respTrunc, inputFormat, downstreamFormat)
+				e.logAndReturnError(cw, entry, start, &gatewayError{http.StatusBadGateway, "empty response after retries exhausted", "empty response after retries exhausted", "empty response", nil})
 				return
 			}
 			if err := pipeline.finishAttempt(ctx, "retry"); err != nil {
-				e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "plugin finish error", "plugin finish error", "pipeline error", err})
+				e.logAndReturnError(cw, entry, start, &gatewayError{http.StatusBadGateway, "plugin finish error", "plugin finish error", "pipeline error", err})
 				return
 			}
 			continue
 		}
 
 		if err := pipeline.finishAttempt(ctx, "success"); err != nil {
-			e.logAndReturnError(cw, &entry, start, &gatewayError{http.StatusBadGateway, "plugin finish error", "plugin finish error", "pipeline error", err})
+			e.logAndReturnError(cw, entry, start, &gatewayError{http.StatusBadGateway, "plugin finish error", "plugin finish error", "pipeline error", err})
 			return
 		}
 		attemptOutcome = "success"
@@ -394,8 +457,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		e.recordAndCapture(&entry, rawReq, rawResp, r.Header.Get("Content-Type"), inspectRespCT, respTrunc, inputFormat, downstreamFormat)
+		e.recordAndCapture(entry, rawReq, rawResp, r.Header.Get("Content-Type"), inspectRespCT, respTrunc, inputFormat, downstreamFormat)
 		writeBufferedResponse(cw, resp, transformedBody)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			e.confirmRoute(result)
+		}
 		return
 	}
 }

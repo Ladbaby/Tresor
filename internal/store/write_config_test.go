@@ -11,6 +11,42 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestWriteConfig_AliasModeOptionOrderRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	ds := &Downstream{ID: "ds", Name: "Provider", BaseURL: "https://example.test"}
+	if err := s.CreateDownstream(ds); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []Alias{{ID: "a", InputModelID: "model/with-slash", DownstreamID: "ds", OutputModelID: "one"}, {ID: "b", InputModelID: "model/with-slash", DownstreamID: "ds", OutputModelID: "two"}} {
+		if err := s.CreateAlias(&a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mode := "fallback"
+	if err := s.UpdateAliasGroup("model/with-slash", &mode, []string{"b", "a"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.AppConfig{ConfigPath: path}
+	if err := s.WriteConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.upsertAliases(loaded.Aliases); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := s.ListGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].RouteMode != "fallback" || len(groups[0].Options) != 2 || groups[0].Options[0].ID != "b" || groups[0].Options[1].ID != "a" {
+		t.Fatalf("round trip lost mode/order: %#v", groups)
+	}
+}
+
 func TestWriteConfig_EmptyPath_NoOp(t *testing.T) {
 	s := newTestStore(t)
 

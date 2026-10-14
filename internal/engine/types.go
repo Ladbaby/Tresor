@@ -132,4 +132,13 @@ type modelResult struct {
 	model         string // input model name
 	resolvedModel string // model name after alias rewrite
 	body          []byte // body to use for pipeline
+	originalBody  []byte
+	candidates    []routeCandidate
+	routeKey      string
+	routeMode     string
+	routeIndex    int
+	release       func()
+	retry         bool
+	sessionDone   func()
+	routeToken    *routePin
 }

@@ -339,6 +339,7 @@ func (s PipelineStep) MarshalJSON() ([]byte, error) {
 type AliasGroupCfg struct {
 	InputModelID   string           `yaml:"input_model_id"`
 	IsRegex        bool             `yaml:"is_regex,omitempty"`
+	RouteMode      string           `yaml:"route_mode,omitempty"`
 	Options        []AliasOptionCfg `yaml:"options"`
 	AnnouncedNames []string         `yaml:"announced_names,omitempty"`
 }
@@ -448,6 +449,16 @@ func Load(configPath string) (*AppConfig, error) {
 	}
 	if cfg.Aliases == nil {
 		cfg.Aliases = []AliasGroupCfg{}
+	}
+	for i := range cfg.Aliases {
+		if cfg.Aliases[i].RouteMode == "" {
+			cfg.Aliases[i].RouteMode = "default"
+		}
+		switch cfg.Aliases[i].RouteMode {
+		case "default", "load_balance", "fallback":
+		default:
+			return nil, fmt.Errorf("alias group %q has invalid route_mode %q", cfg.Aliases[i].InputModelID, cfg.Aliases[i].RouteMode)
+		}
 	}
 	if cfg.ProxyAPIKeys == nil {
 		cfg.ProxyAPIKeys = []string{}

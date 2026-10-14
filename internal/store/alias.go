@@ -22,17 +22,19 @@ import (
 // AnnouncedNames are concrete model IDs surfaced by regex groups in /v1/models
 // listings; the column is group-level (same value across siblings).
 type Alias struct {
-	ID              string    `json:"id"`
-	InputModelID    string    `json:"input_model_id"`
-	DownstreamID    string    `json:"downstream_id"`
-	DownstreamName  string    `json:"downstream_name,omitempty"`
-	OutputModelID   string    `json:"output_model_id"`
-	APIFormats      []string  `json:"api_formats,omitempty"`
-	IsActive        bool      `json:"is_active"`
-	IsRegex         bool      `json:"is_regex"`
-	GroupOrder      int       `json:"group_order"`
-	CreatedAt       time.Time `json:"created_at"`
-	AnnouncedNames  []string  `json:"announced_names,omitempty"`
+	ID             string    `json:"id"`
+	InputModelID   string    `json:"input_model_id"`
+	DownstreamID   string    `json:"downstream_id"`
+	DownstreamName string    `json:"downstream_name,omitempty"`
+	OutputModelID  string    `json:"output_model_id"`
+	APIFormats     []string  `json:"api_formats,omitempty"`
+	IsActive       bool      `json:"is_active"`
+	IsRegex        bool      `json:"is_regex"`
+	GroupOrder     int       `json:"group_order"`
+	CreatedAt      time.Time `json:"created_at"`
+	AnnouncedNames []string  `json:"announced_names,omitempty"`
+	RouteMode      string    `json:"route_mode,omitempty"`
+	OptionOrder    int       `json:"option_order"`
 }
 
 // AliasGroup represents one alias group: an input model and its available options.
@@ -41,6 +43,7 @@ type Alias struct {
 type AliasGroup struct {
 	InputModelID   string   `json:"input_model_id"`
 	IsRegex        bool     `json:"is_regex"`
+	RouteMode      string   `json:"route_mode"`
 	ActiveID       *string  `json:"active_id,omitempty"`
 	Options        []Alias  `json:"options"`
 	AnnouncedNames []string `json:"announced_names,omitempty"`
@@ -49,8 +52,8 @@ type AliasGroup struct {
 // ListAliases returns all aliases ordered by group_order, then rowid.
 func (s *Store) ListAliases() ([]Alias, error) {
 	rows, err := s.db.Query(
-		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at, announced_names
-		 FROM aliases ORDER BY group_order, rowid`)
+		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at, announced_names, COALESCE(route_mode,'default'), option_order
+		 FROM aliases ORDER BY group_order, option_order, rowid`)
 	if err != nil {
 		return nil, fmt.Errorf("list aliases: %w", err)
 	}
@@ -61,7 +64,7 @@ func (s *Store) ListAliases() ([]Alias, error) {
 		var a Alias
 		var active, isRegex, groupOrder int
 		var announcedJSON string
-		if err := rows.Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt, &announcedJSON); err != nil {
+		if err := rows.Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt, &announcedJSON, &a.RouteMode, &a.OptionOrder); err != nil {
 			return nil, err
 		}
 		a.IsActive = active == 1
@@ -79,9 +82,9 @@ func (s *Store) GetAlias(id string) (*Alias, error) {
 	var active, isRegex, groupOrder int
 	var announcedJSON string
 	err := s.db.QueryRow(
-		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at, announced_names
+		`SELECT id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, created_at, announced_names, route_mode, option_order
 		 FROM aliases WHERE id = ?`, id).
-		Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt, &announcedJSON)
+		Scan(&a.ID, &a.InputModelID, &a.DownstreamID, &a.OutputModelID, &active, &isRegex, &groupOrder, &a.CreatedAt, &announcedJSON, &a.RouteMode, &a.OptionOrder)
 	if err != nil {
 		return nil, fmt.Errorf("get alias %s: %w", id, err)
 	}
@@ -109,7 +112,15 @@ func (s *Store) CreateAlias(a *Alias) error {
 		return fmt.Errorf("downstream %s not found: %w", a.DownstreamID, err)
 	}
 
-	// Validate regex pattern if is_regex is set
+	// Existing groups own group-level fields. Inherit them before validation.
+	var groupRegex int
+	var groupMode string
+	groupErr := s.db.QueryRow("SELECT is_regex, COALESCE(route_mode,'default') FROM aliases WHERE input_model_id = ? LIMIT 1", a.InputModelID).Scan(&groupRegex, &groupMode)
+	if groupErr == nil {
+		a.IsRegex = groupRegex == 1
+		a.RouteMode = groupMode
+	}
+
 	if a.IsRegex {
 		if _, err := compileRegex(a.InputModelID); err != nil {
 			return fmt.Errorf("invalid regex pattern %q: %w", a.InputModelID, err)
@@ -170,6 +181,37 @@ func (s *Store) CreateAlias(a *Alias) error {
 		}
 	}
 
+	mode := a.RouteMode
+	if mode == "" {
+		mode = "default"
+	}
+	var existingMode string
+	if err := tx.QueryRow("SELECT route_mode FROM aliases WHERE input_model_id = ? LIMIT 1", a.InputModelID).Scan(&existingMode); err == nil {
+		mode = existingMode
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	switch mode {
+	case "default", "load_balance", "fallback":
+	default:
+		return fmt.Errorf("invalid route_mode %q", mode)
+	}
+	if mode != "default" && a.IsActive {
+		return fmt.Errorf("activation unavailable for non-default route mode")
+	}
+	var groupExists int
+	if err := tx.QueryRow("SELECT 1 FROM aliases WHERE input_model_id = ? LIMIT 1", a.InputModelID).Scan(&groupExists); err == nil {
+		if _, err := tx.Exec("UPDATE aliases SET route_mode = ? WHERE input_model_id = ?", mode, a.InputModelID); err != nil {
+			return err
+		}
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	var optionOrder int
+	if err := tx.QueryRow("SELECT COALESCE(MAX(option_order), -1) + 1 FROM aliases WHERE input_model_id = ?", a.InputModelID).Scan(&optionOrder); err != nil {
+		return err
+	}
+	a.RouteMode, a.OptionOrder = mode, optionOrder
 	// If this alias should be active, deactivate all siblings first
 	if a.IsActive {
 		if _, err := tx.Exec("UPDATE aliases SET is_active = 0 WHERE input_model_id = ? AND id != ?",
@@ -181,9 +223,9 @@ func (s *Store) CreateAlias(a *Alias) error {
 	announcedJSON := encodeAnnouncedNames(a.AnnouncedNames)
 
 	if _, err := tx.Exec(
-		`INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, announced_names)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.ID, a.InputModelID, a.DownstreamID, a.OutputModelID, active, isRegex, groupOrder, announcedJSON); err != nil {
+		`INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, announced_names, route_mode, option_order)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.InputModelID, a.DownstreamID, a.OutputModelID, active, isRegex, groupOrder, announcedJSON, mode, optionOrder); err != nil {
 		return fmt.Errorf("create alias: %w", err)
 	}
 
@@ -231,6 +273,28 @@ func (s *Store) UpdateAlias(a *Alias) error {
 	isRegex := 0
 	if a.IsRegex {
 		isRegex = 1
+	}
+
+	stored, err := s.GetAlias(a.ID)
+	if err != nil {
+		return fmt.Errorf("alias %s not found", a.ID)
+	}
+	if a.InputModelID != "" && a.InputModelID != stored.InputModelID {
+		return fmt.Errorf("alias input_model_id cannot be changed")
+	}
+	a.InputModelID = stored.InputModelID
+	if a.DownstreamID == "" {
+		a.DownstreamID = stored.DownstreamID
+	}
+	if a.OutputModelID == "" {
+		a.OutputModelID = stored.OutputModelID
+	}
+	var routeMode string
+	if err := s.db.QueryRow("SELECT route_mode FROM aliases WHERE id = ?", a.ID).Scan(&routeMode); err != nil {
+		return err
+	}
+	if a.IsActive && routeMode != "" && routeMode != "default" {
+		return fmt.Errorf("activation unavailable for non-default route mode")
 	}
 
 	// Validate regex pattern if is_regex is set
@@ -299,12 +363,11 @@ func (s *Store) DeleteAlias(id string) error {
 	}
 	defer tx.Rollback()
 
-	// Read the alias before deleting it
-	var inputModelID string
+	var inputModelID, mode string
 	var wasActive int
 	err = tx.QueryRow(
-		`SELECT input_model_id, is_active FROM aliases WHERE id = ?`, id).
-		Scan(&inputModelID, &wasActive)
+		`SELECT input_model_id, is_active, COALESCE(route_mode,'default') FROM aliases WHERE id = ?`, id).
+		Scan(&inputModelID, &wasActive, &mode)
 	if err != nil {
 		return fmt.Errorf("get alias %s: %w", id, err)
 	}
@@ -319,18 +382,25 @@ func (s *Store) DeleteAlias(id string) error {
 		return fmt.Errorf("alias %s not found", id)
 	}
 
-	// If it was active, promote the next sibling (by rowid order)
-	if wasActive == 1 {
+	// Compact option priorities without changing their relative order.
+	if _, err := tx.Exec(`UPDATE aliases SET option_order = (SELECT COUNT(*) FROM aliases b WHERE b.input_model_id=aliases.input_model_id AND (b.option_order<aliases.option_order OR (b.option_order=aliases.option_order AND b.rowid<aliases.rowid))) WHERE input_model_id=?`, inputModelID); err != nil {
+		return err
+	}
+	if mode == "default" && wasActive == 1 {
 		var nextID string
-		err = tx.QueryRow(
-			`SELECT id FROM aliases WHERE input_model_id = ? ORDER BY rowid LIMIT 1`,
-			inputModelID).Scan(&nextID)
+		err = tx.QueryRow(`SELECT a.id FROM aliases a JOIN downstreams d ON d.id=a.downstream_id WHERE a.input_model_id=? AND d.is_enabled=1 ORDER BY a.option_order,a.rowid LIMIT 1`, inputModelID).Scan(&nextID)
+		if err != nil {
+			err = tx.QueryRow("SELECT id FROM aliases WHERE input_model_id=? ORDER BY option_order,rowid LIMIT 1", inputModelID).Scan(&nextID)
+		}
 		if err == nil {
-			if _, err := tx.Exec("UPDATE aliases SET is_active = 1 WHERE id = ?", nextID); err != nil {
-				return fmt.Errorf("promote sibling alias: %w", err)
+			if _, err := tx.Exec("UPDATE aliases SET is_active=CASE WHEN id=? THEN 1 ELSE 0 END WHERE input_model_id=?", nextID, inputModelID); err != nil {
+				return err
 			}
 		}
-		// If no sibling exists (err == sql: no rows), the group simply has no active mapping.
+	} else if mode != "default" {
+		if _, err := tx.Exec("UPDATE aliases SET is_active=0 WHERE input_model_id=?", inputModelID); err != nil {
+			return err
+		}
 	}
 
 	s.invalidateRegexCache()
@@ -346,11 +416,13 @@ func (s *Store) ActivateAlias(id string) error {
 	}
 	defer tx.Rollback()
 
-	// Get the alias's input_model_id first
-	var inputModelID string
-	err = tx.QueryRow("SELECT input_model_id FROM aliases WHERE id = ?", id).Scan(&inputModelID)
+	var inputModelID, routeMode string
+	err = tx.QueryRow("SELECT input_model_id, route_mode FROM aliases WHERE id = ?", id).Scan(&inputModelID, &routeMode)
 	if err != nil {
 		return fmt.Errorf("get alias %s: %w", id, err)
+	}
+	if routeMode != "" && routeMode != "default" {
+		return fmt.Errorf("activation unavailable for non-default route mode")
 	}
 
 	// Deactivate all aliases in this group
@@ -413,10 +485,11 @@ func (s *Store) DeleteGroup(inputModelID string) (int, error) {
 
 // FindActiveAlias returns the active alias for a given input model ID.
 // Resolution priority:
-//   1. Exact match against any regex group's announced_names (a regex group
-//      announces concrete model IDs that route to its currently active option).
-//   2. Exact match on input_model_id with is_active = 1.
-//   3. Regex match against active regex aliases.
+//  1. Exact match against any regex group's announced_names (a regex group
+//     announces concrete model IDs that route to its currently active option).
+//  2. Exact match on input_model_id with is_active = 1.
+//  3. Regex match against active regex aliases.
+//
 // Returns nil if no active alias exists for that input model.
 func (s *Store) FindActiveAlias(inputModelID string) (*Alias, error) {
 	// Step 1: Try announced-name exact match (highest priority)
@@ -525,7 +598,7 @@ func (s *Store) ListGroups() ([]AliasGroup, error) {
 	for _, a := range aliases {
 		g, exists := groupMap[a.InputModelID]
 		if !exists {
-			g = &AliasGroup{InputModelID: a.InputModelID}
+			g = &AliasGroup{InputModelID: a.InputModelID, RouteMode: a.RouteMode}
 			groupMap[a.InputModelID] = g
 			order = append(order, a.InputModelID)
 		}
@@ -624,7 +697,22 @@ func (s *Store) upsertAliases(groups []config.AliasGroupCfg) error {
 			}
 		}
 
-		for _, o := range g.Options {
+		mode := g.RouteMode
+		if mode == "" {
+			mode = "default"
+		}
+		switch mode {
+		case "default", "load_balance", "fallback":
+		default:
+			return fmt.Errorf("invalid route_mode %q", mode)
+		}
+		if mode != "default" {
+			activeID = ""
+			if _, err := tx.Exec("UPDATE aliases SET is_active = 0 WHERE input_model_id = ?", g.InputModelID); err != nil {
+				return err
+			}
+		}
+		for optionIndex, o := range g.Options {
 			// Check if this option already exists in the DB
 			var exists bool
 			if err := tx.QueryRow("SELECT COUNT(*) > 0 FROM aliases WHERE id = ?", o.ID).Scan(&exists); err != nil {
@@ -637,8 +725,8 @@ func (s *Store) upsertAliases(groups []config.AliasGroupCfg) error {
 					isRegex = 1
 				}
 				if _, err := tx.Exec(
-					`UPDATE aliases SET downstream_id = ?, output_model_id = ?, is_regex = ?, group_order = ?, announced_names = ? WHERE id = ?`,
-					o.DownstreamID, o.OutputModelID, isRegex, groupOrder, announcedJSON, o.ID); err != nil {
+					`UPDATE aliases SET downstream_id = ?, output_model_id = ?, is_regex = ?, group_order = ?, announced_names = ?, route_mode = ?, option_order = ? WHERE id = ?`,
+					o.DownstreamID, o.OutputModelID, isRegex, groupOrder, announcedJSON, mode, optionIndex, o.ID); err != nil {
 					return fmt.Errorf("update alias %s: %w", o.ID, err)
 				}
 			} else {
@@ -647,9 +735,9 @@ func (s *Store) upsertAliases(groups []config.AliasGroupCfg) error {
 					isRegex = 1
 				}
 				if _, err := tx.Exec(
-					`INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, announced_names)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					o.ID, g.InputModelID, o.DownstreamID, o.OutputModelID, 0, isRegex, groupOrder, announcedJSON); err != nil {
+					`INSERT INTO aliases (id, input_model_id, downstream_id, output_model_id, is_active, is_regex, group_order, announced_names, route_mode, option_order)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					o.ID, g.InputModelID, o.DownstreamID, o.OutputModelID, 0, isRegex, groupOrder, announcedJSON, mode, optionIndex); err != nil {
 					return fmt.Errorf("insert alias %s: %w", o.ID, err)
 				}
 			}
@@ -792,11 +880,11 @@ func decodeAnnouncedNames(s string) []string {
 }
 
 // validateAnnouncedNames enforces the announced-name invariants:
-//   1. Every name must match the group's regex pattern.
-//   2. No name may duplicate another within the same set.
-//   3. No name may collide with: a downstream output_model_id, a non-regex
-//      alias input_model_id, another regex group's input_model_id, or any
-//      announced name belonging to a different regex group.
+//  1. Every name must match the group's regex pattern.
+//  2. No name may duplicate another within the same set.
+//  3. No name may collide with: a downstream output_model_id, a non-regex
+//     alias input_model_id, another regex group's input_model_id, or any
+//     announced name belonging to a different regex group.
 //
 // The optional excludingInputModelID lets callers skip a group's own row
 // when checking against the existing announced-name set (so re-saving a

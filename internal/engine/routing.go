@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"reflect"
+	"regexp"
 	"slices"
 	"tresor/internal/store"
 )
@@ -37,6 +38,17 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 	// sub2api's "exact key beats wildcard" and pi's disjoint exact/glob paths.
 
 	// Tier 1: non-regex (exact) alias.
+	groups, groupErr := e.store.ListGroups()
+	if groupErr != nil {
+		return &modelResult{model: model, body: body}, &gatewayError{500, "alias group lookup error", "internal error", "alias lookup error", groupErr}
+	}
+	for _, g := range groups {
+		if g.InputModelID == model && !g.IsRegex && (g.RouteMode == "load_balance" || g.RouteMode == "fallback") {
+			if result, ge := e.resolveRoutedGroup(r, body, model, g); result != nil || ge != nil {
+				return result, ge
+			}
+		}
+	}
 	alias, err := e.store.FindActiveNonRegexAlias(model)
 	if err != nil {
 		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up alias for model %s", model), "internal error", "alias lookup error", err}
@@ -66,7 +78,36 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 		return &modelResult{ds: ds, model: model, resolvedModel: model, body: body}, nil
 	}
 
-	// Tier 3: regex (catch-all) alias.
+	// Tier 3: regex (catch-all) alias. Announced names precede pattern matches.
+	for pass := 0; pass < 2; pass++ {
+		for _, g := range groups {
+			if !g.IsRegex {
+				continue
+			}
+			matched := slices.Contains(g.AnnouncedNames, model)
+			if pass == 1 {
+				re, err := regexp.Compile(g.InputModelID)
+				matched = err == nil && re.MatchString(model)
+			}
+			if !matched {
+				continue
+			}
+			if g.RouteMode == "load_balance" || g.RouteMode == "fallback" {
+				if result, ge := e.resolveRoutedGroup(r, body, model, g); result != nil || ge != nil {
+					return result, ge
+				}
+			} else {
+				for _, a := range g.Options {
+					if a.IsActive {
+						ds, err := e.store.GetDownstream(a.DownstreamID)
+						if err == nil && ds.IsEnabled {
+							return &modelResult{ds: ds, alias: &a, model: model, resolvedModel: a.OutputModelID, body: rewriteModelInBody(body, a.OutputModelID)}, nil
+						}
+					}
+				}
+			}
+		}
+	}
 	alias, err = e.store.FindActiveRegexAlias(model)
 	if err != nil {
 		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up regex alias for model %s", model), "internal error", "alias lookup error", err}
@@ -93,6 +134,13 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 // adds auto-translation transformers when input format differs from downstream format.
 // Returns the pipeline and the list of matching rules (for logging).
 func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store.Downstream, alias *store.Alias) (Pipeline, []store.Rule, *gatewayError) {
+	registry := e.registry
+	if snapshots, ok := registry.(interface{ Snapshot() PluginRegistry }); ok {
+		registry = snapshots.Snapshot()
+	}
+	return e.buildPipelineWithRegistry(path, model, inputFormat, ds, alias, registry)
+}
+func (e *Engine) buildPipelineWithRegistry(path, model string, inputFormat string, ds *store.Downstream, alias *store.Alias, registry PluginRegistry) (Pipeline, []store.Rule, *gatewayError) {
 	// Build the candidate model list for pattern_models matching.
 	// A rule's pattern_models match if it equals ANY of these strings
 	// (exact match). This makes rules useful whether the user keys them
@@ -131,11 +179,6 @@ func (e *Engine) buildPipeline(path, model string, inputFormat string, ds *store
 		return Pipeline{}, nil, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error finding rules: %v", err), "internal error", "rule lookup error", err}
 	}
 
-	// Capture one immutable active package selection across all rules/retries.
-	registry := e.registry
-	if snapshots, ok := registry.(interface{ Snapshot() PluginRegistry }); ok {
-		registry = snapshots.Snapshot()
-	}
 	// Concatenate all matching rules' pipelines (in priority order)
 	var pipeline Pipeline
 	for _, rule := range rules {

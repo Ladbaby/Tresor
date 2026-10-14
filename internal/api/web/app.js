@@ -323,8 +323,11 @@ async function populateRuleMatchModels(containerEl, selectedModels) {
     try {
         const groups = await api('/aliases');
         for (const g of (groups || [])) {
-            const active = (g.options || []).find(option => option.id === g.active_id || option.is_active);
-            const target = active && enabledIds.has(active.downstream_id) ? suggestions : disabledModels;
+            const candidates = g.route_mode && g.route_mode !== 'default'
+                ? (g.options || [])
+                : [(g.options || []).find(option => option.id === g.active_id || option.is_active)].filter(Boolean);
+            const eligible = candidates.some(option => enabledIds.has(option.downstream_id));
+            const target = eligible ? suggestions : disabledModels;
             if (g.input_model_id) target.add(g.input_model_id);
             if (g.is_regex) {
                 for (const n of (g.announced_names || [])) {
@@ -2315,6 +2318,46 @@ function renderAliasGroup(container, group) {
     const actions = document.createElement('div');
     actions.className = 'alias-group-actions';
 
+    const modeWrap = document.createElement('label');
+    modeWrap.className = 'alias-route-mode-control';
+    const modeLabel = document.createElement('span');
+    modeLabel.textContent = 'Routing';
+    const modeSelect = document.createElement('select');
+    modeSelect.setAttribute('aria-label', `Routing mode for ${group.input_model_id}`);
+    [['default', 'Default'], ['load_balance', 'Load Balance'], ['fallback', 'Fallback']].forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        modeSelect.appendChild(option);
+    });
+    const routeMode = group.route_mode || 'default';
+    const modeError = document.createElement('span');
+    modeError.className = 'alias-route-mode-error';
+    modeError.setAttribute('role', 'alert');
+    modeError.setAttribute('aria-live', 'polite');
+    modeSelect.value = routeMode;
+    modeSelect.onchange = async () => {
+        const previous = routeMode;
+        modeSelect.disabled = true;
+        modeError.textContent = '';
+        try {
+            await api('/aliases/group/' + encodeURIComponent(group.input_model_id), {
+                method: 'PUT', body: JSON.stringify({ route_mode: modeSelect.value }),
+            });
+            await loadAliasGroups();
+        } catch (err) {
+            modeError.textContent = err.message || String(err);
+            showToast('Could not save routing mode: ' + modeError.textContent);
+            modeSelect.value = previous;
+            modeSelect.disabled = false;
+            loadAliasGroups();
+        }
+    };
+    modeWrap.append(modeLabel, modeSelect);
+    actions.appendChild(modeWrap);
+    actions.appendChild(modeError);
+    group._routeModeError = modeError;
+
     const addBtnWrap = document.createElement('span');
     addBtnWrap.style.cssText = 'display:inline-flex;align-items:center;gap:0.3rem;';
 
@@ -2481,10 +2524,20 @@ function renderAliasGroup(container, group) {
     const grid = document.createElement('div');
     grid.className = 'alias-options-grid';
 
-    group.options.forEach(opt => {
+    group.options.forEach((opt, optionIndex) => {
+        const isDefaultMode = routeMode === 'default';
         const btn = document.createElement('div');
-        btn.className = 'alias-option-btn' + (opt.is_active ? ' active' : '');
+        btn.className = 'alias-option-btn' + (isDefaultMode && opt.is_active ? ' active' : '');
+        if (!isDefaultMode) btn.classList.add('alias-option-priority-row');
         btn.dataset.aliasId = opt.id;
+
+        if (!isDefaultMode) {
+            const priority = document.createElement('span');
+            priority.className = 'alias-option-priority';
+            priority.textContent = String(optionIndex + 1);
+            priority.setAttribute('aria-label', `Priority ${optionIndex + 1}`);
+            btn.appendChild(priority);
+        }
 
         // Output model line (top, larger) with model icon
         const modelLabel = document.createElement('div');
@@ -2513,8 +2566,34 @@ function renderAliasGroup(container, group) {
         };
         btn.appendChild(removeBtn);
 
-        // Click to activate (hot-switch)
-        if (!opt.is_active) {
+        if (!isDefaultMode) {
+            const controls = document.createElement('span');
+            controls.className = 'alias-option-priority-controls';
+            for (const [direction, label, disabled] of [
+                ['up', 'Move up', optionIndex === 0],
+                ['down', 'Move down', optionIndex === group.options.length - 1],
+            ]) {
+                const move = document.createElement('button');
+                move.type = 'button';
+                move.className = 'btn-small alias-option-move';
+                move.textContent = direction === 'up' ? '↑' : '↓';
+                move.setAttribute('aria-label', `${label} ${opt.output_model_id}`);
+                move.disabled = disabled;
+                move.onclick = async (event) => {
+                    event.stopPropagation();
+                    grid.querySelectorAll('.alias-option-move').forEach(control => { control.disabled = true; });
+                    const order = group.options.map(option => option.id);
+                    const next = optionIndex + (direction === 'up' ? -1 : 1);
+                    [order[optionIndex], order[next]] = [order[next], order[optionIndex]];
+                    await saveAliasGroupOptions(group.input_model_id, { option_order: order }, modeError);
+                };
+                controls.appendChild(move);
+            }
+            btn.appendChild(controls);
+        }
+
+        // Only Default mode supports hot-switch activation.
+        if (isDefaultMode && !opt.is_active) {
             btn.onclick = () => activateAlias(opt.id);
         }
 
@@ -2523,6 +2602,21 @@ function renderAliasGroup(container, group) {
 
     card.appendChild(grid);
     container.appendChild(card);
+}
+
+async function saveAliasGroupOptions(inputModelId, patch, errorEl) {
+    if (errorEl) errorEl.textContent = '';
+    try {
+        await api('/aliases/group/' + encodeURIComponent(inputModelId), {
+            method: 'PUT', body: JSON.stringify(patch),
+        });
+        await loadAliasGroups();
+    } catch (err) {
+        if (errorEl) errorEl.textContent = err.message || String(err);
+        showToast('Could not save alias group: ' + (err.message || String(err)));
+        // Restore the canonical server state after rejected writes.
+        await loadAliasGroups();
+    }
 }
 
 /**
@@ -2581,11 +2675,11 @@ async function saveAnnouncedNames(group, names, errEl, originalNames) {
         input_model_id: group.input_model_id,
         downstream_id: target.downstream_id,
         output_model_id: target.output_model_id,
-        is_active: target.is_active,
         is_regex: true,
         group_order: target.group_order,
         announced_names: names,
     };
+    if ((group.route_mode || 'default') === 'default') payload.is_active = target.is_active;
     try {
         await api('/aliases/' + target.id, {
             method: 'PUT',
@@ -2941,9 +3035,11 @@ document.getElementById('new-group-form').addEventListener('submit', async (e) =
 
     try {
         const isRegex = document.getElementById('new-group-is-regex').checked;
-        // ponytail: each insert sets `is_active = (i === 0)`, so DB writes must
-        // be sequential; otherwise parallel inserts race on which row becomes
-        // the active one. Promise.all would corrupt the active bit.
+        const existingGroups = await api('/aliases');
+        const existingGroup = existingGroups.find(group => group.input_model_id === inputModelId);
+        const isDefaultMode = !existingGroup || (existingGroup.route_mode || 'default') === 'default';
+        // Keep default-mode first-option activation behavior; non-default groups
+        // intentionally omit the field so creation cannot imply activation.
         for (let i = 0; i < models.length; i++) {
             await api('/aliases', {
                 method: 'POST',
@@ -2951,7 +3047,7 @@ document.getElementById('new-group-form').addEventListener('submit', async (e) =
                     input_model_id: inputModelId,
                     downstream_id: downstreamId,
                     output_model_id: models[i],
-                    is_active: i === 0,
+                    ...(isDefaultMode ? { is_active: i === 0 } : {}),
                     is_regex: isRegex,
                 }),
             });

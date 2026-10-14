@@ -327,6 +327,30 @@ func TestDeleteDownstream_CascadeNullifiesRules(t *testing.T) {
 	}
 }
 
+func TestDeleteDownstream_CascadeCompactsOptionsAndPromotesByMode(t *testing.T) {
+	s := newTestStore(t)
+	for _, d := range []Downstream{{ID: "enabled", Name: "Enabled", BaseURL: "https://enabled", IsEnabled: true}, {ID: "deleted", Name: "Deleted", BaseURL: "https://deleted", IsEnabled: true}} {
+		if err := s.CreateDownstream(&d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, a := range []Alias{{ID: "gone", InputModelID: "model", DownstreamID: "deleted", OutputModelID: "gone", IsActive: true}, {ID: "keep", InputModelID: "model", DownstreamID: "enabled", OutputModelID: "keep"}} {
+		if err := s.CreateAlias(&a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.DeleteDownstream("deleted"); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := s.ListGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || len(groups[0].Options) != 1 || groups[0].Options[0].OptionOrder != 0 || groups[0].ActiveID == nil || *groups[0].ActiveID != "keep" {
+		t.Fatalf("expected compacted active survivor: %#v", groups)
+	}
+}
+
 func TestDeleteDownstream_CascadeDeletesAliases(t *testing.T) {
 	s := newTestStore(t)
 

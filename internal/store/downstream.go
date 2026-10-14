@@ -267,8 +267,28 @@ func (s *Store) DeleteDownstream(id string) error {
 	}
 	defer tx.Rollback()
 
+	var affected []string
+	rows, err := tx.Query("SELECT DISTINCT input_model_id FROM aliases WHERE downstream_id = ?", id)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var group string
+		if err := rows.Scan(&group); err != nil {
+			rows.Close()
+			return err
+		}
+		affected = append(affected, group)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
 	// Remove this downstream ID from rule match_downstreams arrays
-	removeFromMatchDownstreams(tx, id)
+	if err := removeFromMatchDownstreams(tx, id); err != nil {
+		return err
+	}
 	// Delete all aliases referencing this downstream
 	if _, err := tx.Exec("DELETE FROM aliases WHERE downstream_id = ?", id); err != nil {
 		return err
@@ -285,6 +305,40 @@ func (s *Store) DeleteDownstream(id string) error {
 		return err
 	}
 
+	for _, group := range affected {
+		var mode string
+		if err := tx.QueryRow("SELECT COALESCE(route_mode,'default') FROM aliases WHERE input_model_id = ? LIMIT 1", group).Scan(&mode); err == sql.ErrNoRows {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE aliases SET option_order = (SELECT COUNT(*) FROM aliases b WHERE b.input_model_id=aliases.input_model_id AND (b.option_order<aliases.option_order OR (b.option_order=aliases.option_order AND b.rowid<aliases.rowid))) WHERE input_model_id=?`, group); err != nil {
+			return err
+		}
+		if mode != "default" {
+			if _, err := tx.Exec("UPDATE aliases SET is_active=0 WHERE input_model_id=?", group); err != nil {
+				return err
+			}
+			continue
+		}
+		var active int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM aliases WHERE input_model_id=? AND is_active=1", group).Scan(&active); err != nil {
+			return err
+		}
+		if active == 0 {
+			var next string
+			err := tx.QueryRow(`SELECT a.id FROM aliases a JOIN downstreams d ON d.id=a.downstream_id WHERE a.input_model_id=? AND d.is_enabled=1 ORDER BY a.option_order,a.rowid LIMIT 1`, group).Scan(&next)
+			if err != nil {
+				err = tx.QueryRow("SELECT id FROM aliases WHERE input_model_id=? ORDER BY option_order,rowid LIMIT 1", group).Scan(&next)
+			}
+			if err == nil {
+				if _, err := tx.Exec("UPDATE aliases SET is_active=CASE WHEN id=? THEN 1 ELSE 0 END WHERE input_model_id=?", next, group); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	s.invalidateRegexCache()
 	return tx.Commit()
 }
 

@@ -218,6 +218,7 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		empty := bufferForRetry && !contentProduced
 		if streamErr == nil && !empty && clientCtx.Err() == nil {
 			if err := pipeline.finishAttempt(ctx, "success"); err != nil {
+				pluginFailure = true
 				streamErr = &StreamError{Status: http.StatusBadGateway, Message: fmt.Sprintf("plugin finish error: %v", err)}
 			}
 		}
@@ -741,6 +742,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		if bufferForRetry && terminalEventActive && !contentProduced {
 			discardTerminal()
 			if err := scanner.Err(); err != nil {
+				if isNetworkFailure(err) && streamErr == nil {
+					streamErr = &StreamError{Status: http.StatusBadGateway, Message: "upstream stream interrupted"}
+				}
 				if ctx.decode != nil {
 					ctx.decode.failed = true
 				}
@@ -753,6 +757,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 		}
 		flushTerminal()
 		if err := scanner.Err(); err != nil {
+			if isNetworkFailure(err) && streamErr == nil {
+				streamErr = &StreamError{Status: http.StatusBadGateway, Message: "upstream stream interrupted"}
+			}
 			if ctx.decode != nil {
 				ctx.decode.failed = true
 			}
@@ -1015,6 +1022,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	if bufferForRetry && !contentProduced && len(heldTerminalBytes) > 0 {
 		discardHeldTerminal()
 		if err := scanner.Err(); err != nil {
+			if isNetworkFailure(err) && streamErr == nil {
+				streamErr = &StreamError{Status: http.StatusBadGateway, Message: "upstream stream interrupted"}
+			}
 			if ctx.decode != nil {
 				ctx.decode.failed = true
 			}
@@ -1026,6 +1036,9 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	flushHeldTerminal()
 
 	if err := scanner.Err(); err != nil {
+		if isNetworkFailure(err) && streamErr == nil {
+			streamErr = &StreamError{Status: http.StatusBadGateway, Message: "upstream stream interrupted"}
+		}
 		if ctx.decode != nil {
 			ctx.decode.failed = true
 		}

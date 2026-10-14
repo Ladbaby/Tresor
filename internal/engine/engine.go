@@ -31,6 +31,7 @@ type Engine struct {
 	client    *http.Client
 	proxyAuth *proxyAuth
 	logger    *RequestLogger
+	routes    *aliasCoordinator
 
 	// payloadStore receives the pre-transformer bytes from HandleProxy for
 	// the inspector. Set once at startup; presence implies capture is on,
@@ -70,6 +71,7 @@ func New(s *store.Store) *Engine {
 		store:     s,
 		client:    &http.Client{},
 		logger:    NewRequestLogger(),
+		routes:    newAliasCoordinator(),
 		statsStop: make(chan struct{}),
 		statsDone: make(chan struct{}),
 	}

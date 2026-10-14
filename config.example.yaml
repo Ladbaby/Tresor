@@ -192,9 +192,11 @@ downstreams:
 
 # Model aliases — group by input model, list output options
 # Groups are ordered by array position; web UI supports drag-and-drop reordering.
+# route_mode: default (activated option), load_balance, or fallback.
 aliases:
 # Example: regex alias to match all Claude models, and re-route to gpt
   - input_model_id: "claude-.*"
+    route_mode: default
     is_regex: true
     options:
       - id: alias-claude-wildcard
@@ -202,6 +204,7 @@ aliases:
         output_model_id: gpt-6-astra
 
   - input_model_id: claude-opus-5
+    route_mode: default
     options:
       - id: alias-gpt-openai
         downstream_id: openai
@@ -212,6 +215,7 @@ aliases:
         output_model_id: claude-sonnet-5
 
   - input_model_id: claude-fable-5
+    route_mode: default
     options:
       - id: alias-gemini-google
         downstream_id: gemini

@@ -1771,6 +1771,68 @@ html[data-theme="light"] form select {
     align-items: center;
 }
 
+/* Compact routing-mode selector and explicit priority editing for alias groups. */
+.alias-group-actions { flex-wrap: wrap; }
+.alias-route-mode-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+.alias-route-mode-control select {
+    width: auto;
+    margin: 0;
+    padding: 0.25rem 1.6rem 0.25rem 0.5rem;
+    background-color: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    color: var(--text-primary);
+    font-size: 0.78rem;
+}
+.alias-route-mode-error {
+    color: var(--danger-hover);
+    font-size: 0.75rem;
+}
+.alias-option-btn.alias-option-priority-row { cursor: default; }
+.alias-option-priority-row .option-downstream { padding-right: 4.7rem; }
+.alias-option-priority {
+    position: absolute;
+    top: 0.35rem;
+    left: 0.4rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.4rem;
+    height: 1.4rem;
+    border-radius: 999px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+.alias-option-priority-row .option-model { padding-left: 1.4rem; }
+.alias-option-priority-controls {
+    position: absolute;
+    bottom: 0.45rem;
+    right: 0.45rem;
+    display: inline-flex;
+    gap: 0.25rem;
+}
+.alias-option-move {
+    min-width: 2rem;
+    padding: 0.15rem 0.35rem;
+    line-height: 1.2;
+}
+.alias-option-move:focus-visible,
+.alias-route-mode-control select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
 .alias-options-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));

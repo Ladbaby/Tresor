@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -75,12 +76,51 @@ func (r *Router) handleAliasByID(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, http.StatusOK, alias)
 
 	case req.Method == http.MethodPut:
-		var update store.Alias
-		if err := json.NewDecoder(req.Body).Decode(&update); err != nil {
+		var fields map[string]json.RawMessage
+		if err := json.NewDecoder(req.Body).Decode(&fields); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
 		}
-		update.ID = id
+		if _, ok := fields["route_mode"]; ok || fields["option_order"] != nil {
+			writeError(w, http.StatusBadRequest, "route_mode and option_order must be updated on the alias group endpoint")
+			return
+		}
+		updatePtr, err := r.store.GetAlias(id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		update := *updatePtr
+		for key, raw := range fields {
+			switch key {
+			case "input_model_id":
+				err = json.Unmarshal(raw, &update.InputModelID)
+			case "downstream_id":
+				err = json.Unmarshal(raw, &update.DownstreamID)
+			case "output_model_id":
+				err = json.Unmarshal(raw, &update.OutputModelID)
+			case "is_active":
+				if err = json.Unmarshal(raw, &update.IsActive); err == nil && update.IsActive && update.RouteMode != "" && update.RouteMode != "default" {
+					err = fmt.Errorf("activation unavailable for non-default route mode")
+				}
+			case "is_regex":
+				err = json.Unmarshal(raw, &update.IsRegex)
+			case "group_order":
+				err = json.Unmarshal(raw, &update.GroupOrder)
+			case "announced_names":
+				err = json.Unmarshal(raw, &update.AnnouncedNames)
+			default:
+				continue
+			}
+			if err != nil {
+				if strings.Contains(err.Error(), "activation unavailable") {
+					writeError(w, http.StatusConflict, err.Error())
+				} else {
+					writeError(w, http.StatusBadRequest, "invalid field "+key)
+				}
+				return
+			}
+		}
 
 		// Validate downstream exists if being updated
 		if update.DownstreamID != "" {
@@ -120,12 +160,47 @@ func (r *Router) handleAliasByID(w http.ResponseWriter, req *http.Request) {
 // handleAliasGroup handles DELETE on /api/aliases/group/{inputModelId}.
 // Deletes all alias options sharing the same InputModelID.
 func (r *Router) handleAliasGroup(w http.ResponseWriter, req *http.Request) {
+	inputModelID := strings.TrimPrefix(req.URL.Path, "/api/aliases/group/")
+	if req.Method == http.MethodPut {
+		var body struct {
+			RouteMode   *string  `json:"route_mode"`
+			OptionOrder []string `json:"option_order"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if body.RouteMode == nil && body.OptionOrder == nil {
+			writeError(w, http.StatusBadRequest, "route_mode or option_order is required")
+			return
+		}
+		if err := r.store.UpdateAliasGroup(inputModelID, body.RouteMode, body.OptionOrder); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeError(w, http.StatusNotFound, err.Error())
+			} else {
+				writeError(w, http.StatusBadRequest, err.Error())
+			}
+			return
+		}
+		r.requestConfigWrite()
+		groups, err := r.store.ListGroups()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, group := range groups {
+			if group.InputModelID == inputModelID {
+				writeJSON(w, http.StatusOK, group)
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound, "alias group not found")
+		return
+	}
 	if req.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	inputModelID := strings.TrimPrefix(req.URL.Path, "/api/aliases/group/")
 	if inputModelID == "" {
 		writeError(w, http.StatusBadRequest, "input_model_id is required")
 		return
@@ -147,6 +222,15 @@ func (r *Router) handleAliasGroup(w http.ResponseWriter, req *http.Request) {
 
 // handleActivateAlias handles PUT /api/aliases/{id}/activate
 func (r *Router) handleActivateAlias(w http.ResponseWriter, req *http.Request, id string) {
+	alias, err := r.store.GetAlias(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if alias.RouteMode != "" && alias.RouteMode != "default" {
+		writeError(w, http.StatusConflict, "alias activation is unavailable for non-default route modes")
+		return
+	}
 	if err := r.store.ActivateAlias(id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -154,7 +238,7 @@ func (r *Router) handleActivateAlias(w http.ResponseWriter, req *http.Request, i
 
 	r.requestConfigWrite()
 
-	alias, err := r.store.GetAlias(id)
+	alias, err = r.store.GetAlias(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return

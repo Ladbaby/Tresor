@@ -615,6 +615,34 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Add group-level route mode and explicit option priority. The initial
+	// option_order backfill follows rowid and does not touch is_active.
+	needsMode := !s.columnExists("aliases", "route_mode")
+	needsOrder := !s.columnExists("aliases", "option_order")
+	if needsMode || needsOrder {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin alias routing migration: %w", err)
+		}
+		defer tx.Rollback()
+		if needsMode {
+			if _, err := tx.Exec(`ALTER TABLE aliases ADD COLUMN route_mode TEXT NOT NULL DEFAULT 'default'`); err != nil {
+				return fmt.Errorf("migrate aliases.route_mode: %w", err)
+			}
+		}
+		if needsOrder {
+			if _, err := tx.Exec(`ALTER TABLE aliases ADD COLUMN option_order INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migrate aliases.option_order: %w", err)
+			}
+			if _, err := tx.Exec(`UPDATE aliases SET option_order = (SELECT COUNT(*) FROM aliases a2 WHERE a2.input_model_id = aliases.input_model_id AND a2.rowid < aliases.rowid)`); err != nil {
+				return fmt.Errorf("backfill aliases.option_order: %w", err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit alias routing migration: %w", err)
+		}
+	}
+
 	// Recreate index
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_rules_enabled ON rules(is_enabled)`); err != nil {
 		return fmt.Errorf("migrate recreate idx_rules_enabled: %w", err)
