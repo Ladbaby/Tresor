@@ -26,7 +26,7 @@ func TestPluginStreamFailureReachesAnthropicClient(t *testing.T) {
 			s := newTestStore(t)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
-				io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"local\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+				io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 			}))
 			defer server.Close()
 			addDownstream(t, s, "failure-ds", "failure-ds", server.URL, "test-key", "anthropic")

@@ -38,6 +38,22 @@ func TestParseStreamError(t *testing.T) {
 			wantMsg:    "Overloaded",
 		},
 		{
+			name:       "responses nested service unavailable maps to 503",
+			eventType:  "error",
+			data:       `{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`,
+			wantErr:    true,
+			wantStatus: http.StatusServiceUnavailable,
+			wantMsg:    "Our servers are currently overloaded. Please try again later.",
+		},
+		{
+			name:       "numeric status takes precedence over service unavailable type",
+			eventType:  "error",
+			data:       `{"type":"error","error":{"type":"service_unavailable_error","code":429,"message":"slow down"}}`,
+			wantErr:    true,
+			wantStatus: http.StatusTooManyRequests,
+			wantMsg:    "slow down",
+		},
+		{
 			name:       "anthropic rate limit maps to 429",
 			eventType:  "error",
 			data:       `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`,

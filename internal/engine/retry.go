@@ -440,16 +440,17 @@ type StreamError struct {
 	Message string // provider-supplied message
 }
 
-// anthropicErrorStatus maps Anthropic's error `type` values to HTTP statuses,
-// used when the payload carries no numeric code.
+// anthropicErrorStatus maps protocol error types to HTTP statuses when the
+// payload carries no numeric code. Includes Responses service-unavailable errors.
 var anthropicErrorStatus = map[string]int{
-	"overloaded_error":      529,
-	"rate_limit_error":      http.StatusTooManyRequests,
-	"invalid_request_error": http.StatusBadRequest,
-	"authentication_error":  http.StatusUnauthorized,
-	"permission_error":      http.StatusForbidden,
-	"not_found_error":       http.StatusNotFound,
-	"api_error":             http.StatusInternalServerError,
+	"overloaded_error":          529,
+	"rate_limit_error":          http.StatusTooManyRequests,
+	"invalid_request_error":     http.StatusBadRequest,
+	"authentication_error":      http.StatusUnauthorized,
+	"permission_error":          http.StatusForbidden,
+	"not_found_error":           http.StatusNotFound,
+	"api_error":                 http.StatusInternalServerError,
+	"service_unavailable_error": http.StatusServiceUnavailable,
 }
 
 // streamErrorPayload is a permissive union of the error shapes providers emit.

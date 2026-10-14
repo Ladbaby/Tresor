@@ -219,16 +219,12 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	// has disconnected. Once set, the function stops reading from the downstream.
 	var clientGone bool
 
-	// Until the first substantive SSE event has been vetted, outgoing lines are
-	// held in pendingBuf rather than written, because writing anything commits
-	// the HTTP status. Some providers emit a long run of ":" keep-alive comments
-	// and then a fatal `event: error`; holding those bytes keeps the status
-	// replaceable so the error can surface as a real HTTP error instead of a
-	// 200. The hold is released as soon as one complete non-error event has been
-	// seen, so streaming stays progressive.
+	// Startup metadata and keep-alives stay held until visible output has
+	// been vetted. Reasoning/tool activity and unknown events remain progressive;
+	// unlike retry content detection, they can commit the HTTP status.
 	var pendingBuf bytes.Buffer
 	holding := true
-	const maxPendingBytes = 8 * 1024
+	const maxPendingBytes = 1024 * 1024
 
 	tryWrite := func(p []byte) bool {
 		if clientGone {
@@ -280,11 +276,11 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 				pendingBuf.WriteByte('\n')
 				return true
 			}
-			// Hold buffer full — release so a client behind an intermediary
-			// keeps receiving bytes rather than being starved.
-			if !releasePending() {
-				return false
-			}
+			// Startup metadata cannot force a successful status. Bound its storage
+			// and fail while the HTTP status is still replaceable.
+			streamErr = &StreamError{Status: http.StatusBadGateway, Message: "upstream startup metadata exceeds 1 MiB limit"}
+			discardPending()
+			return false
 		}
 		if !tryWrite([]byte(line + "\n")) {
 			return false
@@ -294,6 +290,15 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 	// writeAndFlush is the standard "send some bytes and flush" pair. Any held
 	// bytes are released first so ordering is preserved.
 	writeAndFlush := func(p []byte) bool {
+		if holding && startupSSEBytes(p) {
+			if pendingBuf.Len()+len(p) > maxPendingBytes {
+				streamErr = &StreamError{Status: http.StatusBadGateway, Message: "upstream startup metadata exceeds 1 MiB limit"}
+				discardPending()
+				return false
+			}
+			pendingBuf.Write(p)
+			return true
+		}
 		if holding && !releasePending() {
 			return false
 		}
@@ -568,13 +573,12 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 					return true
 				}
 			}
-			// Non-terminal event: emit it verbatim.
-			if !writeEvent() {
+			// Release before writing visible output so large content events do not
+			// consume the startup-only buffer budget.
+			if holding && !streamStartupEvent(sseEventName, []byte(payload)) && !releasePending() {
 				return false
 			}
-			// A substantive event completed without being an error, so the
-			// bytes held to keep the status replaceable can be released now.
-			if holding && !releasePending() {
+			if !writeEvent() {
 				return false
 			}
 			resetEvent()
@@ -878,7 +882,6 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 
 		if line == "" {
 			// Empty line terminates an SSE event — flush it
-			hadEventData := eventLine != "" || len(dataLines) > 0
 			if !flushEvent() {
 				if errorDetected {
 					// Fatal in-band error: drop any held terminal so the client
@@ -890,14 +893,6 @@ func (e *Engine) handleStreamingResponse(w *headerDelayWriter, resp *http.Respon
 			}
 			eventLine = ""
 			dataLines = nil
-			// A substantive event completed without being an error, so the bytes
-			// held to keep the status replaceable can be released now. Keep-alive
-			// comments carry no data and do not end the hold — that is what lets
-			// a provider's trailing `event: error` still become a real HTTP error.
-			if hadEventData && holding && !releasePending() {
-				record()
-				return finish()
-			}
 			continue
 		}
 

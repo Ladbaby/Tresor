@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"tresor/internal/middleware"
+	"unicode"
 )
 
 // statusCaptureWriter wraps http.ResponseWriter to capture the status code.
@@ -272,6 +273,38 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				if outcome.pluginFailure {
 					label = "plugin stream error"
 				}
+				if !outcome.pluginFailure {
+					message := outcome.streamErr.Message
+					// Provider messages are untrusted. Never publish configured keys,
+					// control characters, or unbounded text in the request log.
+					keys := []string{result.ds.EffectiveAPIKey()}
+					if ctx.TargetDownstream != nil {
+						keys = append(keys, ctx.TargetDownstream.APIKey)
+					}
+					if e.proxyAuth != nil {
+						for key := range e.proxyAuth.keys {
+							keys = append(keys, key)
+						}
+					}
+					for _, key := range keys {
+						if key != "" {
+							message = strings.ReplaceAll(message, key, "[redacted]")
+						}
+					}
+					message = strings.Map(func(r rune) rune {
+						if unicode.IsControl(r) {
+							return ' '
+						}
+						return r
+					}, message)
+					message = strings.Join(strings.Fields(message), " ")
+					if runes := []rune(message); len(runes) > 1024 {
+						message = string(runes[:1024]) + "..."
+					}
+					if message != "" {
+						label += ": " + message
+					}
+				}
 				if outcome.committed {
 					// Bytes already reached the client, so the 200 status cannot
 					// be recalled; the error event was passed through verbatim.
@@ -280,7 +313,7 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 					entry.Error = label
 					entry.Duration = DurationMs(time.Since(start))
 					e.logger.Record(&entry)
-					log.Printf("%s after content: %s", label, outcome.streamErr.Message)
+					log.Printf("%s after content", label)
 					return
 				}
 				e.logAndReturnError(cw, &entry, start, &gatewayError{outcome.streamErr.Status, label, outcome.streamErr.Message, label, nil})
