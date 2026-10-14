@@ -36,7 +36,7 @@ log_level: "info"
 # original downstream response, not the post-pipeline output. Disabled by
 # default because it adds a small per-request memory cost (capped at ~1 MiB
 # per direction). Persisted to YAML so the choice survives daemon restarts.
-capture_payloads: false
+capture_payloads: true
 
 # Automatically retry requests when the downstream LLM returns an empty response (http-200 but no content generated). Uses exponential backoff with up to 3 retries.
 retry_on_empty: false
