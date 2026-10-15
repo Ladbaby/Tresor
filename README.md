@@ -68,7 +68,7 @@ Tresor is a single binary with two modes:
 - 🔍 **Traffic Inspection** (off by default) — Inspect raw incoming requests and downstream LLM responses, by clicking the log entries. Curious about what your LLM Apps are actually sending to LLMs? Then this is for you! Works similar to [claude-tap](https://github.com/liaohch3/claude-tap).
 - 🔄 **Retry** (off by default) — Automatically retry downstream requests that return HTTP 200 but produce no content (e.g., thinking-only responses, empty completions). Up to 3 retries with exponential backoff.
 - 🌐 **Embedded Web UI** — Manage everything from a browser dashboard. No separate frontend deployment.
-- 🔌 **Plugin Pipeline** — Freedom to write your own plugins to transform the traffic data, in JavaScript.
+- 🔌 **Extensible Plugin Pipeline** — Write your own plugins to modify requests, responses, headers, and streaming events. Hot-reload plugin without restarting Tresor. Explore [Ladbaby/Tresor-plugins](https://github.com/Ladbaby/Tresor-plugins) for examples and inspiration.
 - 🔑 **Proxy Authentication** — Require clients to authenticate via `Authorization: Bearer` or `x-api-key` headers (supports Anthropic-format clients like Claude Office plugin).
 - 📝 **Single Config File** — All settings in one portable YAML file. Changes via the web UI write back automatically.
 - 🪶 **Zero External Dependencies** — Pure Go SQLite (no CGO), no external web framework, single compiled binary.
