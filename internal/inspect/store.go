@@ -11,10 +11,11 @@ import (
 	"time"
 )
 
-// DefaultMaxEntries / MaxBodyBytes bound memory usage.
+// Capture and retention limits bound inspector memory, not forwarded responses.
 const (
 	DefaultMaxEntries = 100
-	MaxBodyBytes      = 1 << 20
+	MaxBodyBytes      = 16 << 20
+	MaxRetainedBytes  = 128 << 20
 )
 
 type Entry struct {
@@ -52,10 +53,12 @@ type Entry struct {
 }
 
 type Store struct {
-	mu      sync.RWMutex
-	max     int
-	entries map[int]*Entry
-	order   []int
+	mu            sync.RWMutex
+	max           int
+	maxBytes      int
+	retainedBytes int
+	entries       map[int]*Entry
+	order         []int
 }
 
 func New(maxEntries int) *Store {
@@ -63,18 +66,31 @@ func New(maxEntries int) *Store {
 		maxEntries = DefaultMaxEntries
 	}
 	return &Store{
-		max:     maxEntries,
-		entries: make(map[int]*Entry, maxEntries),
-		order:   make([]int, 0, maxEntries),
+		max:      maxEntries,
+		maxBytes: MaxRetainedBytes,
+		entries:  make(map[int]*Entry, maxEntries),
+		order:    make([]int, 0, maxEntries),
 	}
 }
 
 func (s *Store) Add(e Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if previous, ok := s.entries[e.ID]; ok {
+		s.retainedBytes -= len(previous.RequestBody) + len(previous.ResponseBody)
+		for i, id := range s.order {
+			if id == e.ID {
+				s.order = append(s.order[:i], s.order[i+1:]...)
+				break
+			}
+		}
+	}
 	s.entries[e.ID] = &e
+	s.retainedBytes += len(e.RequestBody) + len(e.ResponseBody)
 	s.order = append(s.order, e.ID)
-	for len(s.entries) > s.max {
+	for len(s.entries) > s.max || s.retainedBytes > s.maxBytes {
+		oldest := s.entries[s.order[0]]
+		s.retainedBytes -= len(oldest.RequestBody) + len(oldest.ResponseBody)
 		delete(s.entries, s.order[0])
 		s.order = s.order[1:]
 	}

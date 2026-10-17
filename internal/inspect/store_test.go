@@ -60,6 +60,39 @@ func TestStore_EvictsOldestWhenFull(t *testing.T) {
 	}
 }
 
+func TestStore_EvictsByPayloadBytes(t *testing.T) {
+	s := New(10)
+	s.maxBytes = 10
+	s.Add(Entry{ID: 1, RequestBody: []byte("123"), ResponseBody: []byte("456")})
+	s.Add(Entry{ID: 2, ResponseBody: []byte("78901")})
+	if _, ok := s.Get(1); ok || s.retainedBytes != 5 || s.Len() != 1 {
+		t.Fatalf("byte eviction failed: len=%d bytes=%d", s.Len(), s.retainedBytes)
+	}
+	// An entry larger than the entire budget must not remain retained.
+	s.Add(Entry{ID: 3, ResponseBody: make([]byte, 11)})
+	if s.Len() != 0 || s.retainedBytes != 0 {
+		t.Fatalf("oversized entry retained: len=%d bytes=%d", s.Len(), s.retainedBytes)
+	}
+}
+
+func TestStore_ReplacementAccountingAndOrder(t *testing.T) {
+	s := New(2)
+	s.maxBytes = 10
+	s.Add(Entry{ID: 1, ResponseBody: []byte("123456")})
+	s.Add(Entry{ID: 2, ResponseBody: []byte("78")})
+	s.Add(Entry{ID: 1, ResponseBody: []byte("x")})
+	if s.retainedBytes != 3 || len(s.order) != 2 || s.order[0] != 2 {
+		t.Fatalf("replacement accounting/order: bytes=%d order=%v", s.retainedBytes, s.order)
+	}
+	s.Add(Entry{ID: 3, ResponseBody: []byte("abc")})
+	if _, ok := s.Get(2); ok || s.retainedBytes != 4 || s.Len() != 2 {
+		t.Fatalf("replacement eviction: bytes=%d order=%v", s.retainedBytes, s.order)
+	}
+	if _, ok := s.Get(1); !ok {
+		t.Fatal("replacement was incorrectly evicted")
+	}
+}
+
 // TestStore_ConcurrentAddAndGet exercises the lock with -race.
 func TestStore_ConcurrentAddAndGet(t *testing.T) {
 	s := New(50)

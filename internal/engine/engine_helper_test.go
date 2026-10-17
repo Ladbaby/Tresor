@@ -47,7 +47,13 @@ func TestStreamCaptureTruncationKeepsNewline(t *testing.T) {
 	for _, size := range []int{inspect.MaxBodyBytes - 1, inspect.MaxBodyBytes, inspect.MaxBodyBytes + 1} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			s := newTestStore(t)
-			wire := ":prefix\n:" + strings.Repeat("x", size-len(":prefix\n:")-1) + "\n"
+			// Use normal short SSE lines: the scanner's per-line bound is
+			// independent of the total inspector capture limit.
+			prefix := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
+			line := ":" + strings.Repeat("x", 4094) + "\n"
+			remaining := size - len(prefix)
+			wire := prefix + strings.Repeat(line, remaining/len(line)) + ":" + strings.Repeat("x", remaining%len(line))
+			wire = wire[:size-1] + "\n"
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Write([]byte(wire))
@@ -76,7 +82,45 @@ func TestStreamCaptureTruncationKeepsNewline(t *testing.T) {
 			if !bytes.Equal(entry.ResponseBody, want) || entry.TruncatedResponse != (size > inspect.MaxBodyBytes) {
 				t.Fatalf("capture len=%d truncated=%v want len=%d", len(entry.ResponseBody), entry.TruncatedResponse, len(want))
 			}
+			if w.Body.String() != wire {
+				t.Fatal("inspection limit changed forwarded stream")
+			}
 		})
+	}
+}
+
+func TestLargeAnthropicStreamCaptureRetainsTermination(t *testing.T) {
+	s := newTestStore(t)
+	start := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+	delta := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"summary text\"}}\n\n"
+	end := "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":13107}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	wire := start + strings.Repeat(delta, (2<<20)/len(delta)) + end
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, wire)
+	}))
+	defer server.Close()
+	addDownstream(t, s, "capture-ds", "capture-ds", server.URL, "test-key", "anthropic")
+	addOutputModelIDs(t, s, "capture-ds", "capture-model")
+	eng := New(s)
+	defer eng.Stop()
+	capture := inspect.New(10)
+	eng.SetPayloadStore(capture)
+	w := httptest.NewRecorder()
+	eng.HandleProxy(w, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"capture-model","max_tokens":13107,"stream":true,"messages":[{"role":"user","content":"summarize"}]}`)))
+	logs := eng.GetLogger().RecentEntries(1)
+	if len(logs) != 1 {
+		t.Fatal("missing log")
+	}
+	entry, ok := capture.Get(logs[0].ID)
+	if !ok || entry.TruncatedResponse || string(entry.ResponseBody) != wire {
+		t.Fatal("large response was not captured intact")
+	}
+	if w.Body.String() != wire {
+		t.Fatal("forwarded stream changed")
+	}
+	if logs[0].Usage == nil || logs[0].Usage.OutputTokens == nil || *logs[0].Usage.OutputTokens != 13107 {
+		t.Fatal("terminal output usage missing")
 	}
 }
 
