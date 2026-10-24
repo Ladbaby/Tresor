@@ -21,11 +21,11 @@ func TestJSPipelineConfigurationValidatedOnSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.SetPluginManager(manager)
-	files := map[string]string{"manifest.json": `{"id":"test/config","version":"1.0.0","api_version":2,"entry":"plugin.js"}`, "plugin.js": `module.exports={request(){}}`}
+	files := map[string]string{"manifest.json": `{"id":"test/config","version":"1.0.0","api_version":2,"config_schema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]},"entry":"plugin.js"}`, "plugin.js": `module.exports={request(){}}`}
 	if _, err := manager.Install(files); err != nil {
 		t.Fatal(err)
 	}
-	for _, pipeline := range []string{`[{"plugin_id":"test/config","config":{"value":"valid"}}]`, `[{"plugin_id":"test/missing"}]`, `[{"plugin_id":"test/config","failure_policy":"safe_passthrough"}]`} {
+	for _, pipeline := range []string{`[{"plugin_id":"test/config","config":{"value":42}}]`, `[{"plugin_id":"test/missing"}]`, `[{"plugin_id":"test/config"}]`} {
 		body, _ := json.Marshal(map[string]any{"name": "Invalid", "pattern_path": "*", "pipeline_config": pipeline})
 		w := httptest.NewRecorder()
 		r.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/api/rules", bytes.NewReader(body)))
@@ -33,8 +33,49 @@ func TestJSPipelineConfigurationValidatedOnSave(t *testing.T) {
 			t.Fatalf("removed settings accepted: %d %s", w.Code, w.Body)
 		}
 	}
-	if err := r.validateJSPipeline(`[{"plugin_id":"test/config"}]`); err != nil {
+	if err := r.validateJSPipeline(`[{"plugin_id":"test/config","config":{"value":"valid"}}]`); err != nil {
 		t.Fatal(err)
+	}
+	pipeline := `[{"id":"first","plugin_id":"test/config","config":{"value":"alpha"}},{"id":"second","plugin_id":"test/config","config":{"value":"beta"}}]`
+	body, _ := json.Marshal(map[string]any{"name": "Configured", "pattern_path": "*", "pipeline_config": pipeline})
+	w := httptest.NewRecorder()
+	r.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/api/rules", bytes.NewReader(body)))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("valid configured pipeline: %d %s", w.Code, w.Body)
+	}
+	var saved struct {
+		ID       string `json:"id"`
+		Pipeline string `json:"pipeline_config"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(saved.Pipeline, `"value":"alpha"`) || !strings.Contains(saved.Pipeline, `"value":"beta"`) || !strings.Contains(saved.Pipeline, `"id":"first"`) {
+		t.Fatalf("independent step config lost: %s", saved.Pipeline)
+	}
+	// Disabling a package must not prevent metadata edits/reorders preserving its steps.
+	disable, _ := json.Marshal(map[string]any{"id": "test/config", "version": "1.0.0", "enabled": false})
+	w = httptest.NewRecorder()
+	disableReq := httptest.NewRequest("POST", "/api/plugin-packages/enabled", bytes.NewReader(disable))
+	disableReq.Header.Set("Content-Type", "application/json")
+	r.Handler().ServeHTTP(w, disableReq)
+	if w.Code != 200 {
+		t.Fatalf("disable: %d %s", w.Code, w.Body)
+	}
+	for _, tc := range []struct {
+		pipeline string
+		status   int
+	}{
+		{`[{"id":"second","plugin_id":"test/config","config":{"value":"beta"}},{"id":"first","plugin_id":"test/config","config":{"value":"alpha"}}]`, 200},
+		{`[{"id":"first","plugin_id":"test/config","config":{"value":"changed"}}]`, 400},
+		{`[{"id":"new","plugin_id":"test/config","config":{"value":"alpha"}}]`, 400},
+	} {
+		body, _ = json.Marshal(map[string]any{"name": "Metadata edit", "pipeline_config": tc.pipeline})
+		w = httptest.NewRecorder()
+		r.Handler().ServeHTTP(w, httptest.NewRequest("PUT", "/api/rules/"+saved.ID, bytes.NewReader(body)))
+		if w.Code != tc.status {
+			t.Fatalf("unavailable update status=%d want=%d: %s", w.Code, tc.status, w.Body)
+		}
 	}
 }
 
@@ -67,8 +108,8 @@ func TestPluginPackagesInstallActivateDiscovery(t *testing.T) {
 	if !bytes.Contains(w.Body.Bytes(), []byte(`test/headers`)) {
 		t.Fatal("installed package was not enabled")
 	}
-	if bytes.Contains(w.Body.Bytes(), []byte("config_schema")) {
-		t.Fatal("configuration metadata exposed")
+	if !bytes.Contains(w.Body.Bytes(), []byte("config_schema")) {
+		t.Fatal("parameter schema missing from plugin discovery")
 	}
 	w = request(http.MethodPost, "/api/plugin-packages/activate", map[string]string{"id": "test/headers", "version": "1.0.0"})
 	if w.Code != 200 {

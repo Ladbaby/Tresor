@@ -27,7 +27,6 @@ func TestE2E(t *testing.T) {
 bind_addr: 127.0.0.1:%d
 db_path: %s
 plugin_cache_dir: %s
-icon_cache_dir: %s
 
 downstreams:
   - id: openai-gpt4o
@@ -73,7 +72,7 @@ aliases:
         downstream_id: anthropic-sonnet
         output_model_id: claude-sonnet-4-20250514
 `,
-		e2ePort, dbPath, filepath.ToSlash(filepath.Join(t.TempDir(), "plugin-cache")), filepath.ToSlash(filepath.Join(t.TempDir(), "icon-cache")), mockUpstream.URL, mockUpstream.URL, mockUpstream.URL, mockUpstream.URL)
+		e2ePort, dbPath, filepath.ToSlash(filepath.Join(t.TempDir(), "plugin-cache")), mockUpstream.URL, mockUpstream.URL, mockUpstream.URL, mockUpstream.URL)
 	apiBase, cleanup := startTresor(t, cfg, e2ePort)
 	defer cleanup()
 

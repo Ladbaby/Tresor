@@ -1596,6 +1596,13 @@ html[data-theme="light"] form select {
     background: var(--danger-hover);
 }
 
+.pipeline-config-field { display:block; margin:0.5rem 0; color:var(--text-secondary); font-size:0.82rem; }
+.pipeline-config-field input, .pipeline-config-field select, .pipeline-config-field textarea { display:block; width:100%; margin-top:0.25rem; background:var(--input-bg); border:1px solid var(--border-color); border-radius:6px; color:var(--text-primary); padding:0.4rem 0.55rem; font:inherit; }
+.pipeline-config-field input[type="checkbox"] { display:inline-block; width:auto; margin-left:0.5rem; }
+.pipeline-secret-warning { color:var(--text-secondary); font-size:0.8rem; margin:0.5rem 0; }
+.pipeline-config-fields fieldset { border:1px solid var(--border-color); border-radius:6px; margin:0.5rem 0; padding:0.5rem; }
+.pipeline-config-fields legend { color:var(--text-secondary); font-size:0.82rem; }
+
 .pipeline-step-config {
     padding-left: 0.5rem;
 }
@@ -3255,6 +3262,16 @@ td .ds-toggle.rule-toggle {
     color: var(--text-primary);
     font-size: 0.9rem;
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+#integration-settings-json {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: none;
+    min-height: 18rem;
+    resize: vertical;
+    tab-size: 2;
 }
 
 .settings-input:focus {

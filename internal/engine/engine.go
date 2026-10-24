@@ -1,10 +1,12 @@
 package engine
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"time"
 	"tresor/internal/inspect"
+	"tresor/internal/integrations"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
 )
@@ -20,18 +22,23 @@ type PluginRegistry interface {
 type PluginInfo struct {
 	ID           string      `json:"id"`
 	Description  string      `json:"description"`
-	ConfigSchema interface{} `json:"-"` // Internal host metadata; never user configuration.
+	ConfigSchema interface{} `json:"config_schema,omitempty"`
 }
 
 // Engine is the core proxy handler. It matches incoming requests against
 // rules, builds pipelines, and forwards transformed requests to downstreams.
 type Engine struct {
-	store     *store.Store
-	registry  PluginRegistry
-	client    *http.Client
-	proxyAuth *proxyAuth
-	logger    *RequestLogger
-	routes    *aliasCoordinator
+	store            *store.Store
+	registry         PluginRegistry
+	client           *http.Client
+	proxyAuth        *proxyAuth
+	logger           *RequestLogger
+	routes           *aliasCoordinator
+	integrationMu    sync.RWMutex
+	integrations     *integrationSnapshot
+	executionMu      sync.Mutex
+	activeExecutions map[string]map[string]context.CancelFunc
+	managedLocks     map[string]*managedExecutionLock
 
 	// payloadStore receives the pre-transformer bytes from HandleProxy for
 	// the inspector. Set once at startup; presence implies capture is on,
@@ -68,12 +75,13 @@ type Engine struct {
 // New creates a new Engine.
 func New(s *store.Store) *Engine {
 	e := &Engine{
-		store:     s,
-		client:    &http.Client{},
-		logger:    NewRequestLogger(),
-		routes:    newAliasCoordinator(),
-		statsStop: make(chan struct{}),
-		statsDone: make(chan struct{}),
+		store:        s,
+		integrations: &integrationSnapshot{services: map[string]*integrations.Snapshot{}},
+		client:       &http.Client{},
+		logger:       NewRequestLogger(),
+		routes:       newAliasCoordinator(),
+		statsStop:    make(chan struct{}),
+		statsDone:    make(chan struct{}),
 	}
 	go e.runStatsFlusher()
 	return e

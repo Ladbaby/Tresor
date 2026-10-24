@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -68,11 +70,40 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// ClientIP: trust forwarded headers when connected via localhost (reverse proxy).
 	entry.ClientIP = middleware.ExtractClientIP(r)
 
+	// Authenticate reserved metadata independently of broad proxy authentication.
+	if hasIntegrationHeaders(r.Header) {
+		if r.Body == nil {
+			stripIntegrationHeaders(r.Header)
+			integrationError(cw, 401, "execution_unauthorized")
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(cw, r.Body, externalValueLimit))
+		r.Body.Close()
+		if err != nil {
+			stripIntegrationHeaders(r.Header)
+			integrationError(cw, 413, "invalid_request")
+			return
+		}
+		authenticated, authError := e.authenticateExecution(r, body)
+		if authError != nil {
+			e.logAndReturnError(cw, entry, start, authError)
+			return
+		}
+		r = authenticated
+		activeRequest, cleanup, activeErr := e.registerManagedExecution(r)
+		if activeErr != nil {
+			integrationError(cw, 401, "execution_unauthorized")
+			return
+		}
+		defer cleanup()
+		r = activeRequest
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
 	namespace := ""
 	if e.proxyAuth != nil && e.proxyAuth.enabled {
 		namespace = proxyNamespace(r)
 	}
-	if !e.validateProxyAuth(r, cw) {
+	if executionFromRequest(r) == nil && !e.validateProxyAuth(r, cw) {
 		entry.Status = http.StatusUnauthorized
 		entry.Error = "unauthorized"
 		entry.Duration = DurationMs(time.Since(start))
@@ -119,10 +150,14 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			result.sessionDone()
 		}
 	}()
+	e.integrationMu.RLock()
 	registry := e.registry
 	if snapshots, ok := registry.(interface{ Snapshot() PluginRegistry }); ok {
 		registry = snapshots.Snapshot()
 	}
+	state := e.integrations
+	e.integrationMu.RUnlock()
+	r = r.WithContext(context.WithValue(r.Context(), integrationSnapshotKey{}, state))
 	for {
 		result.retry = false
 		e.executeSelection(cw, r, result, entry, start, registry)
@@ -161,6 +196,10 @@ func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, resu
 		return
 	}
 
+	if e.prepareIntegration(cw, r, result, &pipeline, entry, start) {
+		return
+	}
+
 	// Collect rule IDs for logging
 	if len(rules) > 0 {
 		entry.RuleIDs = make([]string, len(rules))
@@ -174,6 +213,16 @@ func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, resu
 	entry.DownstreamName = result.ds.Name
 	ctx, ge := e.prepareDownstreamContext(r, result, inputFormat)
 	if ge != nil {
+		for _, p := range pipeline.ExternalSteps {
+			if p.prepared {
+				p.prepared = false
+				if p.ctx != nil {
+					p.ctx.execution().Failure = ge.cause
+					cleanup := Pipeline{ExternalSteps: []*ExternalPlugin{p}}
+					_ = cleanup.finishAttempt(p.ctx, "error")
+				}
+			}
+		}
 		entry.Duration = DurationMs(time.Since(start))
 		e.logAndReturnError(cw, entry, start, ge)
 		return

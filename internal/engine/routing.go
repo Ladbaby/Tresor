@@ -63,7 +63,7 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 		// fall through to the other tiers.
 		if ds.IsEnabled {
 			e.logger.Debug("alias match (exact): model %q → alias %q → downstream %q (%s)", model, alias.ID, ds.ID, alias.OutputModelID)
-			return &modelResult{ds: ds, alias: alias, model: model, resolvedModel: alias.OutputModelID, body: rewriteModelInBody(body, alias.OutputModelID)}, nil
+			return &modelResult{ds: ds, alias: alias, model: model, resolvedModel: alias.OutputModelID, originalBody: append([]byte(nil), body...), body: rewriteModelInBody(body, alias.OutputModelID)}, nil
 		}
 		e.logger.Debug("exact alias match skipped: downstream %q is disabled", ds.ID)
 	}
@@ -75,7 +75,7 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 	}
 	if ds != nil {
 		e.logger.Debug("direct resolution: model %q → downstream %q (%s)", model, ds.ID, ds.Name)
-		return &modelResult{ds: ds, model: model, resolvedModel: model, body: body}, nil
+		return &modelResult{ds: ds, model: model, resolvedModel: model, originalBody: append([]byte(nil), body...), body: body}, nil
 	}
 
 	// Tier 3: regex (catch-all) alias. Announced names precede pattern matches.
@@ -101,7 +101,7 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 					if a.IsActive {
 						ds, err := e.store.GetDownstream(a.DownstreamID)
 						if err == nil && ds.IsEnabled {
-							return &modelResult{ds: ds, alias: &a, model: model, resolvedModel: a.OutputModelID, body: rewriteModelInBody(body, a.OutputModelID)}, nil
+							return &modelResult{ds: ds, alias: &a, model: model, resolvedModel: a.OutputModelID, originalBody: append([]byte(nil), body...), body: rewriteModelInBody(body, a.OutputModelID)}, nil
 						}
 					}
 				}
@@ -120,7 +120,7 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 		}
 		if rds.IsEnabled {
 			e.logger.Debug("alias match (regex %q): model %q → downstream %q (%s)", alias.InputModelID, model, rds.ID, alias.OutputModelID)
-			return &modelResult{ds: rds, alias: alias, model: model, resolvedModel: alias.OutputModelID, body: rewriteModelInBody(body, alias.OutputModelID)}, nil
+			return &modelResult{ds: rds, alias: alias, model: model, resolvedModel: alias.OutputModelID, originalBody: append([]byte(nil), body...), body: rewriteModelInBody(body, alias.OutputModelID)}, nil
 		}
 		e.logger.Debug("regex alias match skipped: downstream %q is disabled", rds.ID)
 	}

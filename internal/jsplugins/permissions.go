@@ -63,8 +63,7 @@ func (m *Manager) restoreMetadata() error {
 	return nil
 }
 
-// ExecutionSnapshot publishes availability and effective grants under one lock.
-// Package copies pin grants without ever mutating installed source snapshots.
+// ExecutionSnapshot pins enabled immutable packages under one lock.
 func (m *Manager) ExecutionSnapshot() (map[string]*Package, map[string]string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -72,12 +71,11 @@ func (m *Manager) ExecutionSnapshot() (map[string]*Package, map[string]string) {
 	blocked := map[string]string{}
 	for id, version := range m.active {
 		pkg := m.installed[id][version]
-		if !pkg.Compatible || len(pkg.Manifest.Permissions) != 0 {
+		if !pkg.Compatible {
 			blocked[id] = "unsupported package capabilities"
 			continue
 		}
-		copy := *pkg
-		packages[id] = &copy
+		packages[id] = pkg
 	}
 	return packages, blocked
 }

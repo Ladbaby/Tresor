@@ -221,7 +221,7 @@ func (r *packageSnapshot) ListPlugins() []engine.PluginInfo {
 	result := r.builtin.ListPlugins()
 	for _, pkg := range r.packages {
 		m := pkg.Manifest
-		result = append(result, engine.PluginInfo{ID: m.ID, Description: m.Description, ConfigSchema: nil})
+		result = append(result, engine.PluginInfo{ID: m.ID, Description: m.Description, ConfigSchema: m.ConfigSchema})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result

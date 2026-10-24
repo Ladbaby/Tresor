@@ -115,7 +115,7 @@ The codebase follows a clean layered structure with three core concerns:
 | `internal/store/` | SQLite data layer: `store.go` (schema/migrations/upsert), `rule.go` (CRUD + matching), `downstream.go` (CRUD + model IDs), `alias.go` (alias CRUD + grouping) |
 | `internal/engine/` | Core gateway handler: `engine.go` (proxy, model resolution, auto-translation, model listing, retry on empty response), `pipeline.go` (transformer orchestration), `retry.go` (empty response detection + retry with backoff), `types.go` (interfaces), `logger.go` (request logging + SSE) |
 | `internal/plugins/` | Composite registry and eleven native format converters; non-converters are external JS packages, not native factories |
-| `internal/jsplugins/` | API V2 CommonJS runtime, manifests/source digests, advisory AST lint, immutable cache, approved logging, HTTPS bundle verification, permissions and provenance |
+| `internal/jsplugins/` | API CommonJS runtime, manifests/source digests, advisory AST lint, immutable cache, HTTPS bundle verification, and rule-scoped plugin configuration/services |
 | `internal/api/` | Admin REST API: `router.go` (routing + auth), `rules.go` (rule endpoints), `downstreams.go` (downstream endpoints + plugins list + model fetch), `aliases.go` (alias endpoints + reorder), `logs.go` (log REST + SSE + log level), `config.go` (runtime config), `icons.go` (model icon serving), `icons_admin.go` (icon refresh), `embed.go` (embedded web UI) |
 | `internal/middleware/` | Cookie-based session auth middleware for admin API (with rate limiting and multi-session support) |
 | `internal/icons/` | Model icon fetching, pattern matching, and CDN caching via `@lobehub/icons-static-svg` |
@@ -164,9 +164,10 @@ Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing request
 
 External packages use API V2 (`internal/jsplugins/api.d.ts`): immutable `context` distinguishes client/downstream/current formats, requested versus observed HTTP/SSE transport, stage, phase and effective limits. Explicit `upstreamStart/Event/End` hooks process upstream SSE before collection or regular response-event transforms; ordinary stream hooks are not automatically run before collection. Error termination receives sanitized failure metadata and statistics; finish always releases managed storage. 
 
-Pipeline config is stored as ordered JSON steps in `rules.pipeline_config`: `[{"plugin_id":"..."}]`. External plugins have no user configuration and always raise errors on failure. Legacy configuration and failure-policy fields are migrated away. New configurable or logging-capable packages are rejected; cached legacy packages remain unavailable and deletable without breaking startup. Plugin logs and execution diagnostics are neither collected nor published.
+Pipeline config is stored as ordered JSON steps in `rules.pipeline_config`.
 
-Package management and author tools: `plugin lint <dir> [--json] [--strict]`, `plugin pack <dir> --output <new-file>`, `plugin install <dir>`, `plugin install-url <https-url> [--sha256 <canonical-source-digest>] [--signature <base64> --public-key <base64>]`, and `plugin enable|disable|delete <id> <version>`. Install enables the version immediately; only one version per ID is enabled. `plugin activate` remains an enable-compatible command. In-flight requests retain their pinned package; changes affect future snapshots. Lint/pack do not execute JS.
+Install/enable packages with `plugin install` / `plugin enable`; only one version per ID is enabled. In-flight requests retain their pinned package; changes affect future snapshots. Lint/pack do not execute JS. There are no plugin execution timers or watchdogs; plugin authors own termination. Keep durable lifecycle and account-safety constraints: do not use live accounts in tests.
+
 
 
 **Auto-translation:** When input format (detected from path) differs from downstream format, the engine automatically inserts the appropriate transformer without any rule needed.
@@ -249,7 +250,11 @@ Core workflow:
 
 1. **Build**: `go build ./...` — ensure everything compiles
 2. **Unit tests**: `go test ./...` — all package tests must pass (clear the cache with `go clean -testcache` first if changes touch tested packages)
-3. **E2E smoke test**: Start the daemon with a YAML config (`./tresor.exe run --config <path>`) in a background process, then run `go test -tags=integration ./e2e/...` against it
+3. **E2E smoke test**: `go test -tags=integration ./e2e/...` — the harness launches its own isolated daemons (temp config, temp DB, seeded icon cache, port-collision check). Build a fresh binary first and point `TRESOR_TEST_BINARY` at it, otherwise the tests run against a stale `../tresor.exe` and fail misleadingly:
+   ```bash
+   go build -o /tmp/tresor-e2e.exe .
+   TRESOR_TEST_BINARY=/tmp/tresor-e2e.exe go test -tags=integration ./e2e/... -count=1
+   ```
 4. **Browser verification**: Use `agent-browser` to verify web UI changes visually — navigate to each affected tab, perform core interactions (create, edit, delete, hot-switch), and confirm the UI reflects the expected state
 
 Skipping step 3 or 4 is not acceptable for any change that affects API behavior, gateway logic, or the web UI. Unit tests alone cannot catch rendering bugs, JavaScript errors, or integration issues between layers.

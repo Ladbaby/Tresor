@@ -45,6 +45,7 @@ func TestE2E_CountTokens_RetryOnEmpty(t *testing.T) {
 	defer downstream.Close()
 
 	port := 9198
+	modelID := "e2e-count-tokens-model"
 	dbPath := filepath.Join(t.TempDir(), "count-tokens.db")
 	cfg := fmt.Sprintf(`
 bind_addr: 127.0.0.1:%d
@@ -59,15 +60,15 @@ downstreams:
     api_formats:
       - anthropic
     output_model_ids:
-      - claude-sonnet-4-20250514
+      - %s
 `,
-		port, dbPath, downstream.URL)
+		port, dbPath, downstream.URL, modelID)
 
 	apiBase, cleanup := startTresor(t, cfg, port)
 	defer cleanup()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	reqBody := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`
+	reqBody := `{"model":"` + modelID + `","messages":[{"role":"user","content":"hi"}]}`
 	req, err := http.NewRequest(http.MethodPost, apiBase+"/v1/messages/count_tokens", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("new request: %v", err)

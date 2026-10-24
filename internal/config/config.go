@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -253,79 +255,68 @@ type RuleCfg struct {
 	IsEnabled          bool           `yaml:"is_enabled"`
 }
 
-// NormalizePipelineJSON removes legacy user-defined config and failure_policy
-// fields from valid pipeline arrays while preserving step order and IDs.
+// NormalizePipelineJSON validates and serializes pipeline steps without discarding configuration.
 func NormalizePipelineJSON(raw string) (string, error) {
 	if strings.TrimSpace(raw) == "" {
 		return "[]", nil
 	}
-	var steps []json.RawMessage
+	var steps []PipelineStep
 	if err := json.Unmarshal([]byte(raw), &steps); err != nil {
 		return "", fmt.Errorf("invalid pipeline_config: %w", err)
 	}
 	if steps == nil {
-		return "[]", nil
+		steps = []PipelineStep{}
 	}
-	normalized := make([]PipelineStep, 0, len(steps))
-	for i, rawStep := range steps {
-		var step map[string]json.RawMessage
-		if err := json.Unmarshal(rawStep, &step); err != nil {
-			return "", fmt.Errorf("pipeline_config step %d: %w", i, err)
-		}
-		var pluginID string
-		if value, ok := step["plugin_id"]; ok {
-			if err := json.Unmarshal(value, &pluginID); err != nil {
-				return "", fmt.Errorf("pipeline_config step %d plugin_id: %w", i, err)
-			}
-		}
-		normalized = append(normalized, PipelineStep{PluginID: pluginID})
+	if err := NormalizePipeline(&steps); err != nil {
+		return "", err
 	}
-	data, err := json.Marshal(normalized)
+	data, err := json.Marshal(steps)
 	if err != nil {
 		return "", err
 	}
 	return string(data), nil
 }
 
-// ValidatePipeline rejects newly supplied user pipeline settings. Empty legacy
-// config objects and fail_closed are accepted and normalized away.
-func ValidatePipeline(steps []PipelineStep) error {
-	for i, step := range steps {
-		if len(step.legacyConfig) > 0 && string(step.legacyConfig) != "null" && string(step.legacyConfig) != "{}" {
-			return fmt.Errorf("pipeline_config step %d: user plugin config is not supported", i)
+// NormalizePipeline assigns IDs once, validates step shape, and preserves configuration values.
+func NormalizePipeline(steps *[]PipelineStep) error {
+	seen := map[string]bool{}
+	for i := range *steps {
+		s := &(*steps)[i]
+		if strings.TrimSpace(s.PluginID) == "" {
+			return fmt.Errorf("pipeline_config step %d: plugin_id is required", i)
 		}
-		if step.legacyPolicy != "" && step.legacyPolicy != "fail_closed" {
-			return fmt.Errorf("pipeline_config step %d: failure_policy must be fail_closed", i)
+		if s.ID == "" {
+			b := make([]byte, 16)
+			if _, err := rand.Read(b); err != nil {
+				return err
+			}
+			s.ID = hex.EncodeToString(b)
+		}
+		if strings.TrimSpace(s.ID) == "" || seen[s.ID] {
+			return fmt.Errorf("pipeline_config step %d: invalid or duplicate id %q", i, s.ID)
+		}
+		seen[s.ID] = true
+		if s.Config == nil {
+			s.Config = map[string]interface{}{}
+		}
+		b, err := json.Marshal(s.Config)
+		if err != nil || len(b) > 65536 {
+			return fmt.Errorf("pipeline_config step %d: config must be bounded JSON object", i)
+		}
+		if s.FailurePolicy != "" && s.FailurePolicy != "fail_closed" {
+			s.FailurePolicy = ""
 		}
 	}
 	return nil
 }
 
-// PipelineStep is one transformer in a rule's pipeline. Legacy settings are
-// parsed only to allow migration and validation; they are never serialized.
+func ValidatePipeline(steps []PipelineStep) error { return NormalizePipeline(&steps) }
+
 type PipelineStep struct {
-	PluginID     string `json:"plugin_id" yaml:"plugin_id"`
-	legacyConfig json.RawMessage
-	legacyPolicy string
-}
-
-func (s *PipelineStep) UnmarshalJSON(data []byte) error {
-	var raw struct {
-		PluginID      string          `json:"plugin_id"`
-		Config        json.RawMessage `json:"config"`
-		FailurePolicy string          `json:"failure_policy"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	s.PluginID, s.legacyConfig, s.legacyPolicy = raw.PluginID, raw.Config, raw.FailurePolicy
-	return nil
-}
-
-func (s PipelineStep) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		PluginID string `json:"plugin_id"`
-	}{s.PluginID})
+	ID            string                 `json:"id" yaml:"id"`
+	PluginID      string                 `json:"plugin_id" yaml:"plugin_id"`
+	Config        map[string]interface{} `json:"config" yaml:"config,omitempty"`
+	FailurePolicy string                 `json:"failure_policy,omitempty" yaml:"failure_policy,omitempty"`
 }
 
 // AliasGroupCfg defines an alias group: one input model mapped to a list of
@@ -366,6 +357,16 @@ func Load(configPath string) (*AppConfig, error) {
 		return nil, fmt.Errorf("read config file %s: %w", resolved, err)
 	}
 
+	var obsolete struct {
+		Services map[string]any `yaml:"integration_services"`
+		Grants   []any          `yaml:"integration_grants"`
+	}
+	if err := yaml.Unmarshal(data, &obsolete); err != nil {
+		return nil, fmt.Errorf("parse obsolete integration settings: %w", err)
+	}
+	if len(obsolete.Services) > 0 || len(obsolete.Grants) > 0 {
+		return nil, fmt.Errorf("global integration_services/integration_grants are unsupported: move service parameters into each rule's pipeline_config step config; installation and enabling authorize declared capabilities")
+	}
 	var cfg AppConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config file %s: %w", resolved, err)
@@ -387,16 +388,6 @@ func Load(configPath string) (*AppConfig, error) {
 	}
 	if err := yaml.Unmarshal(data, &legacyRaw); err != nil {
 		return nil, fmt.Errorf("parse config file %s (legacy fields): %w", resolved, err)
-	}
-	for _, rule := range legacyRaw.Rules {
-		for _, step := range rule.Pipeline {
-			if _, ok := step["config"]; ok {
-				cfg.LegacyPipelineSettings = true
-			}
-			if _, ok := step["failure_policy"]; ok {
-				cfg.LegacyPipelineSettings = true
-			}
-		}
 	}
 	if len(legacyRaw.Downstreams) != len(cfg.Downstreams) {
 		// Defensive: the two parses must agree on downstream count. If they
@@ -491,6 +482,9 @@ func Load(configPath string) (*AppConfig, error) {
 	// the scalar to a one-element list. When both are present, pattern_models
 	// takes precedence (the user is already using the new format).
 	for i := range cfg.Rules {
+		if err := NormalizePipeline(&cfg.Rules[i].PipelineConfig); err != nil {
+			return nil, fmt.Errorf("rule %s: %w", cfg.Rules[i].ID, err)
+		}
 		if cfg.Rules[i].PatternModel != "" && len(cfg.Rules[i].PatternModels) == 0 {
 			cfg.Rules[i].PatternModels = []string{cfg.Rules[i].PatternModel}
 		}

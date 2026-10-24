@@ -10,7 +10,9 @@ import (
 
 // PipelineStepConfig represents one step in a pipeline_config JSON array.
 type PipelineStepConfig struct {
-	PluginID string `json:"plugin_id"`
+	ID       string         `json:"id"`
+	Config   map[string]any `json:"config"`
+	PluginID string         `json:"plugin_id"`
 }
 
 // Pipeline describes the transformation steps for a matched rule.
@@ -87,13 +89,15 @@ func ParsePipelineConfig(jsonConfig string, registry PluginRegistry) (*Pipeline,
 		if IsInternalPlugin(registry, step.PluginID) {
 			continue
 		}
-		plugin, err := registry.CreatePlugin(step.PluginID, nil)
+		plugin, err := registry.CreatePlugin(step.PluginID, step.Config)
 		if err != nil {
 			return nil, fmt.Errorf("create plugin %s: %w", step.PluginID, err)
 		}
 
 		if external, ok := plugin.(*ExternalPlugin); ok {
 			external.stepIndex = index
+			external.stepID = step.ID
+			external.stepConfig = step.Config
 			p.ExternalSteps = append(p.ExternalSteps, external)
 			// Every step records the current request, even response-only plugins.
 			p.RequestSteps = append(p.RequestSteps, externalRequest{external})

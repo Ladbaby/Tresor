@@ -249,15 +249,13 @@ func (m *Manager) List() []PackageInfo {
 			if !pkg.Compatible {
 				diagnostic = "This plugin uses unsupported capabilities. Delete it and install a compatible version."
 			}
-			if pkg.Compatible && len(pkg.Manifest.Permissions) != 0 {
-				diagnostic = "Package requests unsupported permissions."
-			}
+			executable := pkg.Compatible
 			approved := []string{}
 			provenance, ok := m.provenance[pkg.Digest]
 			if !ok {
 				provenance = Provenance{Source: "local"}
 			}
-			out = append(out, PackageInfo{Manifest: pkg.Manifest, Digest: pkg.Digest, Active: m.active[id] == version && pkg.Compatible && len(pkg.Manifest.Permissions) == 0, Selected: m.active[id] == version, Compatible: pkg.Compatible, Diagnostic: diagnostic, Executable: pkg.Compatible && len(pkg.Manifest.Permissions) == 0, Approved: approved, Provenance: provenance})
+			out = append(out, PackageInfo{Manifest: pkg.Manifest, Digest: pkg.Digest, Active: m.active[id] == version && executable, Selected: m.active[id] == version, Compatible: pkg.Compatible, Diagnostic: diagnostic, Executable: executable, Approved: approved, Provenance: provenance})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {

@@ -1,4 +1,4 @@
-// Tresor V2 trusted synchronous CommonJS package contract.
+// Tresor trusted synchronous CommonJS package contract (API V2 and V3).
 // Import pure helpers via require('tresor/json.v1'), 'tresor/query.v1', or
 // 'tresor/encoding.v1'. JSON patch supports add/remove/replace JSON pointers.
 export type Payload = {encoding:'utf8'|'base64';data:string};
@@ -6,7 +6,7 @@ export type Headers = Readonly<Record<string,readonly string[]>>;
 export type Request = Readonly<{method:string;path:string;query:string;headers:Headers}>;
 export type Response = Readonly<{status:number;headers:Headers}>;
 export type Event = {type:string;data:string;id:string|null;retry:number|null};
-export type Common = {state:Record<string,unknown>;readonly attempt:Readonly<{index:number}>};
+export type Common = {readonly config:Readonly<Record<string,unknown>>;state:Record<string,unknown>;readonly attempt:Readonly<{index:number}>};
 export type Limits = Readonly<{bodyBytes:number;eventBytes:number;stateBytes:number;bufferBytes:number;bufferHandles:number;bufferFragments:number;events:number;wireBytes:number}>;
 export type Failure = Readonly<{category:string;code:string;message:string;stage:string;plugin?:string;hook?:string;status?:number}>;
 export type Statistics = Readonly<{rawBytes:number;rawEvents:number;outputBytes:number;outputEvents:number;collectedBytes:number}>;
@@ -27,7 +27,18 @@ export type EndInput = Metadata & {readonly end:Termination};
 // Ordinary state stays small; buffer contents are accounted incrementally.
 // Byte limits are safeguards, not a hard memory sandbox.
 // Initialization and hooks have no execution timer; authors must ensure they terminate.
+// Integration hooks require api_version: 3. Hooks are synchronous and return
+// declarative service requests only.
+export type Routing = Readonly<{requestedModel:string;alias:null|{id:string;inputModel:string;isRegex:boolean};resolvedModel:string;downstream:{id:string;format:string}}>;
+export type Execution = Readonly<{id:string;subject:string;assignment:string;epoch:number}>;
+export type HostTool = Readonly<{name:string;description:string;parameters:object;operation:'execute-tool'}>;
+export type PrepareInput = Readonly<{config:Readonly<Record<string,unknown>>;bindings?:Readonly<Record<string,Readonly<{binding_id:string}>>>;context:Context;routing:Routing;execution:Execution|null;request:Request;body:Payload}>;
+export type Preparation = Readonly<{service:string;operation:'prepare';payload:unknown}>;
+export type Decision = Readonly<{kind:'pass'}|{kind:'intercept';service:string;operation:'invoke';payload:unknown}|{kind:'managedTools';service:string;codec:'openai-chat.v1';instructions:string;tools:readonly HostTool[]}>;
 export interface Plugin {
+ // API V3 only; standard transform hooks below are available in V2 and V3.
+ prepare?(input:PrepareInput):Preparation|{kind:'pass'};
+ prepared?(input:PrepareInput&{result:unknown}):Decision;
  request?(input:RequestInput):void|{body?:Payload;request?:HeaderPatch & {method?:string;path?:string;query?:string};transport?:{upstream?:'sse';delivery?:'collect'}};
  responseHeaders?(input:ResponseInput):void|{response?:HeaderPatch};
  response?(input:ResponseInput & {readonly body:Readonly<Payload>}):void|{response?:HeaderPatch;body?:Payload};

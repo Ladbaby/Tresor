@@ -140,43 +140,23 @@ func (s *Store) GetRule(id string) (*Rule, error) {
 	return scanRule(rowId, name, patternPath, pipelineConfig, enabled, createdAt, matchFormat, matchDownstreamFmt, matchDownstreams, patternModelsRaw), nil
 }
 
+// migrateRulePipelines validates existing pipeline JSON without rewriting it.
 func (s *Store) migrateRulePipelines() error {
 	rows, err := s.db.Query(`SELECT id, pipeline_config FROM rules`)
 	if err != nil {
 		return err
 	}
-	type item struct{ id, raw string }
-	var items []item
+	defer rows.Close()
 	for rows.Next() {
-		var v item
-		if err := rows.Scan(&v.id, &v.raw); err != nil {
-			rows.Close()
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
 			return err
 		}
-		items = append(items, v)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, v := range items {
-		normalized, err := config.NormalizePipelineJSON(v.raw)
-		if err != nil {
-			return fmt.Errorf("rule %s: %w", v.id, err)
-		}
-		if normalized != v.raw {
-			if _, err := tx.Exec(`UPDATE rules SET pipeline_config = ? WHERE id = ?`, normalized, v.id); err != nil {
-				return err
-			}
+		if _, err := config.NormalizePipelineJSON(raw); err != nil {
+			return fmt.Errorf("rule %s: %w", id, err)
 		}
 	}
-	return tx.Commit()
+	return rows.Err()
 }
 
 // CreateRule inserts a new rule.

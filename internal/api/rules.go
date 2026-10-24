@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"tresor/internal/config"
@@ -13,7 +14,7 @@ import (
 )
 
 // validateJSPipeline validates newly supplied user pipeline configuration.
-func (r *Router) validateJSPipeline(raw string) error {
+func (r *Router) validateJSPipeline(raw string, previous ...string) error {
 	if raw == "" {
 		return nil
 	}
@@ -22,6 +23,14 @@ func (r *Router) validateJSPipeline(raw string) error {
 		return fmt.Errorf("invalid pipeline: %w", err)
 	}
 	if err := config.ValidatePipeline(supplied); err != nil {
+		return err
+	}
+	normalized, err := config.NormalizePipelineJSON(raw)
+	if err != nil {
+		return err
+	}
+	raw = normalized
+	if err := json.Unmarshal([]byte(raw), &supplied); err != nil {
 		return err
 	}
 	var steps []engine.PipelineStepConfig
@@ -36,20 +45,35 @@ func (r *Router) validateJSPipeline(raw string) error {
 	if r.pluginManager == nil {
 		return nil
 	}
-	active, blocked := r.pluginManager.ExecutionSnapshot()
+	active, _ := r.pluginManager.ExecutionSnapshot()
+	var prior []engine.PipelineStepConfig
+	if len(previous) > 0 {
+		_ = json.Unmarshal([]byte(previous[0]), &prior)
+	}
 	for index, step := range steps {
-		if reason := blocked[step.PluginID]; reason != "" {
-			return fmt.Errorf("step %d: plugin %s %s", index, step.PluginID, reason)
-		}
 		pkg := active[step.PluginID]
 		if pkg == nil {
+			unchanged := false
+			for _, old := range prior {
+				if step.ID != "" && old.ID == step.ID && old.PluginID == step.PluginID && reflect.DeepEqual(old.Config, step.Config) {
+					unchanged = true
+					break
+				}
+			}
+			if unchanged {
+				continue
+			}
 			if jsplugins.ValidPackageID(step.PluginID) {
-				return fmt.Errorf("step %d: plugin %s is not enabled", index, step.PluginID)
+				return fmt.Errorf("step %d: plugin is not enabled", index)
 			}
 			continue
 		}
-		if _, err := jsplugins.NewInstance(pkg, nil); err != nil {
-			return fmt.Errorf("step %d: %w", index, err)
+		resolved, err := jsplugins.ResolveConfig(pkg.Manifest.ConfigSchema, step.Config)
+		if err != nil {
+			return fmt.Errorf("step %d: invalid plugin config", index)
+		}
+		if _, err := jsplugins.NewInstance(pkg, resolved); err != nil {
+			return fmt.Errorf("step %d: plugin configuration invalid", index)
 		}
 	}
 	return nil
@@ -210,6 +234,7 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 
+			originalPipeline := existing.PipelineConfig
 			if update.Name != "" {
 				existing.Name = update.Name
 			}
@@ -254,7 +279,7 @@ func (r *Router) handleRuleByID(w http.ResponseWriter, req *http.Request) {
 
 			// Only newly supplied pipelines reject legacy internal converter steps.
 			if update.PipelineConfig != "" {
-				if err := r.validateJSPipeline(existing.PipelineConfig); err != nil {
+				if err := r.validateJSPipeline(existing.PipelineConfig, originalPipeline); err != nil {
 					writeError(w, http.StatusBadRequest, err.Error())
 					return
 				}

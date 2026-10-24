@@ -57,6 +57,7 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 
@@ -275,6 +276,38 @@ func (s *Store) migrate() error {
 			PRIMARY KEY (bucket, client_ip)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_ip_usage_bucket ON ip_usage_stats(bucket)`,
+		`CREATE TABLE IF NOT EXISTS integration_executions (
+			execution_id TEXT PRIMARY KEY, service TEXT NOT NULL, subject TEXT NOT NULL,
+			alias_id TEXT NOT NULL, assignment_id TEXT NOT NULL, epoch INTEGER NOT NULL,
+			token_hash BLOB NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','revoked')),
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, revoked_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS managed_inferences (
+			execution_id TEXT NOT NULL, epoch INTEGER NOT NULL, inference_id TEXT NOT NULL,
+			payload_hash BLOB NOT NULL, status TEXT NOT NULL, codec TEXT NOT NULL,
+			route_json TEXT NOT NULL, snapshot_json TEXT NOT NULL DEFAULT '{}',
+			response_revision INTEGER NOT NULL DEFAULT 0, response BLOB,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(execution_id, epoch, inference_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS managed_segments (
+			execution_id TEXT NOT NULL, epoch INTEGER NOT NULL, inference_id TEXT NOT NULL,
+			segment_order INTEGER NOT NULL, anchor_hash BLOB NOT NULL, full_json BLOB NOT NULL,
+			visible_json BLOB NOT NULL, provenance TEXT NOT NULL, pending_client_ids TEXT NOT NULL DEFAULT '[]',
+			PRIMARY KEY(execution_id, epoch, inference_id, segment_order),
+			FOREIGN KEY(execution_id, epoch, inference_id) REFERENCES managed_inferences(execution_id, epoch, inference_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS managed_client_results (
+ execution_id TEXT NOT NULL, epoch INTEGER NOT NULL, call_id TEXT NOT NULL, result BLOB NOT NULL,
+ PRIMARY KEY(execution_id,epoch,call_id)
+ )`,
+		`CREATE TABLE IF NOT EXISTS managed_tool_calls (
+			execution_id TEXT NOT NULL, epoch INTEGER NOT NULL, inference_id TEXT NOT NULL,
+			generation INTEGER NOT NULL, call_id TEXT NOT NULL, argument_hash BLOB NOT NULL,
+			operation_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+			result BLOB, error TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(execution_id, epoch, inference_id, generation, call_id)
+		)`,
 	}
 
 	for _, q := range queries {

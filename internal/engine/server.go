@@ -88,6 +88,10 @@ func ServeProxy(eng *Engine, adminHandler http.Handler, webHandler http.Handler,
 	// Admin API routes (wrapped with security headers)
 	mux.Handle("/api/", middleware.SecurityHeaders(adminHandler))
 
+	// Integration execution control is a gateway-only endpoint; keep it outside the admin API mux.
+	mux.Handle("/api/integrations/executions", http.HandlerFunc(eng.HandleIntegrationControl))
+	mux.Handle("/api/integrations/executions/", http.HandlerFunc(eng.HandleIntegrationControl))
+
 	// Everything else: web UI for known paths, proxy for API-like paths
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {

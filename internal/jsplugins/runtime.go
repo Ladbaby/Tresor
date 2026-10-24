@@ -6,12 +6,14 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"tresor/internal/integrations"
 
 	"github.com/dop251/goja"
 )
 
 type Instance struct {
 	pkg          *Package
+	config       map[string]any
 	vm           *goja.Runtime
 	exports      *goja.Object
 	invoke       goja.Callable
@@ -21,6 +23,13 @@ type Instance struct {
 	invoking     bool
 	hostFault    string
 	mu           sync.Mutex
+}
+
+func (i *Instance) SourceIdentity() (string, string) { return i.pkg.Manifest.ID, i.pkg.Digest }
+func (i *Instance) AllowsService(service, operation string) bool {
+	decl, declared := i.pkg.Manifest.Services[service]
+	_, configured := decl.Operations[integrations.Operation(operation)]
+	return i.pkg.Manifest.APIVersion == 3 && contains(i.pkg.Manifest.Permissions, "service."+operation) && declared && configured
 }
 
 // fault enforces native host contract violations independently of telemetry.
@@ -38,10 +47,28 @@ func newInstance(pkg *Package, config map[string]any, validate bool) (*Instance,
 	if !pkg.Compatible {
 		return nil, fmt.Errorf("incompatible API: require V2 migration")
 	}
-	if len(config) != 0 {
-		return nil, fmt.Errorf("plugin configuration is unsupported")
+	if pkg.Manifest.APIVersion != 2 && pkg.Manifest.APIVersion != 3 {
+		return nil, fmt.Errorf("unsupported API version")
 	}
-	instance := &Instance{pkg: pkg}
+	resolved := map[string]any{}
+	if validate {
+		var err error
+		resolved, err = ResolveConfig(pkg.Manifest.ConfigSchema, config)
+		if err != nil {
+			return nil, err
+		}
+	}
+	instance := &Instance{pkg: pkg, config: resolved}
+	if validate {
+		for _, cfg := range instance.ServiceConfigs() {
+			if _, err := integrations.NewConfiguredClient(cfg.Service, cfg.Token, cfg.ControlToken, 8<<20); err != nil {
+				return nil, fmt.Errorf("invalid service parameters")
+			}
+			if cfg.ControlToken != "" && cfg.ControlToken == cfg.Token {
+				return nil, fmt.Errorf("control and outbound credentials must differ")
+			}
+		}
+	}
 	if err := instance.Reset(); err != nil {
 		return nil, err
 	}
@@ -323,6 +350,7 @@ func (i *Instance) Invoke(name string, input map[string]any) (map[string]any, er
 			inputCopy[k] = v
 		}
 	}
+	inputCopy["config"] = i.config
 	var inputBody goja.Value = goja.Undefined()
 	if raw, ok := input["body"]; ok {
 		b, ok := raw.(map[string]any)
@@ -440,14 +468,14 @@ function __tresorStateSize(x){
 function __tresorInvoke(exports,name,raw,limit,stateLimit,maxEvents,body){
  const parsed=__tresorJSONParse(raw);if(body!==undefined)parsed.body=body;
  const input=__tresorDeepFreeze(parsed);
- const args={...input,config:Object.freeze({}),state:__tresorState};__tresorFreeze(args);
+ const args={...input,state:__tresorState};__tresorFreeze(args);
  let result;
  try{result=exports[name](args);}catch(e){if(__tresorStateSize(__tresorState)>stateLimit)__tresorFault('state_bytes');throw e;}
  if(__tresorStateSize(__tresorState)>stateLimit)__tresorFault('state_bytes');
  if(result===undefined)return undefined;
  try {
  if(!result || typeof result!=='object' || Array.isArray(result) || typeof result.then==='function')__tresorFault('invalid_effect');
- const allowed={request:['request','body','transport'],responseHeaders:['response'],response:['response','body'],upstreamStart:['events'],upstreamEvent:['events'],upstreamEnd:['events'],streamStart:['events'],streamEvent:['events'],streamEnd:['events'],collectStart:[],collectEvent:[],collectEnd:['body','response'],finish:[]}[name];
+ const allowed={prepare:['service','operation','payload'],prepared:['kind','service','operation','payload','codec','instructions','tools'],request:['request','body','transport'],responseHeaders:['response'],response:['response','body'],upstreamStart:['events'],upstreamEvent:['events'],upstreamEnd:['events'],streamStart:['events'],streamEvent:['events'],streamEnd:['events'],collectStart:[],collectEvent:[],collectEnd:['body','response'],finish:[]}[name];
  for(const k of __tresorKeys(result))if(!allowed.includes(k))__tresorFault('invalid_effect');
 
  if(result.events!==undefined&&(!Array.isArray(result.events)||result.events.length>maxEvents))__tresorFault('invalid_effect');

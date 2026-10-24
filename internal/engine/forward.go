@@ -69,7 +69,11 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 
 	// Build forwarded request. Use a detached context so the downstream connection
 	// isn't killed if the client disconnects (common with long-running SSE streams).
-	forwardCtx, forwardCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	forwardBase := context.Background()
+	if executionFromRequest(original) != nil {
+		forwardBase = original.Context()
+	}
+	forwardCtx, forwardCancel := context.WithTimeout(forwardBase, 30*time.Minute)
 	forwardedReq, err := http.NewRequestWithContext(forwardCtx, original.Method, targetURL, bytes.NewReader(outBody))
 	if err != nil {
 		forwardCancel()
@@ -88,6 +92,8 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 		}
 		forwardedReq.Header[k] = v
 	}
+
+	stripIntegrationHeaders(forwardedReq.Header)
 
 	// Set the downstream API key only if a pipeline transformer hasn't
 	// already set auth headers (e.g., x-api-key for Anthropic, x-goog-api-key for Gemini)

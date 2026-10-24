@@ -500,144 +500,78 @@ async function loadRules() {
     }
 }
 
-// ---- Visual Pipeline Editor ----
-
-/**
- * Build the visual pipeline editor UI.
- * - Loads available plugins
- * - Renders existing steps or starts empty
- * - Each step has a plugin selector; plugins do not expose configuration fields here
- */
+/* Visual pipeline editor. */
 async function initPipelineEditor(steps) {
     const plugins = await fetchPlugins();
     const container = document.getElementById('pipeline-steps');
     container.innerHTML = '';
-
-    // Always set up the "Add Step" button first
     const addBtn = document.getElementById('btn-add-step');
     addBtn.disabled = plugins.length === 0;
     addBtn.title = plugins.length ? '' : 'Install and enable a plugin first';
     addBtn.onclick = () => addPipelineStep(plugins);
-
-    if (!steps || steps.length === 0) {
-        container.innerHTML = '<div class="pipeline-empty">No transformers configured</div>';
-        return;
-    }
-
-    steps.forEach((step, idx) => {
-        createStepCard(container, step, plugins, idx);
+    (steps || []).forEach((step, idx) => createStepCard(container, step, plugins, idx));
+    if (!steps?.length) container.innerHTML = '<div class="pipeline-empty">No transformers configured</div>';
+}
+function stepUUID() { return crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random()*16|0; return (c==='x'?r:(r&3|8)).toString(16); }); }
+function renderSchemaFields(parent, schema, value, path = []) {
+    if (!schema || typeof schema !== 'object') return;
+    const props = schema.properties || {};
+    Object.entries(props).forEach(([key, field]) => {
+        const p = [...path, key];
+        const val = value && value[key] !== undefined ? value[key] : field.default;
+        const required = (schema.required || []).includes(key);
+        const label = document.createElement('label'); label.className = 'pipeline-config-field'; label.textContent = (field.title || key) + (required ? ' *' : '');
+        if (field.type === 'object' && field.properties) {
+            const nested = document.createElement('fieldset'); const legend = document.createElement('legend'); legend.textContent = key; nested.appendChild(legend);
+            renderSchemaFields(nested, field, val || {}, p); parent.appendChild(nested); return;
+        }
+        let input;
+        if (field.type === 'array') { input = document.createElement('textarea'); input.rows = 3; input.value = val === undefined ? '' : JSON.stringify(val); input.dataset.jsonArray = 'true'; }
+        else if (Array.isArray(field.enum)) { input = document.createElement('select'); const blank = document.createElement('option'); blank.value = ''; blank.textContent = 'Select…'; input.appendChild(blank); field.enum.forEach(opt => { const o=document.createElement('option'); o.value=String(opt); o.textContent=String(opt); input.appendChild(o); }); input.value=val == null ? '' : String(val); }
+        else { input = document.createElement('input'); input.type = field.secret === true || field.format === 'password' ? 'password' : (field.type === 'integer' || field.type === 'number' ? 'number' : field.type === 'boolean' ? 'checkbox' : 'text'); if (input.type === 'checkbox') input.checked = !!val; else input.value = val == null ? '' : String(val); }
+        if (field.type==='number') input.step='any';
+        if(field.minimum!==undefined)input.min=field.minimum;if(field.maximum!==undefined)input.max=field.maximum;if(field.minLength!==undefined)input.minLength=field.minLength;if(field.maxLength!==undefined)input.maxLength=field.maxLength;
+        input.dataset.configPath = JSON.stringify(p); input.dataset.configType = field.type || 'string'; input.dataset.required = required ? 'true' : 'false'; input.oninput=()=>delete input.dataset.cleared;
+        if(field.enum) input._enum=field.enum;
+        label.appendChild(input);
+        if (input.type === 'password') { const reveal=document.createElement('button'); reveal.type='button'; reveal.className='btn-small'; reveal.textContent='Reveal'; reveal.onclick=()=>{input.type=input.type==='password'?'text':'password'; reveal.textContent=input.type==='password'?'Reveal':'Hide';}; label.appendChild(reveal); const clear=document.createElement('button'); clear.type='button'; clear.className='btn-small'; clear.textContent='Clear'; clear.onclick=()=>{input.value=''; input.dataset.cleared='true';}; label.appendChild(clear); }
+        parent.appendChild(label);
     });
 }
-
-/**
- * Create a DOM card for a single pipeline step.
- */
 function createStepCard(container, step, plugins, idx) {
-    const pluginInfo = plugins.find(p => p.id === step.plugin_id) || { id: step.plugin_id, description: 'Unavailable plugin. Its rule reference is preserved.', unavailable: true };
-
-    const card = document.createElement('div');
-    card.className = 'pipeline-step-card';
-    card.dataset.idx = idx;
-
-    // Header: plugin selector + remove button
-    const header = document.createElement('div');
-    header.className = 'pipeline-step-header';
-
-    const select = document.createElement('select');
-    select.className = 'step-plugin-select';
-    card._originalStep = { plugin_id: step.plugin_id };
-    if (pluginInfo.unavailable) { const option = document.createElement('option'); option.value = step.plugin_id; option.textContent = step.plugin_id + ' (unavailable)'; select.appendChild(option); }
-    plugins.forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p.id;
-        opt.textContent = `${p.id}`;
-        if (p.id === step.plugin_id) opt.selected = true;
-        select.appendChild(opt);
-    });
-
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'pipeline-step-remove';
-    removeBtn.textContent = 'Remove';
-    removeBtn.onclick = () => {
-        card.remove();
-        reindexSteps();
-        if (container.querySelectorAll('.pipeline-step-card').length === 0) {
-            container.innerHTML = '<div class="pipeline-empty">No transformers configured</div>';
+    const info = plugins.find(p => p.id === step.plugin_id) || {id:step.plugin_id, description:'Unavailable plugin. Existing configuration is preserved.', unavailable:true};
+    const card=document.createElement('div'); card.className='pipeline-step-card'; card.dataset.idx=idx; card.dataset.stepId=step.id || stepUUID(); card._originalStep={...step, config:step.config && typeof step.config==='object'?structuredClone(step.config):{}};
+    const header=document.createElement('div'); header.className='pipeline-step-header'; const select=document.createElement('select'); select.className='step-plugin-select';
+    if(info.unavailable){const o=document.createElement('option');o.value=info.id;o.textContent=info.id+' (unavailable)';select.appendChild(o);}
+    plugins.forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.id;if(p.id===step.plugin_id)o.selected=true;select.appendChild(o);});
+    const remove=document.createElement('button');remove.type='button';remove.className='pipeline-step-remove';remove.textContent='Remove';remove.onclick=()=>{card.remove();reindexSteps();if(!container.querySelector('.pipeline-step-card'))container.innerHTML='<div class="pipeline-empty">No transformers configured</div>';};
+    header.append(select); for(const [direction,title] of [[-1,'Move step up'],[1,'Move step down']]){const move=document.createElement('button');move.type='button';move.className='btn-small';move.textContent=direction<0?'↑':'↓';move.title=title;move.setAttribute('aria-label',title);move.onclick=()=>{const sibling=direction<0?card.previousElementSibling:card.nextElementSibling;if(sibling?.classList.contains('pipeline-step-card')){if(direction<0)container.insertBefore(card,sibling);else container.insertBefore(sibling,card);reindexSteps();}};header.appendChild(move);} header.append(remove);card.appendChild(header);const desc=document.createElement('div');desc.className='pipeline-step-description';desc.textContent=info.description||'';card.appendChild(desc);
+    const fields=document.createElement('div');fields.className='pipeline-config-fields';card.appendChild(fields);
+    function draw(plugin, config) { fields.innerHTML=''; if(!plugin || plugin.unavailable){desc.textContent=plugin?.description||'';return;} desc.textContent=plugin.description||''; if (JSON.stringify(plugin.config_schema || {}).match(/"secret":true|"format":"password"/)) { const warning=document.createElement('p');warning.className='pipeline-secret-warning';warning.textContent='Secrets are stored in plaintext in the database, YAML configuration and exports. Protect these files.';fields.appendChild(warning); } renderSchemaFields(fields,plugin.config_schema,config||{}); }
+    draw(info,step.config||{});select.onchange=()=>{const plugin=plugins.find(p=>p.id===select.value);card._originalStep={...card._originalStep,plugin_id:select.value,config:{}};draw(plugin,{});}; container.appendChild(card);
+}
+function reindexSteps(){document.querySelectorAll('.pipeline-step-card').forEach((card,idx)=>card.dataset.idx=idx);}
+function addPipelineStep(plugins){if(!plugins.length)return;const c=document.getElementById('pipeline-steps');c.querySelector('.pipeline-empty')?.remove();createStepCard(c,{id:stepUUID(),plugin_id:plugins[0].id,config:{}},plugins,c.querySelectorAll('.pipeline-step-card').length);}
+function serializePipeline(){
+    const cards=document.querySelectorAll('.pipeline-step-card'); const steps=[];
+    cards.forEach(card=>{const select=card.querySelector('.step-plugin-select'), pluginId=select.value, plugin=(cachedPlugins||[]).find(p=>p.id===pluginId); let config={};
+        if(!plugin){config=card._originalStep.config||{};}
+        else {
+            config=structuredClone(card._originalStep.plugin_id===pluginId ? (card._originalStep.config||{}) : {});
+            card.querySelectorAll('[data-config-path]').forEach(input=>{const path=JSON.parse(input.dataset.configPath);let cursor=config;path.slice(0,-1).forEach(k=>{if(!Object.hasOwn(cursor,k)||!cursor[k]||typeof cursor[k]!=='object'||Array.isArray(cursor[k]))Object.defineProperty(cursor,k,{value:{},enumerable:true,writable:true,configurable:true});cursor=cursor[k];});const key=path[path.length-1];let val;
+                if(input.dataset.cleared==='true') { delete cursor[key]; return; }
+                if(input.type==='checkbox') val=input.checked; else if(input.dataset.jsonArray){if(input.value.trim()===''){if(input.dataset.required==='true')throw new Error(`Required field missing: ${path.join('.')}`);delete cursor[key];return;}try{val=JSON.parse(input.value);if(!Array.isArray(val))throw 0;}catch{throw new Error(`Invalid array JSON for ${path.join('.')}`);}}
+                else if(input.value===''){if(input.dataset.required==='true')throw new Error(`Required field missing: ${path.join('.')}`);delete cursor[key];return;}
+                else if(input.dataset.configType==='integer'||input.dataset.configType==='number'){val=Number(input.value);if(!Number.isFinite(val)|| (input.dataset.configType==='integer'&&!Number.isInteger(val)))throw new Error(`Invalid number for ${path.join('.')}`);}
+                else if(input._enum) val=input._enum.find(v=>String(v)===input.value);
+                else val=input.value; Object.defineProperty(cursor,key,{value:val,enumerable:true,writable:true,configurable:true});
+            });
         }
-    };
-
-    header.appendChild(select);
-    header.appendChild(removeBtn);
-    card.appendChild(header);
-
-    // Description line
-    const descEl = document.createElement('div');
-    descEl.className = 'pipeline-step-description';
-    descEl.textContent = pluginInfo.description;
-    card.appendChild(descEl);
-
-    select.onchange = () => {
-        descEl.textContent = plugins.find(p => p.id === select.value)?.description || 'Unavailable plugin';
-    };
-    container.appendChild(card);
-}
-
-/**
- * Reindex step cards after removal.
- */
-function reindexSteps() {
-    document.querySelectorAll('.pipeline-step-card').forEach((card, idx) => {
-        card.dataset.idx = idx;
-        const configDiv = card.querySelector('[id^="step-config-"]');
-        if (configDiv) {
-            configDiv.id = 'step-config-' + idx;
-        }
+        steps.push({id:card.dataset.stepId||stepUUID(),plugin_id:pluginId,config});
     });
-}
-
-/**
- * Add a new pipeline step (default plugin).
- */
-function addPipelineStep(plugins) {
-    if (!plugins.length) return;
-    const container = document.getElementById('pipeline-steps');
-    // Remove empty message if present
-    const empty = container.querySelector('.pipeline-empty');
-    if (empty) empty.remove();
-
-    const idx = container.querySelectorAll('.pipeline-step-card').length;
-    const step = { plugin_id: plugins[0].id, config: {} };
-    createStepCard(container, step, plugins, idx);
-}
-
-/**
- * Serialize the visual pipeline editor back to JSON array.
- */
-function serializePipeline() {
-    const cards = document.querySelectorAll('.pipeline-step-card');
-    if (cards.length === 0) return '[]';
-
-    const steps = [];
-    cards.forEach(card => {
-        const select = card.querySelector('.step-plugin-select');
-        const pluginId = select.value;
-        if (pluginId) steps.push({ plugin_id: pluginId });
-    });
-
     return JSON.stringify(steps);
 }
-
-/**
- * Parse existing pipeline JSON into step objects.
- */
-function parsePipeline(configStr) {
-    try {
-        const parsed = JSON.parse(configStr || '[]');
-        return Array.isArray(parsed) ? parsed : [];
-    } catch {
-        return [];
-    }
-}
+function parsePipeline(configStr){try{const parsed=JSON.parse(configStr||'[]');return Array.isArray(parsed)?parsed:[];}catch{return [];}}
 
 // ---- Rule Modal ----
 
@@ -812,8 +746,13 @@ document.getElementById('rule-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const id = document.getElementById('rule-id').value;
 
-    // Serialize visual pipeline to JSON for the hidden textarea
-    document.getElementById('rule-pipeline').value = serializePipeline();
+    // Serialize pipeline before collecting the rest of the rule.
+    try {
+        document.getElementById('rule-pipeline').value = serializePipeline();
+    } catch (err) {
+        alert('Error: ' + err.message);
+        return;
+    }
 
     // Collect match criteria
     const matchFormat = getCheckedFormats(document.getElementById('rule-match-input-formats'));
@@ -1968,7 +1907,7 @@ async function installLocalBundle(files) {
     const file = files[0];
     if (!file.name.toLowerCase().endsWith('.json')) { status.textContent = 'Choose a .json bundle produced by plugin pack, not a ZIP or source file.'; return; }
     if (!file.size || file.size > 8 * 1024 * 1024) { status.textContent = 'Bundle must be non-empty and no larger than 8 MiB.'; return; }
-    if (!confirm(`Install code from ${file.name} only if you trust its source. Installation enables it for rules, but does not grant permissions or activate it.`)) return;
+    if (!confirm(`Install code from ${file.name} only if you trust its source. Installation enables it for rules and authorizes its declared capabilities. Configure parameters separately in each rule step.`)) return;
     pluginInstallBusy = true; pluginBundleChoose.disabled = true; pluginDropZone.setAttribute('aria-busy', 'true');
     status.textContent = 'Installing local bundle...';
     try {

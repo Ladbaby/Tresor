@@ -153,13 +153,13 @@ func TestInitializationExceptionSanitized(t *testing.T) {
 	}
 }
 
-func TestLegacyConfigCacheBlockedAndDeletable(t *testing.T) {
+func TestUnsupportedSchemaCacheBlockedAndDeletable(t *testing.T) {
 	dir := t.TempDir()
 	m, err := NewManager(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	files := map[string]string{"manifest.json": `{"id":"test/legacy","version":"1.0.0","api_version":2,"entry":"plugin.js","config_schema":{"type":"object","properties":{"secret":{"type":"string"}}}}`, "plugin.js": `throw new Error('must not evaluate')`}
+	files := map[string]string{"manifest.json": `{"id":"test/legacy","version":"1.0.0","api_version":2,"entry":"plugin.js","config_schema":{"type":"object","$ref":"https://example.invalid/schema"}}`, "plugin.js": `throw new Error('must not evaluate')`}
 	if _, err := m.Install(files); err == nil {
 		t.Fatal("configurable install accepted")
 	}

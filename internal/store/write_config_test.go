@@ -70,7 +70,7 @@ func TestWriteConfig_RoundTrip(t *testing.T) {
 		t.Fatalf("create downstream: %v", err)
 	}
 
-	rule := &Rule{ID: "rule-test", Name: "Test Rule", PatternPath: "/v1/chat/completions", PatternModels: []string{"model-a", "model-b"}, MatchDownstreams: []string{"ds-test"}, PipelineConfig: `[{"plugin_id":"custom_header","failure_policy":"safe_passthrough"}]`, IsEnabled: true}
+	rule := &Rule{ID: "rule-test", Name: "Test Rule", PatternPath: "/v1/chat/completions", PatternModels: []string{"model-a", "model-b"}, MatchDownstreams: []string{"ds-test"}, PipelineConfig: `[{"plugin_id":"custom_header","failure_policy":"safe_passthrough","config":{"token":"secret"}}]`, IsEnabled: true}
 	if err := s.CreateRule(rule); err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
@@ -119,8 +119,12 @@ func TestWriteConfig_RoundTrip(t *testing.T) {
 	if len(parsed.Rules[0].PipelineConfig) != 1 || parsed.Rules[0].PipelineConfig[0].PluginID != "custom_header" {
 		t.Fatalf("pipeline step lost in YAML round-trip: %#v", parsed.Rules[0].PipelineConfig)
 	}
-	if strings.Contains(string(data), "failure_policy:") || strings.Contains(string(data), " config:") {
-		t.Fatalf("legacy pipeline settings were written:\n%s", data)
+	if strings.Contains(string(data), "failure_policy:") {
+		t.Fatalf("obsolete failure policy written: %s", data)
+	}
+	step := parsed.Rules[0].PipelineConfig[0]
+	if step.ID == "" || step.Config["token"] != "secret" {
+		t.Fatalf("step identity/config lost: %#v", step)
 	}
 	if strings.Contains(string(data), "pattern_model:") {
 		t.Fatalf("deprecated pattern_model was written:\n%s", data)

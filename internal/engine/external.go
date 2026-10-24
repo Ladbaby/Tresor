@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"tresor/internal/integrations"
 	"tresor/internal/jsplugins"
 
 	"golang.org/x/net/http/httpguts"
@@ -27,9 +28,13 @@ type ExternalPlugin struct {
 	runtime                      ExternalRuntime
 	request                      *http.Request
 	finished, begun              bool
+	prepared                     bool
 	upstream, stream, collection Session
 	ctx                          *PipelineContext
 	ruleID                       string
+	stepID                       string
+	stepConfig                   map[string]any
+	services                     map[string]*integrations.Snapshot
 	stepIndex                    int
 }
 
@@ -87,7 +92,7 @@ func protectedHeader(key string) bool {
 	case "authorization", "proxy-authorization", "x-api-key", "api-key", "cookie", "set-cookie", "host", "content-length", "transfer-encoding", "connection", "content-encoding", "openai-beta", "chatgpt-account-id", "originator":
 		return true
 	}
-	return strings.HasPrefix(strings.ToLower(key), "sec-")
+	return strings.HasPrefix(strings.ToLower(key), "sec-") || strings.HasPrefix(strings.ToLower(key), "x-tresor-")
 }
 func headerSnapshot(headers http.Header) map[string]any {
 	out := map[string]any{}
@@ -385,9 +390,17 @@ func (p *Pipeline) beginAttempt(ctx *PipelineContext, req *http.Request, index i
 		step.upstream, step.stream, step.collection = Session{}, Session{}, Session{}
 		step.finished, step.begun = false, false
 		step.request = req
+		if step.prepared {
+			continue
+		}
 		step.releaseBuffers()
 	}
 	for _, step := range p.ExternalSteps {
+		if step.prepared {
+			step.prepared = false
+			step.begun = true
+			continue
+		}
 		if err := step.runtime.Reset(); err != nil {
 			err = step.invocationFailure("initialize", err)
 			step.releaseBuffers() // Reset may have allocated storage before failing.
