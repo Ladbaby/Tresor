@@ -45,7 +45,7 @@ type Manager struct {
 	// downstream's own redirect port/path configuration.
 	callbackBase string
 
-	mu        sync.RWMutex
+	mu sync.RWMutex
 
 	pendingMu    sync.Mutex
 	pending      map[string]*pendingLogin // keyed by state (auth_code) or downstreamID (device)
@@ -67,7 +67,8 @@ type pendingLogin struct {
 	// auth is a snapshot of the downstream's oauth config captured at
 	// login start, used to build the provider during the callback/token
 	// exchange without re-reading the store.
-	auth *config.DownstreamAuthCfg
+	auth     *config.DownstreamAuthCfg
+	provider *Provider
 
 	// auth_code flow
 	State        string
@@ -262,6 +263,9 @@ func (m *Manager) StartLogin(downstreamID string) (LoginInfo, error) {
 		StartedAt:    time.Now(),
 		auth:         auth,
 	}
+	if p.PersistDiscoveredEndpoints {
+		pl.provider = p
+	}
 	if p.Flow == FlowAuthCode {
 		verifier := make([]byte, 32)
 		state := make([]byte, 32)
@@ -287,6 +291,13 @@ func (m *Manager) StartLogin(downstreamID string) (LoginInfo, error) {
 		q.Set("code_challenge", challengeB64)
 		q.Set("code_challenge_method", "S256")
 		q.Set("state", pl.State)
+		if p.RequestNonce {
+			nonce := make([]byte, 32)
+			if _, err := randRead(nonce); err != nil {
+				return LoginInfo{}, err
+			}
+			q.Set("nonce", base64.RawURLEncoding.EncodeToString(nonce))
+		}
 		// Provider-specific extra params (e.g. Codex's codex_cli_simplified_flow).
 		for k, v := range p.ExtraAuthParams {
 			q.Set(k, v)

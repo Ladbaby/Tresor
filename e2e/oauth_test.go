@@ -106,6 +106,13 @@ downstreams:
       token_url: http://127.0.0.1:%d/token
       client_id: mock-client
       scopes: "openid"
+      request_nonce: true
+      require_refresh_token: true
+      default_token_lifetime_secs: 3600
+      refresh_on_unknown_expiry: true
+      refresh_skew_secs: 120
+      allowed_endpoint_hosts: [127.0.0.1]
+      persist_discovered_endpoints: true
       extra_headers:
         X-Provider-Tag: e2e-tag
 `, port, dbPath, llmPort, mockPort, mockPort)
@@ -168,6 +175,9 @@ downstreams:
 		u, err := url.Parse(authorizeURL)
 		if err != nil {
 			t.Fatalf("parse authorize url: %v", err)
+		}
+		if u.Query().Get("nonce") == "" || u.Query().Get("code_challenge_method") != "S256" {
+			t.Fatal("configured nonce/PKCE missing")
 		}
 		state := u.Query().Get("state")
 		if state == "" {

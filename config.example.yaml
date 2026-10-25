@@ -72,13 +72,20 @@ downstreams:
   - id: xai
     name: Grok subscription
     api_formats: [openai]
-    base_url: https://cli-chat-proxy.grok.com/v1
+    base_url: https://api.x.ai/v1
     auth:
       type: oauth
       flow: auth_code
       discovery_url: https://auth.x.ai/.well-known/openid-configuration
       client_id: b1a00492-073a-47ea-816f-4c329264a828
       scopes: "openid profile email offline_access grok-cli:access api:access"
+      request_nonce: true
+      require_refresh_token: true
+      default_token_lifetime_secs: 3600
+      refresh_on_unknown_expiry: true
+      refresh_skew_secs: 120
+      allowed_endpoint_hosts: [x.ai, "*.x.ai"]
+      persist_discovered_endpoints: true
     output_model_ids: [grok-4]
 
   - id: gemini

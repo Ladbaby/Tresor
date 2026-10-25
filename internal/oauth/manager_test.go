@@ -952,10 +952,10 @@ func TestDeviceFlow_ObjectErrorRegression(t *testing.T) {
 // string and object forms, including null.
 func TestFlexErrorUnmarshal(t *testing.T) {
 	cases := []struct {
-		name  string
-		in    string
-		code  string
-		msg   string
+		name string
+		in   string
+		code string
+		msg  string
 	}{
 		{"plain string", `"authorization_pending"`, "authorization_pending", ""},
 		{"object code+description", `{"code":"authorization_pending","description":"wait"}`, "authorization_pending", "wait"},
@@ -1125,9 +1125,8 @@ func TestResolveValidToken_ChatGPTHeadersAfterRefresh(t *testing.T) {
 	}
 }
 
-// TestResolveValidToken_GrokHeaders verifies that an xAI Grok subscription
-// (scopes include "grok-cli:access") gets the grok-shell identity headers
-// injected, matching the official Grok CLI.
+// TestResolveValidToken_GrokHeaders verifies xAI credentials do not implicitly
+// identify themselves as the Grok CLI. Only operator-configured extras apply.
 func TestResolveValidToken_GrokHeaders(t *testing.T) {
 	s, m := newTestStoreAndManager(t)
 	ds := mustDownstream(t, s)
@@ -1155,11 +1154,11 @@ func TestResolveValidToken_GrokHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got := extra["x-grok-client-identifier"]; got != "grok-shell" {
-		t.Fatalf("x-grok-client-identifier = %q, want grok-shell", got)
+	if _, ok := extra["x-grok-client-identifier"]; ok {
+		t.Fatalf("x-grok-client-identifier must not be injected: %v", extra)
 	}
-	if got := extra["User-Agent"]; !strings.HasPrefix(got, "grok-shell/") {
-		t.Fatalf("User-Agent = %q, want prefix 'grok-shell/'", got)
+	if _, ok := extra["User-Agent"]; ok {
+		t.Fatalf("User-Agent must not be injected for xAI credentials: %v", extra)
 	}
 	// Grok tokens have no chatgpt claim, so no chatgpt-account-id header.
 	if _, ok := extra["chatgpt-account-id"]; ok {
@@ -1167,8 +1166,8 @@ func TestResolveValidToken_GrokHeaders(t *testing.T) {
 	}
 }
 
-// TestResolveValidToken_GrokHeadersOperatorOverride verifies operator
-// extra_headers win over the injected grok-shell identity.
+// TestResolveValidToken_GrokHeadersOperatorOverride verifies explicit operator
+// extras are preserved without requiring or overriding an injected identity.
 func TestResolveValidToken_GrokHeadersOperatorOverride(t *testing.T) {
 	s, m := newTestStoreAndManager(t)
 	ds := mustDownstream(t, s)

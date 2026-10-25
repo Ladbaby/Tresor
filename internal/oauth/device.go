@@ -120,7 +120,8 @@ func (m *Manager) requestDeviceLogin(p *Provider, pl *pendingLogin) (*pendingLog
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	resp, err := m.httpClient().Do(req)
+	client := restrictedClient(m.httpClient(), p.validateEndpoint)
+	resp, err := client.Do(req)
 	if err != nil {
 		return pl, fmt.Errorf("device auth request: %w", err)
 	}
@@ -229,6 +230,10 @@ func (m *Manager) pollOnce(p *Provider, pl *pendingLogin) bool {
 		}
 	}
 
+	if p.RequireRefreshToken && tr.RefreshToken == "" {
+		m.failPending(pl, "OAuth token response missing refresh_token")
+		return false
+	}
 	tok := m.buildTokenRow(pl.DownstreamID, p, tr)
 	if err := m.store.SaveOAuthToken(tok); err != nil {
 		m.failPending(pl, err.Error())
@@ -264,7 +269,8 @@ func (m *Manager) devicePoll(p *Provider, pl *pendingLogin) (*tokenResponse, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	resp, err := m.httpClient().Do(req)
+	client := restrictedClient(m.httpClient(), p.validateEndpoint)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err, false
 	}

@@ -993,27 +993,46 @@ function renderOAuthEditor(auth) {
     // Extra static headers injected onto every forwarded LLM request.
     rows.push(oauthKVBlock('oauth-headers', 'header', 'Extra Headers', 'oauth-add-header', 'Header name', 'Value', auth.extra_headers));
 
-    return rows.join('');
+    rows.push(`<div class="oauth-policy-fields">
+        ${[['request_nonce', 'Request nonce'], ['require_refresh_token', 'Require refresh token'], ['refresh_on_unknown_expiry', 'Refresh on unknown expiry'], ['persist_discovered_endpoints', 'Persist discovered endpoints']].map(([key, label]) => `<label class="checkbox-label oauth-policy-checkbox"><input type="checkbox" data-oauth-policy="${key}"${auth[key] ? ' checked' : ''}> ${label}</label>`).join('')}
+        <label class="oauth-field-row"><span class="oauth-field-label">Refresh skew (seconds)</span><input class="oauth-field" type="number" min="0" data-oauth-policy="refresh_skew_secs" value="${Number(auth.refresh_skew_secs || 0)}"></label>
+        <label class="oauth-field-row"><span class="oauth-field-label">Default token lifetime (seconds)</span><input class="oauth-field" type="number" min="0" data-oauth-policy="default_token_lifetime_secs" value="${Number(auth.default_token_lifetime_secs || 0)}"></label>
+        <label class="oauth-field-row"><span class="oauth-field-label">Allowed endpoint hosts<br>(one per line)</span><textarea class="oauth-field" data-oauth-policy="allowed_endpoint_hosts">${esc((auth.allowed_endpoint_hosts || []).join('\n'))}</textarea></label>
+    </div>`);
+
+    return `<details class="detail-advanced oauth-advanced-settings"><summary>Advanced OAuth settings</summary><div class="detail-advanced-content">${rows.join('')}</div></details>`;
 }
 
 // Build the complete oauth auth block from the currently-visible OAuth editor
 // fields in the detail pane, plus the existing api_key (preserved so a later
 // switch back to API-key auth doesn't lose the stored key).
 function collectOAuthAuth(root) {
-    const auth = { type: 'oauth', flow: 'auth_code' };
+    // Preserve settings hidden by the selected flow, including advanced OAuth policy.
+    const auth = Object.assign({}, (_currentDownstream && _currentDownstream.auth) || {}, { type: 'oauth', flow: 'auth_code' });
     root.querySelectorAll('[data-oauth-field]').forEach(el => {
         const key = el.dataset.oauthField;
         if (key === 'flow') { auth.flow = el.value; return; }
         const v = el.value.trim();
         if (v) auth[key] = v;
+        else delete auth[key];
+    });
+    root.querySelectorAll('[data-oauth-policy]').forEach(el => {
+        const key = el.dataset.oauthPolicy;
+        if (el.type === 'checkbox') auth[key] = el.checked;
+        else if (key === 'allowed_endpoint_hosts') auth[key] = el.value.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
+        else { const n = Number(el.value); auth[key] = Number.isFinite(n) && n >= 0 ? Math.trunc(n) : 0; }
     });
     if (!auth.flow) auth.flow = 'auth_code';
     // Extra headers
     const headers = collectOAuthKV(root, 'oauth-headers', 'header');
     if (Object.keys(headers).length > 0) auth.extra_headers = headers;
+    else delete auth.extra_headers;
     // Extra authorize-URL params (auth_code flow only)
     const authParams = collectOAuthKV(root, 'oauth-auth-params', 'auth-param');
-    if (Object.keys(authParams).length > 0) auth.extra_authorize_params = authParams;
+    if (root.querySelector('[data-oauth-role="oauth-auth-params"]')) {
+        if (Object.keys(authParams).length > 0) auth.extra_authorize_params = authParams;
+        else delete auth.extra_authorize_params;
+    }
     // Preserve a previously-saved API key so toggling back to API-key auth
     // does not wipe it.
     if (_currentDownstream && _currentDownstream.auth && _currentDownstream.auth.api_key) {
@@ -1084,7 +1103,7 @@ function renderDownstreamDetail(ds) {
             </div>
         </div>
         <details class="detail-advanced" data-role="advanced-settings"${advancedOpen ? ' open' : ''}>
-            <summary>Advanced</summary>
+            <summary>Advanced Host Settings</summary>
             <div class="detail-advanced-content">
                 <div class="detail-section">
                     <label>Per-format URLs<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Override the base URL for specific API formats. Some providers (e.g. DeepSeek) serve Anthropic requests at a sub-path of their base URL. Leave blank to fall back to the base URL above.">?</span></label>
@@ -1378,7 +1397,7 @@ function refreshDownstreamDetail() {
                 if (eye) { eye.classList.remove('shown'); eye.textContent = '👁'; }
                 _keyRevealed = false;
             });
-        } else if (t.classList.contains('oauth-field') || t.classList.contains('oauth-header-key') || t.classList.contains('oauth-header-value') || t.classList.contains('oauth-auth-param-key') || t.classList.contains('oauth-auth-param-value')) {
+        } else if (t.hasAttribute('data-oauth-policy') || t.classList.contains('oauth-field') || t.classList.contains('oauth-header-key') || t.classList.contains('oauth-header-value') || t.classList.contains('oauth-auth-param-key') || t.classList.contains('oauth-auth-param-value')) {
             // Any OAuth recipe field: rebuild the whole auth block and save.
             const auth = collectOAuthAuth(root);
             await autoSaveDownstreamField(_currentDownstream.id, { auth: auth }, (err) => {
@@ -1403,6 +1422,13 @@ function refreshDownstreamDetail() {
     root.addEventListener('change', async (e) => {
         if (!_currentDownstream) return;
         const t = e.target;
+        if (t.matches('[data-oauth-policy]') && t.type === 'checkbox') {
+            const auth = collectOAuthAuth(root);
+            await autoSaveDownstreamField(_currentDownstream.id, { auth }, (err) => {
+                if (!err) _currentDownstream.auth = auth;
+            });
+            return;
+        }
         if (t.matches('.oauth-flow-select')) {
             // Switching flow swaps the endpoint fields. The required URLs for
             // the new flow are not filled in yet, so don't save (the server

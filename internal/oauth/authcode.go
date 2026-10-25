@@ -49,7 +49,11 @@ func (m *Manager) HandleCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	p, err := m.buildProvider(pl.DownstreamID, pl.auth)
+	p := pl.provider
+	var err error
+	if p == nil {
+		p, err = m.buildProvider(pl.DownstreamID, pl.auth)
+	}
 	if err != nil {
 		m.failPending(pl, err.Error())
 		http.Error(w, "invalid oauth configuration: "+err.Error(), http.StatusInternalServerError)
@@ -73,6 +77,11 @@ func (m *Manager) HandleCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if p.RequireRefreshToken && tr.RefreshToken == "" {
+		m.failPending(pl, "OAuth token response missing refresh_token")
+		http.Error(w, "token exchange failed: missing refresh_token", http.StatusBadGateway)
+		return
+	}
 	tok := m.buildTokenRow(pl.DownstreamID, p, tr)
 	if err := m.store.SaveOAuthToken(tok); err != nil {
 		m.failPending(pl, err.Error())
@@ -133,7 +142,9 @@ func (m *Manager) postToken(p *Provider, form url.Values) (*tokenResponse, error
 	if user, pass := p.tokenAuth(); user != "" {
 		req.SetBasicAuth(user, pass)
 	}
-	resp, err := m.httpClient().Do(req)
+	client := m.httpClient()
+	client = restrictedClient(client, p.validateEndpoint)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token request: %w", err)
 	}
@@ -158,12 +169,17 @@ func (m *Manager) buildTokenRow(downstreamID string, p *Provider, tr *tokenRespo
 	expiresAt := int64(0)
 	if tr.ExpiresIn > 0 {
 		expiresAt = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second).Unix()
+	} else if p.DefaultTokenLifetimeSecs > 0 {
+		expiresAt = time.Now().Add(time.Duration(p.DefaultTokenLifetimeSecs) * time.Second).Unix()
 	} else if exp := jwtExp(tr.AccessToken); exp > 0 {
 		expiresAt = exp
 	}
 	extra := map[string]interface{}{}
 	if tr.IDToken != "" {
 		extra["id_token"] = tr.IDToken
+	}
+	if p.PersistDiscoveredEndpoints {
+		extra[oauthEndpointsKey] = oauthEndpointMetadata(p)
 	}
 	return &store.OAuthToken{
 		DownstreamID: downstreamID,

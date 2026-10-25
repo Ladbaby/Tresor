@@ -162,12 +162,18 @@ type DownstreamAuthCfg struct {
 	DeviceExchangeRedirect string `yaml:"device_redirect_uri,omitempty" json:"device_redirect_uri,omitempty"` // optional redirect_uri sent when exchanging the device authorization code
 
 	// oauth — common
-	ClientID        string            `yaml:"client_id,omitempty" json:"client_id,omitempty"`                           // optional for public clients
-	ClientSecret    string            `yaml:"client_secret,omitempty" json:"client_secret,omitempty"`                   // required for confidential clients (sent as Basic auth on token requests)
-	Scopes          string            `yaml:"scopes,omitempty" json:"scopes,omitempty"`                                 // space-separated, optional
-	ExtraAuthParams map[string]string `yaml:"extra_authorize_params,omitempty" json:"extra_authorize_params,omitempty"` // extra query params appended to the authorize URL
-	RefreshSkewSecs int               `yaml:"refresh_skew_secs,omitempty" json:"refresh_skew_secs,omitempty"`           // refresh ahead of expiry, default 120
-	ExtraHeaders    map[string]string `yaml:"extra_headers,omitempty" json:"extra_headers,omitempty"`                   // static extra headers on LLM requests
+	ClientID                   string            `yaml:"client_id,omitempty" json:"client_id,omitempty"`                           // optional for public clients
+	ClientSecret               string            `yaml:"client_secret,omitempty" json:"client_secret,omitempty"`                   // required for confidential clients (sent as Basic auth on token requests)
+	Scopes                     string            `yaml:"scopes,omitempty" json:"scopes,omitempty"`                                 // space-separated, optional
+	ExtraAuthParams            map[string]string `yaml:"extra_authorize_params,omitempty" json:"extra_authorize_params,omitempty"` // extra query params appended to the authorize URL
+	RefreshSkewSecs            int               `yaml:"refresh_skew_secs,omitempty" json:"refresh_skew_secs,omitempty"`           // refresh ahead of expiry, default 0 (refresh at expiry)
+	ExtraHeaders               map[string]string `yaml:"extra_headers,omitempty" json:"extra_headers,omitempty"`                   // static extra headers on LLM requests
+	RequestNonce               bool              `yaml:"request_nonce,omitempty" json:"request_nonce,omitempty"`
+	RequireRefreshToken        bool              `yaml:"require_refresh_token,omitempty" json:"require_refresh_token,omitempty"`
+	DefaultTokenLifetimeSecs   int               `yaml:"default_token_lifetime_secs,omitempty" json:"default_token_lifetime_secs,omitempty"`
+	RefreshOnUnknownExpiry     bool              `yaml:"refresh_on_unknown_expiry,omitempty" json:"refresh_on_unknown_expiry,omitempty"`
+	AllowedEndpointHosts       []string          `yaml:"allowed_endpoint_hosts,omitempty" json:"allowed_endpoint_hosts,omitempty"`
+	PersistDiscoveredEndpoints bool              `yaml:"persist_discovered_endpoints,omitempty" json:"persist_discovered_endpoints,omitempty"`
 
 	// OAuthProvider is a transient field used only during startup migration of
 	// old configs: it carries the name of the recipe in the old top-level

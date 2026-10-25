@@ -2,9 +2,12 @@ package oauth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,6 +31,8 @@ const (
 )
 
 // Provider is a validated, ready-to-use OAuth provider definition.
+const oauthEndpointsKey = "tresor_oauth_endpoints"
+
 type Provider struct {
 	Name string
 	Flow string
@@ -50,8 +55,16 @@ type Provider struct {
 	DeviceVerifyURL        string
 	DeviceExchangeRedirect string
 
-	RefreshSkewSecs int
-	ExtraHeaders    map[string]string
+	RefreshSkewSecs            int
+	ExtraHeaders               map[string]string
+	DiscoveryURL               string
+	RequestNonce               bool
+	RequireRefreshToken        bool
+	DefaultTokenLifetimeSecs   int
+	RefreshOnUnknownExpiry     bool
+	AllowedEndpointHosts       []string
+	PersistDiscoveredEndpoints bool
+	Fingerprint                string
 }
 
 // RedirectURI returns the loopback redirect URI for the auth_code flow.
@@ -75,21 +88,31 @@ func (p *Provider) tokenAuth() (string, string) {
 // required fields are enforced per cfg.Flow.
 func Normalize(cfg config.DownstreamAuthCfg, httpClient *http.Client) (*Provider, error) {
 	p := &Provider{
-		Flow:                   cfg.Flow,
-		AuthorizationURL:       cfg.AuthorizationURL,
-		TokenURL:               cfg.TokenURL,
-		DeviceAuthURL:          cfg.DeviceAuthURL,
-		DeviceTokenURL:         cfg.DeviceTokenURL,
-		DeviceVerifyURL:        cfg.DeviceVerifyURL,
-		DeviceExchangeRedirect: cfg.DeviceExchangeRedirect,
-		ClientID:               cfg.ClientID,
-		ClientSecret:           cfg.ClientSecret,
-		Scopes:                 cfg.Scopes,
-		ExtraAuthParams:        cfg.ExtraAuthParams,
-		RedirectPort:           cfg.RedirectPort,
-		RedirectPath:           cfg.RedirectPath,
-		RefreshSkewSecs:        cfg.RefreshSkewSecs,
-		ExtraHeaders:           cfg.ExtraHeaders,
+		Flow:                       cfg.Flow,
+		AuthorizationURL:           cfg.AuthorizationURL,
+		TokenURL:                   cfg.TokenURL,
+		DeviceAuthURL:              cfg.DeviceAuthURL,
+		DeviceTokenURL:             cfg.DeviceTokenURL,
+		DeviceVerifyURL:            cfg.DeviceVerifyURL,
+		DeviceExchangeRedirect:     cfg.DeviceExchangeRedirect,
+		ClientID:                   cfg.ClientID,
+		ClientSecret:               cfg.ClientSecret,
+		Scopes:                     cfg.Scopes,
+		ExtraAuthParams:            cfg.ExtraAuthParams,
+		RedirectPort:               cfg.RedirectPort,
+		RedirectPath:               cfg.RedirectPath,
+		RefreshSkewSecs:            cfg.RefreshSkewSecs,
+		ExtraHeaders:               cfg.ExtraHeaders,
+		DiscoveryURL:               cfg.DiscoveryURL,
+		RequestNonce:               cfg.RequestNonce,
+		RequireRefreshToken:        cfg.RequireRefreshToken,
+		DefaultTokenLifetimeSecs:   cfg.DefaultTokenLifetimeSecs,
+		RefreshOnUnknownExpiry:     cfg.RefreshOnUnknownExpiry,
+		AllowedEndpointHosts:       cfg.AllowedEndpointHosts,
+		PersistDiscoveredEndpoints: cfg.PersistDiscoveredEndpoints,
+	}
+	if p.RefreshSkewSecs == 0 {
+		p.RefreshSkewSecs = defaultRefreshSkew
 	}
 	if p.RedirectPort == 0 {
 		p.RedirectPort = defaultRedirectPort
@@ -97,19 +120,31 @@ func Normalize(cfg config.DownstreamAuthCfg, httpClient *http.Client) (*Provider
 	if p.RedirectPath == "" {
 		p.RedirectPath = defaultRedirectPath
 	}
-	if p.RefreshSkewSecs == 0 {
-		p.RefreshSkewSecs = defaultRefreshSkew
+	if cfg.DefaultTokenLifetimeSecs < 0 || cfg.RefreshSkewSecs < 0 {
+		return nil, fmt.Errorf("oauth auth: token lifetime and refresh skew cannot be negative")
 	}
-
+	for _, pattern := range p.AllowedEndpointHosts {
+		if !validHostPattern(strings.ToLower(strings.TrimSuffix(pattern, "."))) {
+			return nil, fmt.Errorf("invalid allowed endpoint host pattern %q", pattern)
+		}
+	}
+	if cfg.DiscoveryURL != "" {
+		if err := p.validateEndpoint(cfg.DiscoveryURL, "discovery_url"); err != nil {
+			return nil, err
+		}
+	}
 	if p.Flow == "" {
 		return nil, fmt.Errorf("oauth auth: flow is required (\"auth_code\" or \"device\")")
 	}
 
 	switch p.Flow {
 	case FlowAuthCode:
-		// Optional OIDC discovery to fill endpoints
+		p.Fingerprint = oauthConfigFingerprint(cfg)
 		if cfg.DiscoveryURL != "" && (p.AuthorizationURL == "" || p.TokenURL == "") {
-			authURL, tokenURL, err := discoverEndpoints(cfg.DiscoveryURL, httpClient)
+			if err := p.validateEndpoint(cfg.DiscoveryURL, "discovery_url"); err != nil {
+				return nil, err
+			}
+			authURL, tokenURL, err := discoverEndpoints(cfg.DiscoveryURL, restrictedClient(httpClient, p.validateEndpoint))
 			if err != nil {
 				return nil, fmt.Errorf("oauth auth: discovery: %w", err)
 			}
@@ -119,13 +154,16 @@ func Normalize(cfg config.DownstreamAuthCfg, httpClient *http.Client) (*Provider
 			if p.TokenURL == "" {
 				p.TokenURL = tokenURL
 			}
+			if p.PersistDiscoveredEndpoints {
+				p.Fingerprint = oauthConfigFingerprint(cfg)
+			}
 		}
 		if p.AuthorizationURL == "" || p.TokenURL == "" {
 			return nil, fmt.Errorf("oauth auth: auth_code flow requires authorization_url and token_url (or discovery_url)")
 		}
 		for label, u := range map[string]string{"authorization_url": p.AuthorizationURL, "token_url": p.TokenURL} {
-			if err := validateHTTPSURL(u, label); err != nil {
-				return nil, fmt.Errorf("oauth auth: %w", err)
+			if err := p.validateEndpoint(u, label); err != nil {
+				return nil, err
 			}
 		}
 	case FlowDevice:
@@ -133,14 +171,129 @@ func Normalize(cfg config.DownstreamAuthCfg, httpClient *http.Client) (*Provider
 			return nil, fmt.Errorf("oauth auth: device flow requires device_auth_url, device_token_url and device_verify_url")
 		}
 		for label, u := range map[string]string{"device_auth_url": p.DeviceAuthURL, "device_token_url": p.DeviceTokenURL} {
-			if err := validateHTTPSURL(u, label); err != nil {
-				return nil, fmt.Errorf("oauth auth: %w", err)
+			if err := p.validateEndpoint(u, label); err != nil {
+				return nil, err
+			}
+		}
+		if p.DeviceVerifyURL != "" {
+			if err := p.validateEndpoint(p.DeviceVerifyURL, "device_verify_url"); err != nil {
+				return nil, err
+			}
+		}
+		if cfg.TokenURL != "" {
+			if err := p.validateEndpoint(cfg.TokenURL, "token_url"); err != nil {
+				return nil, err
 			}
 		}
 	default:
 		return nil, fmt.Errorf("oauth auth: unknown flow %q (want \"auth_code\" or \"device\")", cfg.Flow)
 	}
 	return p, nil
+}
+
+func (p *Provider) validateEndpoint(raw, label string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.Hostname() == "" || u.Fragment != "" {
+		return fmt.Errorf("%s: invalid URL", label)
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return fmt.Errorf("%s must be an https URL", label)
+	}
+	if len(p.AllowedEndpointHosts) == 0 {
+		return nil
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	for _, rawPattern := range p.AllowedEndpointHosts {
+		pattern := strings.ToLower(strings.TrimSuffix(rawPattern, "."))
+		wild := strings.HasPrefix(pattern, "*.")
+		base := strings.TrimPrefix(pattern, "*.")
+		if !validHostPattern(pattern) {
+			return fmt.Errorf("invalid allowed endpoint host pattern %q", rawPattern)
+		}
+		if (!wild && host == base) || (wild && strings.HasSuffix(host, "."+base)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s host %q is not allowed", label, host)
+}
+
+func isLoopbackHost(host string) bool { ip := net.ParseIP(host); return ip != nil && ip.IsLoopback() }
+func validHostPattern(p string) bool {
+	if strings.HasPrefix(p, "*.") {
+		p = p[2:]
+	} else if strings.Contains(p, "*") {
+		return false
+	}
+	if p == "" || strings.ContainsAny(p, ":/\\_ ") {
+		return false
+	}
+	for _, label := range strings.Split(p, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+func oauthConfigFingerprint(cfg config.DownstreamAuthCfg) string {
+	cfg.APIKey = ""
+	b, _ := json.Marshal(cfg)
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
+}
+func oauthEndpointMetadata(p *Provider) map[string]interface{} {
+	return map[string]interface{}{"discovery_url": p.DiscoveryURL, "authorization_url": p.AuthorizationURL, "token_url": p.TokenURL, "fingerprint": p.Fingerprint}
+}
+func oauthCachedProvider(cfg config.DownstreamAuthCfg, extra map[string]interface{}) (*Provider, bool, error) {
+	if !cfg.PersistDiscoveredEndpoints || cfg.Flow != FlowAuthCode {
+		return nil, false, nil
+	}
+	meta, ok := extra[oauthEndpointsKey].(map[string]interface{})
+	if !ok || meta["fingerprint"] != oauthConfigFingerprint(cfg) {
+		return nil, false, nil
+	}
+	auth, _ := meta["authorization_url"].(string)
+	token, _ := meta["token_url"].(string)
+	discovery, _ := meta["discovery_url"].(string)
+	cp := cfg
+	cp.DiscoveryURL = ""
+	cp.AuthorizationURL = auth
+	cp.TokenURL = token
+	p, err := Normalize(cp, nil)
+	if err != nil {
+		return nil, false, nil
+	}
+	if discovery != cfg.DiscoveryURL || (discovery != "" && p.validateEndpoint(discovery, "discovery_url") != nil) {
+		return nil, false, nil
+	}
+	p.DiscoveryURL = discovery
+	p.Fingerprint = oauthConfigFingerprint(cfg)
+	return p, true, nil
+}
+
+func restrictedClient(base *http.Client, validate func(string, string) error) *http.Client {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	clone := *base
+	prior := clone.CheckRedirect
+	clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := validate(req.URL.String(), "redirect URL"); err != nil {
+			return http.ErrUseLastResponse
+		}
+		if len(via) >= 10 {
+			return http.ErrUseLastResponse
+		}
+		if prior != nil {
+			return prior(req, via)
+		}
+		return nil
+	}
+	return &clone
 }
 
 // validateHTTPSURL ensures the URL parses and uses the https scheme.

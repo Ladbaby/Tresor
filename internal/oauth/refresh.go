@@ -33,10 +33,19 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	if err != nil {
 		return "", nil, err
 	}
-	p, err := m.buildProvider(downstreamID, auth)
-	if err != nil {
-		return "", nil, err
+	var p *Provider
+	if cached, ok, cacheErr := oauthCachedProvider(*auth, t.Extra); cacheErr != nil {
+		return "", nil, cacheErr
+	} else if ok {
+		p = cached
+	} else {
+		p, err = m.buildProvider(downstreamID, auth)
+		if err != nil {
+			return "", nil, err
+		}
 	}
+	p.Name = downstreamID
+
 	extra := map[string]string{}
 	for k, v := range p.ExtraHeaders {
 		extra[k] = v
@@ -44,7 +53,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	// Token-level extra headers: values stored on the token row's extra map
 	// are passed through as headers keyed by their extra-map key.
 	for k, v := range t.Extra {
-		if s, ok := v.(string); ok && k != "id_token" {
+		if s, ok := v.(string); ok && k != "id_token" && k != oauthEndpointsKey && k != "tresor_xai_oauth" {
 			extra[k] = s
 		}
 	}
@@ -54,7 +63,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	}
 
 	// Fast path: still valid
-	if exp := tokenExpiry(t.AccessToken, t.ExpiresAt); exp.IsZero() || time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp) {
+	if exp := tokenExpiry(t.AccessToken, t.ExpiresAt); (exp.IsZero() && !p.RefreshOnUnknownExpiry) || (!exp.IsZero() && time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp)) {
 		return t.AccessToken, finalizeOAuthHeaders(extra, t.AccessToken, p), nil
 	}
 
@@ -69,7 +78,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 		return "", nil, err
 	}
 	if t2 != nil && !t2.NeedsLogin {
-		if exp := tokenExpiry(t2.AccessToken, t2.ExpiresAt); exp.IsZero() || time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp) {
+		if exp := tokenExpiry(t2.AccessToken, t2.ExpiresAt); (exp.IsZero() && !p.RefreshOnUnknownExpiry) || (!exp.IsZero() && time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp)) {
 			return t2.AccessToken, finalizeOAuthHeaders(extra, t2.AccessToken, p), nil
 		}
 		t = t2
@@ -112,6 +121,9 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	// that the refresh response does not carry.
 	if t.Extra != nil {
 		for k, v := range t.Extra {
+			if k == "tresor_xai_oauth" || k == oauthEndpointsKey {
+				continue
+			}
 			if _, exists := nt.Extra[k]; !exists {
 				nt.Extra[k] = v
 			}
@@ -124,17 +136,12 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 }
 
 // finalizeOAuthHeaders layers provider identity headers onto the base extra
-// headers, derived from the FINAL access token about to be sent. Two providers
-// get special-cased so Tresor's subscription traffic fingerprints like the
-// official CLI instead of an unknown client (the goal is to avoid the account
-// being flagged):
+// headers, derived from the FINAL access token about to be sent. ChatGPT/Codex
+// credentials retain their existing reference-client identity headers:
 //
 //   - ChatGPT/Codex: when the access token carries the chatgpt_account_id
 //     claim, send chatgpt-account-id, originator, and a pi User-Agent (matching
 //     the pi / litellm reference clients).
-//   - Grok (xAI): when the provider's scopes include "grok-cli:access" (the
-//     xAI Grok CLI's client), send the grok-shell User-Agent and the
-//     x-grok-client-identifier header (matching xai-org/grok-build).
 //
 // Operator-supplied extra_headers (already merged into base) always take
 // precedence. It must run against the final token — not the pre-refresh one —
@@ -156,23 +163,8 @@ func finalizeOAuthHeaders(base map[string]string, accessToken string, p *Provide
 			out["User-Agent"] = codexUserAgent()
 		}
 	}
-	// Grok (xAI) identity.
-	if p != nil && isGrokProvider(p) {
-		if _, ok := out["User-Agent"]; !ok {
-			out["User-Agent"] = grokUserAgent()
-		}
-		if _, ok := out["x-grok-client-identifier"]; !ok {
-			out["x-grok-client-identifier"] = "grok-shell"
-		}
-	}
-	return out
-}
 
-// isGrokProvider reports whether an OAuth provider is xAI's Grok CLI client.
-// The "grok-cli:access" scope is unique to the Grok CLI's registered client,
-// so its presence is a reliable signal even if other fields are customized.
-func isGrokProvider(p *Provider) bool {
-	return strings.Contains(p.Scopes, "grok-cli:access")
+	return out
 }
 
 // refreshToken performs a grant_type=refresh_token exchange.
@@ -261,47 +253,4 @@ func osRelease() string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
-}
-
-// grokUserAgent returns the User-Agent shape the xAI Grok CLI sends,
-// "grok-shell/<version> (<os>; <arch>)". The OS/arch use the Grok CLI's own
-// naming (macos/aarch64). Memoized because it is built on every request.
-const grokShellVersion = "1.0.0"
-
-var (
-	grokUAOnce sync.Once
-	grokUA     string
-)
-
-func grokUserAgent() string {
-	grokUAOnce.Do(func() {
-		grokUA = "grok-shell/" + grokShellVersion + " (" + grokOS() + "; " + grokArch() + ")"
-	})
-	return grokUA
-}
-
-// grokOS maps the Go OS name to the Grok CLI's OS token.
-func grokOS() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return "macos"
-	case "linux":
-		return "linux"
-	case "windows":
-		return "windows"
-	default:
-		return runtime.GOOS
-	}
-}
-
-// grokArch maps the Go arch to the Grok CLI's arch token (Rust-style aarch64).
-func grokArch() string {
-	switch runtime.GOARCH {
-	case "amd64":
-		return "amd64"
-	case "arm64":
-		return "aarch64"
-	default:
-		return runtime.GOARCH
-	}
 }

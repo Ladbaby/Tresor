@@ -7,6 +7,42 @@ import (
 	"testing"
 )
 
+func TestOAuthPolicyYAMLAndJSONRoundTrip(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	data := `downstreams:
+  - id: fictional
+    auth:
+      type: oauth
+      flow: auth_code
+      request_nonce: true
+      require_refresh_token: true
+      default_token_lifetime_secs: 3600
+      refresh_on_unknown_expiry: true
+      allowed_endpoint_hosts: [fictional.invalid, '*.fictional.invalid']
+      persist_discovered_endpoints: true
+      refresh_skew_secs: 0
+`
+	if err := os.WriteFile(file, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := cfg.Downstreams[0].Auth
+	encoded, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got DownstreamAuthCfg
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.RequestNonce || !got.RequireRefreshToken || !got.RefreshOnUnknownExpiry || !got.PersistDiscoveredEndpoints || got.DefaultTokenLifetimeSecs != 3600 || got.RefreshSkewSecs != 0 || len(got.AllowedEndpointHosts) != 2 {
+		t.Fatalf("policy lost: %+v", got)
+	}
+}
+
 func TestObsoleteGlobalIntegrationsRequireRuleConfiguration(t *testing.T) {
 	for _, tc := range []struct {
 		name, section string

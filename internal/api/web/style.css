@@ -4091,6 +4091,14 @@ td .ds-toggle.rule-toggle {
 }
 .oauth-panel-row.oauth-actions-row { margin-top: 0.7rem; }
 
+/* OAuth parameters share the surrounding advanced-section and editor styles. */
+.oauth-advanced-settings { margin: 0.75rem 0; }
+.oauth-policy-fields { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color); }
+.oauth-policy-checkbox { margin-bottom: 0.65rem; font-size: 0.8rem; color: var(--text-secondary); }
+.oauth-policy-checkbox input { accent-color: var(--accent); }
+.oauth-policy-fields .oauth-field-label { white-space: normal; overflow: visible; }
+.oauth-policy-fields textarea { min-height: 4rem; resize: vertical; box-sizing: border-box; }
+
 /* Inline OAuth recipe editor: stacked label + input rows. */
 .oauth-field-row {
     display: grid;
