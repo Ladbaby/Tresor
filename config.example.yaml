@@ -88,21 +88,15 @@ downstreams:
       persist_discovered_endpoints: true
     output_model_ids: [grok-4]
 
+  # Public Gemini API access uses an API key, not Google AI Pro/Ultra quota.
+  # Direct Gemini CLI / Code Assist subscription access is not planned.
   - id: gemini
-    name: Gemini subscription
+    name: Gemini API
     api_formats: [gemini]
     base_url: https://generativelanguage.googleapis.com
     auth:
-      type: oauth
-      flow: auth_code
-      authorization_url: https://accounts.google.com/o/oauth2/auth
-      token_url: https://oauth2.googleapis.com/token
-      client_id: YOUR-client-id.apps.googleusercontent.com
-      client_secret: YOUR-client-secret
-      scopes: "https://www.googleapis.com/auth/generative-language"
-      extra_authorize_params:
-        access_type: offline
-        prompt: true
+      type: api_key
+      api_key: ""                         # Get a key from Google AI Studio
     output_model_ids: [gemini-3.8-flash]
 
   - id: openai-responses
