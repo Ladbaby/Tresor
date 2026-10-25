@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"tresor/internal/engine"
+	"tresor/internal/integrations"
 	"tresor/internal/jsplugins"
 )
 
@@ -197,6 +198,29 @@ type packageSnapshot struct {
 	builtin     engine.PluginRegistry
 	unavailable map[string]string
 	packages    map[string]*jsplugins.Package
+}
+
+// ServiceConnections resolves manifest parameters without evaluating plugin JavaScript.
+func (r *packageSnapshot) ServiceConnections(id string, config map[string]interface{}) (map[string]jsplugins.ServiceConnection, error) {
+	if reason := r.unavailable[id]; reason != "" {
+		return nil, fmt.Errorf("plugin unavailable")
+	}
+	pkg, ok := r.packages[id]
+	if !ok || len(pkg.Manifest.Services) == 0 {
+		return nil, nil
+	}
+	resolved, err := jsplugins.ResolveConfig(pkg.Manifest.ConfigSchema, config)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]jsplugins.ServiceConnection{}
+	for name, decl := range pkg.Manifest.Services {
+		base, _ := resolved[decl.BaseURLParam].(string)
+		token, _ := resolved[decl.TokenParam].(string)
+		control, _ := resolved[decl.ControlTokenParam].(string)
+		result[name] = jsplugins.ServiceConnection{Service: integrations.Service{BaseURL: base, Operations: decl.Operations}, Token: token, ControlToken: control}
+	}
+	return result, nil
 }
 
 func (r *packageSnapshot) CreatePlugin(id string, config map[string]interface{}) (interface{}, error) {

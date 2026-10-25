@@ -88,7 +88,9 @@ func ServeProxy(eng *Engine, adminHandler http.Handler, webHandler http.Handler,
 	// Admin API routes (wrapped with security headers)
 	mux.Handle("/api/", middleware.SecurityHeaders(adminHandler))
 
-	// Integration execution control is a gateway-only endpoint; keep it outside the admin API mux.
+	// Integration control and binding resolution are gateway endpoints, outside admin auth.
+	mux.Handle("/api/integrations/bindings/resolve", http.HandlerFunc(eng.HandleIntegrationBindingResolve))
+	mux.Handle("/api/integrations/bindings/resolve/", http.HandlerFunc(eng.HandleIntegrationBindingResolve))
 	mux.Handle("/api/integrations/executions", http.HandlerFunc(eng.HandleIntegrationControl))
 	mux.Handle("/api/integrations/executions/", http.HandlerFunc(eng.HandleIntegrationControl))
 
