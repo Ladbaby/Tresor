@@ -80,15 +80,11 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		entry.Diagnostic = "route:openai_downstream_required"
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
-	// Until transforms explicitly declare transcript compatibility, reject the
-	// combination rather than allowing plugins to rewrite hidden history.
-	if pipeline != nil {
-		for _, p := range pipeline.ExternalSteps {
-			if p.runtime.HasHook("request") || p.runtime.HasHook("response") || p.runtime.HasHook("streamStart") || p.runtime.HasHook("streamEvent") || p.runtime.HasHook("streamEnd") || p.runtime.HasHook("upstreamStart") || p.runtime.HasHook("upstreamEvent") || p.runtime.HasHook("upstreamEnd") {
-				entry.Diagnostic = "route:incompatible_pipeline_hooks"
-				return fail(http.StatusBadRequest, "unsupported_managed_route")
-			}
-		}
+	// Transforms have per-generation lifetimes, separate from the service owner.
+	transforms, transformErr := managedTransformPipeline(pipeline, owner)
+	if transformErr != nil {
+		entry.Diagnostic = "route:incompatible_transform"
+		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
 	if len(result.originalBody) == 0 {
 		entry.Diagnostic = "request:empty_body"
@@ -139,7 +135,29 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	if identityErr != nil {
 		return fail(502, "integration_unavailable")
 	}
-	snapshot, _ := json.Marshal(map[string]any{"plugin": packageID, "digest": digest, "service": owner.executionService(decision.Service), "config": configIdentity, "tools": decision.Tools, "binding": s.serviceFor(owner, decision.Service).BindingIdentity()})
+	transformSnapshot := []any{}
+	for _, step := range transforms.ExternalSteps {
+		id, digest := step.PluginName(), ""
+		if identity, ok := step.runtime.(interface{ SourceIdentity() (string, string) }); ok {
+			id, digest = identity.SourceIdentity()
+		}
+		config, err := json.Marshal(step.stepConfig)
+		if err != nil {
+			return fail(502, "integration_unavailable")
+		}
+		configID, err := e.store.ConfigurationIdentity(config)
+		if err != nil {
+			return fail(502, "integration_unavailable")
+		}
+		hooks := []string{}
+		for _, hook := range []string{"request", "responseHeaders", "response", "streamStart", "streamEvent", "streamEnd", "finish"} {
+			if step.runtime.HasHook(hook) {
+				hooks = append(hooks, hook)
+			}
+		}
+		transformSnapshot = append(transformSnapshot, map[string]any{"id": id, "digest": digest, "rule": step.ruleID, "step": step.stepID, "config": configID, "hooks": hooks})
+	}
+	snapshot, _ := json.Marshal(map[string]any{"plugin": packageID, "digest": digest, "service": owner.executionService(decision.Service), "config": configIdentity, "tools": decision.Tools, "binding": s.serviceFor(owner, decision.Service).BindingIdentity(), "transforms": transformSnapshot, "projection_version": 1})
 	managed, created, err := e.store.BeginManagedInference(store.ManagedInference{ExecutionID: ex.ExecutionID, Epoch: ex.Epoch, InferenceID: ex.InferenceID, Status: "running", Codec: decision.Codec, Route: route, Snapshot: snapshot}, canonical)
 	if err != nil {
 		return fail(http.StatusConflict, "integration_conflict")
@@ -170,7 +188,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		if stored == nil || stored.Status != "complete" || len(stored.Response) == 0 {
 			return fail(http.StatusConflict, "operation_uncertain")
 		}
-		if err := writeManagedProjection(w, stored.Response, clientStreaming); err != nil {
+		if err := writeStoredManagedProjection(w, stored.Response, clientStreaming); err != nil {
 			entry.Error = "integration_unavailable"
 		}
 		entry.Status = http.StatusOK
@@ -210,7 +228,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	segment := store.ManagedSegment{ExecutionID: ex.ExecutionID, Epoch: ex.Epoch, InferenceID: ex.InferenceID, Order: 0, FullJSON: json.RawMessage(`[]`), VisibleJSON: json.RawMessage(`null`), Provenance: `{}`}
 	saveProjection := func(visible ChatMessage, pending []string, hosts map[string]ChatMessage) error {
 		segment.FullJSON, _ = json.Marshal(transcript)
-		segment.VisibleJSON, _ = json.Marshal(visible)
+		segment.VisibleJSON, _ = json.Marshal(map[string]any{"managed_visible_version": 1, "message": visible})
 		segment.PendingClientIDs = pending
 		provenance, _ := json.Marshal(hosts)
 		segment.Provenance = string(provenance)
@@ -258,6 +276,37 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	// Managed history is durable and intentionally fails closed if prior anchors
 	// cannot be reconstructed. The first implementation stores each final turn.
 	generation := 0
+	transformActive := false
+	finishTransforms := func(reason string) error {
+		if !transformActive {
+			return nil
+		}
+		transformActive = false
+		return transforms.finishAttempt(ctx, reason)
+	}
+	defer func() { _ = finishTransforms("error") }()
+	publishProjection := func(projection []byte, pending []string, hosts map[string]ChatMessage, responseStatus int) bool {
+		visible, stored, err := applyManagedProjection(transforms, ctx, r, projection, clientStreaming)
+		if err != nil {
+			return reject("response_transform", "incompatible_projection")
+		}
+		if err = saveProjection(visible, pending, hosts); err != nil {
+			return fail(502, "operation_uncertain")
+		}
+		if err = finishTransforms("success"); err != nil {
+			return fail(502, "integration_unavailable")
+		}
+		if err = e.store.FinalizeManagedInference(segment, stored); err != nil {
+			return fail(502, "operation_uncertain")
+		}
+		if err = writeStoredManagedProjection(w, stored, clientStreaming); err != nil {
+			entry.Error = "integration_unavailable"
+		}
+		entry.Status = responseStatus
+		entry.Duration = DurationMs(time.Since(start))
+		e.logger.Record(entry)
+		return true
+	}
 	if len(recovery) > 0 {
 		transcript = append(transcript, recovery[:len(recovery)-1]...)
 		messages = append(messages, transcript...)
@@ -290,6 +339,24 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		innerReq.Header.Del("Authorization")
 		innerReq.Header.Del("X-API-Key")
 		innerReq.Header.Set("Content-Type", "application/json")
+		if err := finishTransforms("success"); err != nil {
+			return fail(502, "integration_unavailable")
+		}
+		transformActive = true
+		if err := transforms.beginAttempt(ctx, innerReq, generation); err != nil {
+			return fail(502, "integration_unavailable")
+		}
+		ctx.execution().CurrentFormat = "openai"
+		if len(recovery) == 0 {
+			transformedReq, transformedBody, err := ExecuteRequestPipeline(innerReq, body, ctx, transforms.RequestSteps)
+			if err != nil {
+				return reject("request_transform", "execution_failed")
+			}
+			if err = validateManagedRequestTransform(body, transformedBody, innerReq, transformedReq, ctx); err != nil {
+				return reject("request_transform", "semantic_change")
+			}
+			innerReq, body = transformedReq, transformedBody
+		}
 		var data []byte
 		responseStatus := http.StatusOK
 		if len(recovery) > 0 {
@@ -339,21 +406,8 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		}
 		if len(calls) == 0 {
 			transcript = append(transcript, message)
-			if err := saveProjection(message, nil, nil); err != nil {
-				return fail(502, "operation_uncertain")
-			}
-			messages = append(messages, message)
 			projection, _ := json.Marshal(root)
-			if err := e.store.FinalizeManagedInference(segment, projection); err != nil {
-				return fail(http.StatusBadGateway, "operation_uncertain")
-			}
-			if err := writeManagedProjection(w, projection, clientStreaming); err != nil {
-				entry.Error = "integration_unavailable"
-			}
-			entry.Status = responseStatus
-			entry.Duration = DurationMs(time.Since(start))
-			e.logger.Record(entry)
-			return true
+			return publishProjection(projection, nil, nil, responseStatus)
 		}
 		for _, call := range calls {
 			if r.Context().Err() != nil {
@@ -449,9 +503,6 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			for _, call := range clientCalls {
 				pending = append(pending, call.ID)
 			}
-			if err := saveProjection(projected, pending, hostResults); err != nil {
-				return fail(502, "operation_uncertain")
-			}
 			var outChoices []json.RawMessage
 			_ = json.Unmarshal(root["choices"], &outChoices)
 			choice := map[string]json.RawMessage{}
@@ -461,16 +512,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			outChoices[0], _ = json.Marshal(choice)
 			root["choices"], _ = json.Marshal(outChoices)
 			out, _ := json.Marshal(root)
-			if err := e.store.FinalizeManagedInference(segment, out); err != nil {
-				return fail(http.StatusBadGateway, "operation_uncertain")
-			}
-			if err := writeManagedProjection(w, out, clientStreaming); err != nil {
-				entry.Error = "integration_unavailable"
-			}
-			entry.Status = responseStatus
-			entry.Duration = DurationMs(time.Since(start))
-			e.logger.Record(entry)
-			return true
+			return publishProjection(out, pending, hostResults, responseStatus)
 		}
 		for _, call := range calls {
 			transcript = append(transcript, hostResults[call.ID])
@@ -484,7 +526,7 @@ func compatibleManagedSnapshot(a, b []byte) bool {
 	if json.Unmarshal(a, &old) != nil || json.Unmarshal(b, &current) != nil {
 		return false
 	}
-	for _, key := range []string{"plugin", "digest", "service", "tools", "binding", "config"} {
+	for _, key := range []string{"plugin", "digest", "service", "tools", "binding", "config", "transforms", "projection_version"} {
 		if len(old[key]) == 0 && len(current[key]) == 0 {
 			continue
 		}

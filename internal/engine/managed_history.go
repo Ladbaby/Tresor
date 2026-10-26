@@ -50,7 +50,7 @@ func reconstructManaged(messages []ChatMessage, segments []store.ManagedSegment,
 		match := -1
 		for i := position; i < len(messages); i++ {
 			raw, _ := json.Marshal(messages[i])
-			if semanticEqual(raw, seg.VisibleJSON) {
+			if managedAnchorEqual(raw, seg.VisibleJSON) {
 				if match != -1 {
 					return nil, fmt.Errorf("continuation_mismatch: ambiguous anchor")
 				}
@@ -125,6 +125,63 @@ func reconstructManaged(messages []ChatMessage, segments []store.ManagedSegment,
 	}
 	out = append(out, messages[position:]...)
 	return out, nil
+}
+
+func managedAnchorEqual(actual, expected []byte) bool {
+	var got, want ChatMessage
+	if json.Unmarshal(actual, &got) != nil || json.Unmarshal(expected, &want) != nil {
+		return false
+	}
+	if version, ok := want["managed_visible_version"]; ok {
+		var message ChatMessage
+		if string(version) != "1" || json.Unmarshal(want["message"], &message) != nil {
+			return false
+		}
+		want = message
+	} else {
+		// Legacy anchors included provider-private fields rather than a final projection.
+		delete(got, "reasoning")
+		delete(got, "reasoning_content")
+		delete(want, "reasoning")
+		delete(want, "reasoning_content")
+	}
+	// Tool-only turns use null, omitted, or empty content across OpenAI clients.
+	// Never normalize nonempty assistant text or tool identity.
+	for _, message := range []ChatMessage{got, want} {
+		if raw, ok := message["content"]; !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || bytes.Equal(bytes.TrimSpace(raw), []byte(`""`)) {
+			delete(message, "content")
+		}
+		if raw, ok := message["tool_calls"]; ok {
+			var calls []map[string]json.RawMessage
+			if json.Unmarshal(raw, &calls) != nil {
+				return false
+			}
+			for _, call := range calls {
+				var fn map[string]json.RawMessage
+				if json.Unmarshal(call["function"], &fn) != nil {
+					return false
+				}
+				var args string
+				if json.Unmarshal(fn["arguments"], &args) != nil {
+					return false
+				}
+				canonical, err := canonicalJSON([]byte(args))
+				if err != nil {
+					return false
+				}
+				fn["arguments"], _ = json.Marshal(string(canonical))
+				call["function"], _ = json.Marshal(fn)
+			}
+			message["tool_calls"], _ = json.Marshal(calls)
+		}
+	}
+	return semanticEqualMessage(got, want)
+}
+
+func semanticEqualMessage(a, b ChatMessage) bool {
+	ax, e1 := json.Marshal(a)
+	by, e2 := json.Marshal(b)
+	return e1 == nil && e2 == nil && semanticEqual(ax, by)
 }
 
 func semanticEqual(a, b []byte) bool {

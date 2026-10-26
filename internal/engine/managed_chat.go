@@ -93,14 +93,26 @@ func ParseManagedChatRequest(data []byte) (ChatRequest, error) {
 	return ChatRequest{Raw: raw, Messages: messages, Model: model}, nil
 }
 
+// textualReasoning permits plain text only, never structured provider state.
+func textualReasoning(key string, value json.RawMessage) bool {
+	if key != "reasoning" && key != "reasoning_content" {
+		return false
+	}
+	if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return true
+	}
+	var text string
+	return json.Unmarshal(value, &text) == nil
+}
+
 func hasOpaque(m map[string]json.RawMessage) bool {
 	for k, v := range m {
 		lk := strings.ToLower(k)
+		if textualReasoning(k, v) {
+			continue
+		}
 		if strings.Contains(lk, "reasoning") || lk == "encrypted_content" || lk == "opaque_state" || lk == "state" {
 			return true
-		}
-		if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
-			continue
 		}
 	}
 	return false
@@ -206,7 +218,7 @@ func ProjectAssistantMessage(message ChatMessage, hostNames []string) (ChatMessa
 	}
 	out := ChatMessage{}
 	for k, v := range message {
-		if strings.Contains(strings.ToLower(k), "reasoning") || k == "encrypted_content" || k == "opaque_state" || k == "state" {
+		if hasOpaque(map[string]json.RawMessage{k: v}) {
 			continue
 		}
 		out[k] = append(json.RawMessage(nil), v...)
@@ -294,6 +306,22 @@ func collectManagedSSE(reader io.Reader) ([]byte, error) {
 		choice := chunk.Choices[0]
 		if hasOpaque(choice.Delta) {
 			return nil, ErrManagedChat
+		}
+		for _, key := range []string{"reasoning", "reasoning_content"} {
+			if raw, ok := choice.Delta[key]; ok {
+				if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+					if _, exists := message[key]; !exists {
+						message[key] = nil
+					}
+					continue
+				}
+				var text string
+				if json.Unmarshal(raw, &text) != nil {
+					return nil, ErrManagedChat
+				}
+				previous, _ := message[key].(string)
+				message[key] = previous + text
+			}
 		}
 		if choice.Finish != nil {
 			finish = *choice.Finish
