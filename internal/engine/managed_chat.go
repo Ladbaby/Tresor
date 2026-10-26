@@ -13,6 +13,38 @@ import (
 
 var ErrManagedChat = errors.New("invalid managed Chat transcript")
 
+// managedValidationReason is an allowlisted diagnostic, never provider text.
+type managedValidationReason string
+
+func managedReason(err error) managedValidationReason {
+	if err == nil || !errors.Is(err, ErrManagedChat) {
+		return "validation_failed"
+	}
+	// Match complete known errors, not substrings that could contain provider data.
+	for message, reason := range map[string]managedValidationReason{
+		"request JSON object required":            "request_object_required",
+		"opaque reasoning/state unsupported":      "opaque_state_unsupported",
+		"messages required":                       "messages_required",
+		"one choice required":                     "single_choice_required",
+		"unsupported legacy or linked state":      "legacy_state_unsupported",
+		"malformed tool calls":                    "malformed_tool_calls",
+		"too many tool calls":                     "too_many_tool_calls",
+		"empty or duplicate tool call ID":         "invalid_tool_call_id",
+		"function arguments must be encoded JSON": "invalid_function_encoding",
+		"tool arguments must be a JSON object":    "tool_arguments_object_required",
+		"response object required":                "response_object_required",
+		"exactly one response choice required":    "response_single_choice_required",
+		"response message required":               "response_message_required",
+		"invalid or opaque message":               "invalid_or_opaque_message",
+		"assistant response required":             "assistant_role_required",
+	} {
+		if err.Error() == ErrManagedChat.Error()+": "+message {
+			return reason
+		}
+	}
+	return "validation_failed"
+}
+
 // ChatMessage preserves provider/client fields not interpreted by the codec.
 type ChatMessage map[string]json.RawMessage
 

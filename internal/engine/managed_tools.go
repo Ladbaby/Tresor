@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,8 +30,15 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	fail := func(status int, code string) bool {
 		integrationError(w, status, code)
 		entry.Status, entry.Error, entry.Duration = status, code, DurationMs(time.Since(start))
+		if entry.Diagnostic != "" {
+			log.Printf("managed inference rejected: %s", entry.Diagnostic)
+		}
 		e.logger.Record(entry)
 		return true
+	}
+	reject := func(stage string, reason managedValidationReason) bool {
+		entry.Diagnostic = stage + ":" + string(reason)
+		return fail(http.StatusBadGateway, "unsupported_managed_route")
 	}
 	if ex == nil || s == nil || ex.Service != owner.executionService(decision.Service) || ex.AliasID == "" || !s.allows(owner, decision.Service, integrations.ExecuteTool) || s.serviceFor(owner, decision.Service) == nil {
 		return fail(http.StatusUnauthorized, "execution_unauthorized")
@@ -65,9 +73,11 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		return fail(401, "execution_unauthorized")
 	}
 	if r.Method != http.MethodPost || (r.URL.Path != "/v1/chat/completions" && r.URL.Path != "/chat/completions") || decision.Codec != "openai-chat.v1" {
+		entry.Diagnostic = "route:unsupported_method_path_or_codec"
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
 	if result.ds == nil || !containsFormat(result.ds.ApiFormats, "openai") {
+		entry.Diagnostic = "route:openai_downstream_required"
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
 	// Until transforms explicitly declare transcript compatibility, reject the
@@ -75,11 +85,13 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	if pipeline != nil {
 		for _, p := range pipeline.ExternalSteps {
 			if p.runtime.HasHook("request") || p.runtime.HasHook("response") || p.runtime.HasHook("streamStart") || p.runtime.HasHook("streamEvent") || p.runtime.HasHook("streamEnd") || p.runtime.HasHook("upstreamStart") || p.runtime.HasHook("upstreamEvent") || p.runtime.HasHook("upstreamEnd") {
+				entry.Diagnostic = "route:incompatible_pipeline_hooks"
 				return fail(http.StatusBadRequest, "unsupported_managed_route")
 			}
 		}
 	}
 	if len(result.originalBody) == 0 {
+		entry.Diagnostic = "request:empty_body"
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
 	clientStreaming := isStreamRequest(result.originalBody)
@@ -89,6 +101,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	}
 	request, err := ParseManagedChatRequest(result.originalBody)
 	if err != nil {
+		entry.Diagnostic = "request_validation:" + string(managedReason(err))
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
 	clientNames := make([]string, 0)
@@ -110,6 +123,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	}
 	canonical, err := canonicalJSON(result.originalBody)
 	if err != nil {
+		entry.Diagnostic = "request:canonicalization_failed"
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
 	route, _ := json.Marshal(map[string]any{"downstream": result.ds.ID, "model": result.resolvedModel, "codec": decision.Codec})
@@ -224,12 +238,14 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	var allTools []json.RawMessage
 	if raw := request.Raw["tools"]; len(raw) > 0 {
 		if json.Unmarshal(raw, &allTools) != nil {
+			entry.Diagnostic = "request:malformed_tools"
 			return fail(400, "unsupported_managed_route")
 		}
 	}
 	for _, tool := range decision.Tools {
 		raw, marshalErr := json.Marshal(map[string]any{"type": "function", "function": map[string]any{"name": tool.Name, "description": tool.Description, "parameters": tool.Parameters}})
 		if marshalErr != nil {
+			entry.Diagnostic = "request:host_tool_encoding_failed"
 			return fail(400, "unsupported_managed_route")
 		}
 		allTools = append(allTools, raw)
@@ -309,7 +325,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			return fail(401, "execution_stale")
 		}
 		if _, err := ValidateOneChoiceResponse(data); err != nil {
-			return fail(http.StatusBadGateway, "unsupported_managed_route")
+			return reject("response_validation", managedReason(err))
 		}
 		var root map[string]json.RawMessage
 		_ = json.Unmarshal(data, &root)
@@ -319,7 +335,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		_ = json.Unmarshal(choices[0]["message"], &message)
 		calls, err := ParseToolCalls(message, hostNames)
 		if err != nil {
-			return fail(http.StatusBadGateway, "unsupported_managed_route")
+			return reject("tool_calls", managedReason(err))
 		}
 		if len(calls) == 0 {
 			transcript = append(transcript, message)
@@ -354,7 +370,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 					}
 				}
 				if !declared {
-					return fail(502, "unsupported_managed_route")
+					return reject("tool_ownership", "undeclared_tool")
 				}
 			}
 		}
@@ -379,7 +395,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			}
 			arg, argErr := canonicalJSON([]byte(call.Arguments))
 			if argErr != nil {
-				return fail(502, "unsupported_managed_route")
+				return reject("host_arguments", "canonicalization_failed")
 			}
 			identity, _ := json.Marshal([]any{ex.ExecutionID, ex.Epoch, ex.InferenceID, generation, call.ID, json.RawMessage(arg)})
 			sum := sha256.Sum256(identity)
@@ -427,7 +443,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		if len(clientCalls) > 0 {
 			projected, _, projectionErr := ProjectAssistantMessage(message, hostNames)
 			if projectionErr != nil {
-				return fail(502, "unsupported_managed_route")
+				return reject("projection", managedReason(projectionErr))
 			}
 			pending := []string{}
 			for _, call := range clientCalls {

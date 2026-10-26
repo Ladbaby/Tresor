@@ -72,6 +72,7 @@ type RequestLogEntry struct {
 	ClientIP       string     `json:"client_ip,omitempty"`
 	Status         int        `json:"status"`
 	Duration       DurationMs `json:"duration"`
+	Diagnostic     string     `json:"diagnostic,omitempty"`
 	Error          string     `json:"error,omitempty"`
 	Level          string     `json:"level,omitempty"`
 	Message        string     `json:"message,omitempty"`
