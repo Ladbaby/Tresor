@@ -210,6 +210,13 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		return fail(ge.status, "integration_unavailable")
 	}
 	ctx.DownstreamFormat = "openai"
+	// Decode speed is measured only for streaming clients (the downstream is
+	// then streamed too). Reset per generation below so the window reflects the
+	// final visible generation rather than folding in tool-execution time.
+	if e.payloadStore != nil && clientStreaming {
+		ctx.decode = &decodeMeasurement{format: "openai"}
+	}
+	defer func() { ctx.decode.finalize(entry) }()
 	historySegments := []store.ManagedSegment{}
 	for _, seg := range prior {
 		if seg.InferenceID != ex.InferenceID {
@@ -341,7 +348,15 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		mb, _ := json.Marshal(messages)
 		bodyMap["messages"] = mb
 		bodyMap["model"], _ = json.Marshal(result.resolvedModel)
-		bodyMap["stream"] = json.RawMessage("false")
+		// Stream the downstream only when the client itself is streaming, so a
+		// real decode measurement is possible. A non-streaming client keeps the
+		// buffered path and decode stays unavailable (matching the normal path).
+		if clientStreaming {
+			bodyMap["stream"] = json.RawMessage("true")
+			bodyMap["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+		} else {
+			bodyMap["stream"] = json.RawMessage("false")
+		}
 		body, _ := json.Marshal(bodyMap)
 		innerReq := r.Clone(r.Context())
 		innerReq.Header = r.Header.Clone()
@@ -379,6 +394,11 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			if trace != nil {
 				trace.add(inspect.Event{Kind: "generation_request", Generation: generation + 1, ContentType: innerReq.Header.Get("Content-Type"), Body: string(body)})
 			}
+			// Reset the decode window for this generation so only the final
+			// visible generation's rate is reported.
+			if e.payloadStore != nil && clientStreaming {
+				ctx.decode = &decodeMeasurement{format: "openai"}
+			}
 			resp, cancel, err := e.forwardRequest(innerReq, body, ctx)
 			if err != nil {
 				cancel()
@@ -391,7 +411,9 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			}
 			var readErr error
 			if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-				data, readErr = collectManagedSSE(resp.Body)
+				data, readErr = collectManagedSSE(resp.Body, func(d []byte) {
+					ctx.observeDecodeEvent(SSEChunk{Data: d}, time.Now())
+				})
 			} else {
 				data, readErr = io.ReadAll(io.LimitReader(resp.Body, externalCollectionLimit+1))
 			}

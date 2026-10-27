@@ -22,7 +22,7 @@ func validateManagedRequestTransform(before, after []byte, beforeReq, afterReq *
 	if json.Unmarshal(before, &a) != nil || json.Unmarshal(after, &b) != nil {
 		return contractError("managed_transform", "invalid_json")
 	}
-	if a["model"] != b["model"] || a["stream"] != false || b["stream"] != false {
+	if a["model"] != b["model"] || !reflect.DeepEqual(a["stream"], b["stream"]) || !reflect.DeepEqual(a["stream_options"], b["stream_options"]) {
 		return contractError("managed_transform", "route")
 	}
 	allowed := map[string]bool{"temperature": true, "top_p": true, "presence_penalty": true, "frequency_penalty": true, "seed": true, "max_tokens": true, "max_completion_tokens": true, "stop": true, "logit_bias": true, "user": true, "metadata": true, "service_tier": true}
@@ -30,7 +30,7 @@ func validateManagedRequestTransform(before, after []byte, beforeReq, afterReq *
 		if k == "messages" {
 			continue
 		}
-		if k == "tools" || k == "tool_choice" || k == "parallel_tool_calls" || k == "n" || !allowed[k] {
+		if k == "tools" || k == "tool_choice" || k == "parallel_tool_calls" || k == "n" || k == "stream" || k == "stream_options" || !allowed[k] {
 			if !reflect.DeepEqual(v, b[k]) {
 				return contractError("managed_transform", "protected_field")
 			}

@@ -247,7 +247,7 @@ func ProjectAssistantMessage(message ChatMessage, hostNames []string) (ChatMessa
 }
 
 // collectManagedSSE buffers a complete native Chat generation before effects.
-func collectManagedSSE(reader io.Reader) ([]byte, error) {
+func collectManagedSSE(reader io.Reader, observe func([]byte)) ([]byte, error) {
 	scanner := bufio.NewScanner(io.LimitReader(reader, externalCollectionLimit+1))
 	scanner.Buffer(make([]byte, 4096), externalValueLimit)
 	root := map[string]any{}
@@ -268,6 +268,11 @@ func collectManagedSSE(reader io.Reader) ([]byte, error) {
 			continue
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		// Observe every data payload (including the terminal [DONE]) so the
+		// decode measurement sees the full stream window and usage.
+		if observe != nil {
+			observe([]byte(data))
+		}
 		if data == "[DONE]" {
 			done = true
 			break
