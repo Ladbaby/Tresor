@@ -95,7 +95,7 @@ func ParseManagedChatRequest(data []byte) (ChatRequest, error) {
 
 // textualReasoning permits plain text only, never structured provider state.
 func textualReasoning(key string, value json.RawMessage) bool {
-	if key != "reasoning" && key != "reasoning_content" {
+	if key != "reasoning" && key != "reasoning_content" && key != "name" {
 		return false
 	}
 	if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
