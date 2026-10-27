@@ -16,6 +16,7 @@ type decodeMeasurement struct {
 	streamed, terminal, failed bool
 	unavailable                string
 	usage                      *UsageBlock
+	reasoningTokens            int64
 }
 
 func (ctx *PipelineContext) observeDecodeEvent(event SSEChunk, at time.Time) {
@@ -62,9 +63,20 @@ func (d *decodeMeasurement) observe(event SSEChunk, at time.Time) {
 				}
 			}
 		}
-		// Summaries do not expose the hidden reasoning-token stream. Gemini's
-		// candidate count excludes thoughts but their time window cannot be separated.
-		if asInt64(object(raw["output_tokens_details"])["reasoning_tokens"]) > 0 || asInt64(object(raw["completion_tokens_details"])["reasoning_tokens"]) > 0 || asInt64(raw["thoughtsTokenCount"]) > 0 {
+		// OpenAI output totals include hidden reasoning. Their separately
+		// reported count is excluded from the visible text/tool delta window.
+		for _, key := range []string{"output_tokens_details", "completion_tokens_details"} {
+			if value, exists := object(raw[key])["reasoning_tokens"]; exists {
+				n, valid := value.(float64)
+				if !valid || n < 0 || math.Trunc(n) != n || n >= float64(math.MaxInt64) {
+					d.unavailable = "invalid_output_usage"
+				} else {
+					d.reasoningTokens = int64(n)
+				}
+			}
+		}
+		// Gemini candidate counts already exclude thoughts.
+		if asInt64(raw["thoughtsTokenCount"]) > 0 {
 			d.unavailable = "unobserved_output_tokens"
 		}
 	}
@@ -82,7 +94,7 @@ func (d *decodeMeasurement) observe(event SSEChunk, at time.Time) {
 		for _, v := range choices {
 			c := object(v)
 			delta := object(c["delta"])
-			for _, k := range []string{"content", "refusal", "reasoning_content", "reasoning", "reasoning_text"} {
+			for _, k := range []string{"content", "refusal"} {
 				if outputString(delta[k]) {
 					positive = true
 				}
@@ -110,10 +122,10 @@ func (d *decodeMeasurement) observe(event SSEChunk, at time.Time) {
 			typ = event.EventType
 		}
 		switch typ {
-		case "response.output_text.delta", "response.refusal.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta", "response.reasoning_text.delta":
+		case "response.output_text.delta", "response.refusal.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 			positive = outputString(doc["delta"])
-		case "response.reasoning_summary_text.delta":
-			d.unavailable = "unobserved_output_tokens"
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			// Reasoning and summaries are not visible answer/tool output.
 		case "response.completed":
 			d.terminal = true
 		case "response.failed", "response.incomplete":
@@ -203,6 +215,10 @@ func (d *decodeMeasurement) finalize(entry *RequestLogEntry) {
 		reason = d.unavailable
 	case d.usage == nil || d.usage.OutputTokens == nil || *d.usage.OutputTokens <= 0:
 		reason = "missing_output_usage"
+	case d.reasoningTokens > *d.usage.OutputTokens:
+		reason = "invalid_output_usage"
+	case d.reasoningTokens == *d.usage.OutputTokens:
+		reason = "missing_output_usage"
 	case !d.terminal:
 		reason = "missing_terminal_marker"
 	case d.events < 2 || !d.last.After(d.first):
@@ -212,7 +228,7 @@ func (d *decodeMeasurement) finalize(entry *RequestLogEntry) {
 	if reason != "" {
 		return
 	}
-	tokens := *d.usage.OutputTokens
+	tokens := *d.usage.OutputTokens - d.reasoningTokens
 	entry.decodeDurationNS = int64(d.last.Sub(d.first))
 	duration := float64(entry.decodeDurationNS) / float64(time.Millisecond)
 	speed := float64(tokens) * 1000 / duration
