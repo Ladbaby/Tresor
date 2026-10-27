@@ -59,25 +59,27 @@ func (d *DurationMs) UnmarshalJSON(data []byte) error {
 
 // RequestLogEntry captures a single gateway request.
 type RequestLogEntry struct {
-	ID             int        `json:"id"`
-	Timestamp      time.Time  `json:"timestamp"`
-	Method         string     `json:"method"`
-	Path           string     `json:"path"`
-	Model          string     `json:"model"`
-	ResolvedModel  string     `json:"resolved_model,omitempty"`
-	DownstreamID   string     `json:"downstream_id"`
-	DownstreamName string     `json:"downstream_name"`
-	AliasGroup     string     `json:"alias_group,omitempty"`
-	RuleIDs        []string   `json:"rule_ids,omitempty"`
-	ClientIP       string     `json:"client_ip,omitempty"`
-	Status         int        `json:"status"`
-	Duration       DurationMs `json:"duration"`
-	Diagnostic     string     `json:"diagnostic,omitempty"`
-	Error          string     `json:"error,omitempty"`
-	Level          string     `json:"level,omitempty"`
-	Message        string     `json:"message,omitempty"`
-	deferRecord    bool
-	capture        *pendingCapture
+	ID                 int        `json:"id"`
+	Timestamp          time.Time  `json:"timestamp"`
+	Method             string     `json:"method"`
+	Path               string     `json:"path"`
+	Model              string     `json:"model"`
+	ResolvedModel      string     `json:"resolved_model,omitempty"`
+	DownstreamID       string     `json:"downstream_id"`
+	DownstreamName     string     `json:"downstream_name"`
+	AliasGroup         string     `json:"alias_group,omitempty"`
+	RuleIDs            []string   `json:"rule_ids,omitempty"`
+	ClientIP           string     `json:"client_ip,omitempty"`
+	Status             int        `json:"status"`
+	Duration           DurationMs `json:"duration"`
+	Diagnostic         string     `json:"diagnostic,omitempty"`
+	Error              string     `json:"error,omitempty"`
+	Level              string     `json:"level,omitempty"`
+	Message            string     `json:"message,omitempty"`
+	UsageScope         string     `json:"usage_scope,omitempty"`
+	deferRecord        bool
+	capture            *pendingCapture
+	integrationCapture *integrationCapture
 
 	// Usage is a sparse accumulation of the request's prompt/output
 	// token counts, intentionally shaped the same way as the inspect

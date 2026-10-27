@@ -148,7 +148,9 @@ func (s *integrationSnapshot) allows(p *ExternalPlugin, service string, op integ
 
 // prepareIntegration runs read-only declarations on original client-format input.
 // It collects all claims before invoking a service or forwarding to a provider.
-func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, result *modelResult, pipeline *Pipeline, entry *RequestLogEntry, start time.Time) bool {
+func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, result *modelResult, pipeline *Pipeline, entry *RequestLogEntry, start time.Time) (handled bool) {
+	finishCapture := e.beginIntegrationCapture(w, r, result, entry)
+	defer func() { finishCapture(handled) }()
 	var participants []*ExternalPlugin
 	seen := map[string]bool{}
 	for _, p := range pipeline.ExternalSteps {
@@ -168,6 +170,7 @@ func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, res
 	if len(participants) == 0 {
 		if executionFromRequest(r) != nil {
 			integrationError(w, 401, "execution_unauthorized")
+			entry.Status, entry.Error, entry.Duration = 401, "execution_unauthorized", DurationMs(time.Since(start))
 			return true
 		}
 		return false
@@ -357,6 +360,12 @@ func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, res
 	w.Header().Set("Content-Type", contentType)
 	if id := response.Header.Get("X-Tresor-Task-ID"); id != "" && len(id) <= 256 && !strings.ContainsAny(id, "\r\n\x00") {
 		w.Header().Set("X-Tresor-Task-ID", id)
+		if c := entry.integrationCapture; c != nil {
+			c.taskID = id
+		}
+	}
+	if id := response.Header.Get("X-TresorBot-Session-ID"); id != "" && len(id) <= 256 && !strings.ContainsAny(id, "\r\n\x00") {
+		w.Header().Set("X-TresorBot-Session-ID", id)
 	}
 	if contentType == "application/json" {
 		if !json.Valid(data) {

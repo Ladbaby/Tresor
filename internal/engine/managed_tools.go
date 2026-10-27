@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"tresor/internal/inspect"
 	"tresor/internal/integrations"
 	"tresor/internal/jsplugins"
 	"tresor/internal/store"
@@ -27,6 +28,7 @@ type managedExecutionLock struct {
 func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, result *modelResult, pipeline *Pipeline, owner *ExternalPlugin, decision jsplugins.Decision, entry *RequestLogEntry, start time.Time) bool {
 	s := e.requestIntegrationState(r)
 	ex := executionFromRequest(r)
+	trace := entry.integrationCapture
 	fail := func(status int, code string) bool {
 		integrationError(w, status, code)
 		entry.Status, entry.Error, entry.Duration = status, code, DurationMs(time.Since(start))
@@ -188,6 +190,9 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		if stored == nil || stored.Status != "complete" || len(stored.Response) == 0 {
 			return fail(http.StatusConflict, "operation_uncertain")
 		}
+		if trace != nil {
+			trace.projection("replay", 0, stored.Response, true)
+		}
 		if err := writeStoredManagedProjection(w, stored.Response, clientStreaming); err != nil {
 			entry.Error = "integration_unavailable"
 		}
@@ -299,6 +304,9 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		if err = e.store.FinalizeManagedInference(segment, stored); err != nil {
 			return fail(502, "operation_uncertain")
 		}
+		if trace != nil {
+			trace.projection("projection", generation+1, stored, false)
+		}
 		if err = writeStoredManagedProjection(w, stored, clientStreaming); err != nil {
 			entry.Error = "integration_unavailable"
 		}
@@ -362,12 +370,23 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		if len(recovery) > 0 {
 			message := recovery[len(recovery)-1]
 			data, _ = json.Marshal(map[string]any{"choices": []any{map[string]any{"message": message, "index": 0, "finish_reason": "tool_calls"}}})
+			if trace != nil {
+				trace.add(inspect.Event{Kind: "recovery", Generation: generation + 1, Replayed: true, ContentType: "application/json", Body: string(data)})
+			}
 			recovery = nil
 		} else {
+			if trace != nil {
+				trace.add(inspect.Event{Kind: "generation_request", Generation: generation + 1, ContentType: innerReq.Header.Get("Content-Type"), Body: string(body)})
+			}
 			resp, cancel, err := e.forwardRequest(innerReq, body, ctx)
 			if err != nil {
 				cancel()
 				return fail(http.StatusBadGateway, "integration_unavailable")
+			}
+			var raw *boundedResponseCapture
+			if trace != nil {
+				raw = &boundedResponseCapture{}
+				resp.Body = &captureReadCloser{Reader: io.TeeReader(resp.Body, raw), Closer: resp.Body}
 			}
 			var readErr error
 			if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
@@ -377,11 +396,23 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			}
 			resp.Body.Close()
 			cancel()
+			if trace != nil {
+				event := inspect.Event{Kind: "generation_response", Generation: generation + 1, Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: string(raw.Bytes()), Truncated: raw.truncated}
+				if readErr != nil {
+					event.Error = "response_read_failed"
+				}
+				trace.add(event)
+			}
 			if readErr != nil || len(data) > externalCollectionLimit {
 				return fail(http.StatusBadGateway, "integration_unavailable")
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				return fail(http.StatusBadGateway, "integration_unavailable")
+			}
+			if trace != nil {
+				if usage, ok := UsageFromResponseBody(data); ok {
+					accumulateManagedUsage(entry, usage)
+				}
 			}
 			responseStatus = resp.StatusCode
 		}
@@ -447,6 +478,9 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 				clientCalls = append(clientCalls, call)
 				continue
 			}
+			if trace != nil {
+				trace.add(inspect.Event{Kind: "tool_call", Generation: generation + 1, ToolName: call.Name, CallID: call.ID, ContentType: "application/json", Body: string(call.Arguments)})
+			}
 			arg, argErr := canonicalJSON([]byte(call.Arguments))
 			if argErr != nil {
 				return reject("host_arguments", "canonicalization_failed")
@@ -463,6 +497,9 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 				if json.Unmarshal(ledger.Result, &cached) != nil {
 					return fail(502, "operation_uncertain")
 				}
+				if trace != nil {
+					trace.add(inspect.Event{Kind: "tool_result", Generation: generation + 1, ToolName: call.Name, CallID: call.ID, Replayed: true, ContentType: "application/json", Body: string(ledger.Result)})
+				}
 				messages = append(messages, cached)
 				hostResults[call.ID] = cached
 				continue
@@ -476,6 +513,16 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			}
 			payload := map[string]any{"execution": ex, "operation_id": opID, "tool": tool.Name, "arguments": json.RawMessage(call.Arguments), "reconcile": !fresh}
 			serviceResp, resultBytes, err := s.serviceFor(owner, decision.Service).Do(r.Context(), integrations.ExecuteTool, payload)
+			if trace != nil {
+				event := inspect.Event{Kind: "tool_result", Generation: generation + 1, ToolName: call.Name, CallID: call.ID, ContentType: "application/json", Body: string(resultBytes)}
+				if serviceResp != nil {
+					event.Status = serviceResp.StatusCode
+				}
+				if err != nil {
+					event.Error = "service_unavailable"
+				}
+				trace.add(event)
+			}
 			// A valid versioned 4xx tool response is a domain outcome, not ambiguous IO.
 			if err != nil || serviceResp == nil || serviceResp.StatusCode >= 500 || serviceResp.StatusCode < 200 || serviceResp.StatusCode >= 300 && serviceResp.StatusCode < 400 {
 				_ = e.store.CompleteManagedToolCall(ex.ExecutionID, ex.InferenceID, call.ID, ex.Epoch, generation, "uncertain", nil, "service unavailable")

@@ -196,21 +196,19 @@ func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, resu
 		return
 	}
 
-	if e.prepareIntegration(cw, r, result, &pipeline, entry, start) {
-		return
-	}
-
-	// Collect rule IDs for logging
+	// Populate routing metadata before integration dispatch, which may handle the
+	// request without entering ordinary downstream forwarding.
+	entry.DownstreamID, entry.DownstreamName = result.ds.ID, result.ds.Name
 	if len(rules) > 0 {
 		entry.RuleIDs = make([]string, len(rules))
 		for i, rule := range rules {
 			entry.RuleIDs[i] = rule.ID
 		}
 	}
+	if e.prepareIntegration(cw, r, result, &pipeline, entry, start) {
+		return
+	}
 
-	// Populate downstream info for request logging.
-	entry.DownstreamID = result.ds.ID
-	entry.DownstreamName = result.ds.Name
 	ctx, ge := e.prepareDownstreamContext(r, result, inputFormat)
 	if ge != nil {
 		for _, p := range pipeline.ExternalSteps {

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"tresor/internal/inspect"
 	"tresor/internal/store"
@@ -35,9 +36,9 @@ type captureReadCloser struct {
 // the inspector store is attached, snapshots the pre-transformer body
 // bytes into the payload store keyed by the same id.
 //
-// Pre-transformer capture is the inspector's whole point: what the UI
-// shows is the wire bytes the client sent and the wire bytes the
-// downstream returned, with no plugin transformation visible.
+// For ordinary forwarding the pair contains pre-transformer client/upstream
+// bytes. Integration routes instead pair the original client request with the
+// actual client-facing projection; their Flow retains internal upstream bytes.
 //
 // requestFormat and downstreamFormat are the API formats of the
 // incoming request body and the downstream response body, respectively.
@@ -47,9 +48,12 @@ type captureReadCloser struct {
 // the response shape.
 func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []byte, reqCT, respCT string, truncResp bool, requestFormat, downstreamFormat string) {
 	if entry.deferRecord {
-		entry.capture = &pendingCapture{append([]byte(nil), reqBody...), append([]byte(nil), respBody...), reqCT, respCT, truncResp, requestFormat, downstreamFormat}
+		entry.capture = &pendingCapture{request: append([]byte(nil), reqBody...), response: append([]byte(nil), respBody...), requestType: reqCT, responseType: respCT, truncated: truncResp, requestFormat: requestFormat, downstreamFormat: downstreamFormat, integration: entry.integrationCapture}
+		entry.integrationCapture = nil
 		return
 	}
+	c := entry.integrationCapture
+	entry.integrationCapture = nil
 	e.logger.Record(entry)
 
 	// Persist usage stats — only when payload capture is enabled and usage
@@ -61,7 +65,9 @@ func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []by
 	// N fsyncs per N requests, wearing SSDs and adding tail latency),
 	// we append to an in-memory buffer that the background flusher
 	// drains in a single bulk transaction every statsFlushInterval.
-	if e.payloadStore != nil && entry.Usage != nil && e.store != nil {
+	// Task summaries repeat usage attributed to their underlying generations;
+	// expose them in the inspector without counting another model generation.
+	if e.payloadStore != nil && entry.Usage != nil && e.store != nil && entry.UsageScope != "task" {
 		var input, output, cacheCreation, cacheRead int64
 		if entry.Usage.InputTokens != nil {
 			input = *entry.Usage.InputTokens
@@ -101,7 +107,7 @@ func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []by
 	if e.payloadStore == nil {
 		return
 	}
-	e.payloadStore.Add(inspect.Entry{
+	captured := inspect.Entry{
 		ID:                  entry.ID,
 		Timestamp:           entry.Timestamp,
 		Path:                entry.Path,
@@ -121,5 +127,15 @@ func (e *Engine) recordAndCapture(entry *RequestLogEntry, reqBody, respBody []by
 		DownstreamFormat:    downstreamFormat,
 		DecodeTokens:        entry.DecodeTokens, DecodeDurationMS: entry.DecodeDurationMS,
 		DecodeTokensPerSecond: entry.DecodeTokensPerSecond, DecodeUnavailableReason: entry.DecodeUnavailableReason,
-	})
+	}
+	if entry.Usage != nil {
+		captured.Usage, _ = json.Marshal(entry.Usage)
+	}
+	captured.UsageScope = entry.UsageScope
+	if c != nil {
+		captured.Flow, captured.FlowTruncated = c.events, c.truncated
+		captured.TaskID, captured.ExecutionID, captured.InferenceID = c.taskID, c.executionID, c.inferenceID
+	}
+	e.payloadStore.Add(captured)
+	entry.integrationCapture = nil
 }

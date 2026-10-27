@@ -411,6 +411,8 @@ func (r *Router) handleLogInspect(w http.ResponseWriter, req *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, inspectResponse{
+		Usage: entry.Usage, UsageScope: entry.UsageScope,
+		Flow: entry.Flow, FlowTruncated: entry.FlowTruncated, TaskID: entry.TaskID, ExecutionID: entry.ExecutionID, InferenceID: entry.InferenceID,
 		ID:                      entry.ID,
 		Timestamp:               entry.Timestamp.UTC().Format(time.RFC3339Nano),
 		Path:                    entry.Path,
@@ -446,16 +448,23 @@ type inspectBody struct {
 }
 
 type inspectResponse struct {
-	ID             int    `json:"id"`
-	Timestamp      string `json:"timestamp"`
-	Path           string `json:"path"`
-	Method         string `json:"method"`
-	Model          string `json:"model,omitempty"`
-	ResolvedModel  string `json:"resolved_model,omitempty"`
-	DownstreamID   string `json:"downstream_id,omitempty"`
-	DownstreamName string `json:"downstream_name,omitempty"`
-	ClientIP       string `json:"client_ip,omitempty"`
-	Status         int    `json:"status"`
+	Usage          json.RawMessage `json:"usage,omitempty"`
+	UsageScope     string          `json:"usage_scope,omitempty"`
+	Flow           []inspect.Event `json:"flow,omitempty"`
+	FlowTruncated  bool            `json:"flow_truncated,omitempty"`
+	TaskID         string          `json:"task_id,omitempty"`
+	ExecutionID    string          `json:"execution_id,omitempty"`
+	InferenceID    string          `json:"inference_id,omitempty"`
+	ID             int             `json:"id"`
+	Timestamp      string          `json:"timestamp"`
+	Path           string          `json:"path"`
+	Method         string          `json:"method"`
+	Model          string          `json:"model,omitempty"`
+	ResolvedModel  string          `json:"resolved_model,omitempty"`
+	DownstreamID   string          `json:"downstream_id,omitempty"`
+	DownstreamName string          `json:"downstream_name,omitempty"`
+	ClientIP       string          `json:"client_ip,omitempty"`
+	Status         int             `json:"status"`
 	// RequestFormat is the API format of the client's incoming request
 	// (one of "openai", "anthropic", "openai_responses", "gemini", or "").
 	// The inspector UI uses it to pick the correct normaliser for the

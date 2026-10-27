@@ -5,6 +5,35 @@ import (
 	"testing"
 )
 
+func TestStoreFlowOwnershipAndByteEviction(t *testing.T) {
+	s := New(10)
+	original := Entry{Usage: []byte(`{"input_tokens":1}`), ID: 1, RequestBody: []byte("original"), Flow: []Event{{Kind: "tool_result", Body: "payload"}}}
+	size := entryBytes(&original)
+	s.maxBytes = size
+	s.Add(original)
+	original.RequestBody[0] = 'X'
+	original.Usage[0] = 'X'
+	original.Flow[0].Body = "mutated"
+	got, ok := s.Get(1)
+	if !ok || string(got.Usage) != `{"input_tokens":1}` || string(got.RequestBody) != "original" || got.Flow[0].Body != "payload" {
+		t.Fatalf("stored capture aliases caller: %+v", got)
+	}
+	got.RequestBody[0] = 'Y'
+	got.Usage[0] = 'Y'
+	got.Flow[0].Body = "changed"
+	again, _ := s.Get(1)
+	if string(again.Usage) != `{"input_tokens":1}` || string(again.RequestBody) != "original" || again.Flow[0].Body != "payload" {
+		t.Fatal("Get exposes mutable storage")
+	}
+	s.Add(Entry{ID: 2, ResponseBody: []byte("x")})
+	if _, ok := s.Get(1); ok {
+		t.Fatal("flow bytes did not count toward eviction")
+	}
+	if s.retainedBytes != 1 {
+		t.Fatalf("retained bytes=%d", s.retainedBytes)
+	}
+}
+
 // TestStore_AddAndGet verifies the basic put/get round-trip.
 func TestStore_AddAndGet(t *testing.T) {
 	s := New(10)
