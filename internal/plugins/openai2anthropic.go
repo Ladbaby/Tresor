@@ -78,6 +78,7 @@ type openAIChatRequest struct {
 	Tools               json.RawMessage     `json:"tools,omitempty"`
 	ToolChoice          json.RawMessage     `json:"tool_choice,omitempty"`
 	Stop                []string            `json:"stop,omitempty"`
+	ReasoningEffort     string              `json:"reasoning_effort,omitempty"`
 }
 
 // defaultAnthropicMaxTokens is the Anthropic max_tokens value Tresor injects
@@ -142,6 +143,12 @@ func (t *OpenAI2Anthropic) TransformRequest(req *http.Request, body []byte, ctx 
 	// Convert stop → stop_sequences
 	if len(openAIReq.Stop) > 0 {
 		anthropicReq["stop_sequences"] = openAIReq.Stop
+	}
+
+	// Convert reasoning_effort → thinking: "none" → disabled; a level →
+	// enabled with a budget; absent/empty → omit (Anthropic default).
+	if thinking := anthropicThinkingForLevel(normalizeThinkingLevel(openAIReq.ReasoningEffort)); thinking != nil {
+		anthropicReq["thinking"] = thinking
 	}
 
 	// Convert tool definitions: OpenAI → Anthropic format

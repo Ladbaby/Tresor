@@ -277,17 +277,11 @@ func (t *Anthropic2Gemini) TransformRequest(req *http.Request, body []byte, ctx 
 	if len(anth.StopSequences) > 0 {
 		genCfg["stopSequences"] = anth.StopSequences
 	}
-	if len(anth.Thinking) > 0 {
-		var thinking struct {
-			Type         string `json:"type"`
-			BudgetTokens int    `json:"budget_tokens"`
-		}
-		if err := json.Unmarshal(anth.Thinking, &thinking); err == nil && thinking.Type == "enabled" {
-			budget := thinking.BudgetTokens
-			if budget <= 0 {
-				budget = 10000
-			}
-			genCfg["thinkingConfig"] = map[string]interface{}{"thinkingBudget": budget}
+	// thinking → thinkingConfig. Three-way semantics: absent → omit; disabled →
+	// thinkingBudget:0 (explicit OFF); enabled/adaptive → budget + includeThoughts.
+	if level := anthropicThinkingLevel(anth.Thinking); level != "" {
+		if cfg := geminiThinkingConfigForLevel(level); cfg != nil {
+			genCfg["thinkingConfig"] = cfg
 		}
 	}
 	if len(genCfg) > 0 {

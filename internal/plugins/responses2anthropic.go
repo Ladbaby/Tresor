@@ -16,13 +16,6 @@ import (
 // and Anthropic Messages responses back to Responses API format.
 type Responses2Anthropic struct{}
 
-// reasoningEffortBudget maps Responses API reasoning effort to Anthropic thinking budget tokens.
-var reasoningEffortBudget = map[string]int{
-	"low":    1024,
-	"medium": 8192,
-	"high":   16000,
-}
-
 // PluginName returns the stable type name for deduplication.
 func (t *Responses2Anthropic) PluginName() string { return "Responses2Anthropic" }
 
@@ -649,15 +642,12 @@ func (t *Responses2Anthropic) TransformRequest(req *http.Request, body []byte, c
 		}
 	}
 
-	// Convert reasoning effort → thinking
-	if respReq.Reasoning != nil && respReq.Reasoning.Effort != "" {
-		budget, ok := reasoningEffortBudget[respReq.Reasoning.Effort]
-		if !ok {
-			budget = 8192
-		}
-		anthropicBody["thinking"] = map[string]interface{}{
-			"type":         "enabled",
-			"budget_tokens": budget,
+	// Convert reasoning effort → thinking. "none"/"off" maps to disabled (the
+	// prior behavior wrongly enabled thinking at a medium budget); a level maps
+	// to enabled with a budget; absent/empty effort is omitted.
+	if respReq.Reasoning != nil {
+		if thinking := anthropicThinkingForLevel(normalizeThinkingLevel(respReq.Reasoning.Effort)); thinking != nil {
+			anthropicBody["thinking"] = thinking
 		}
 	}
 

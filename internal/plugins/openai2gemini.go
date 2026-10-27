@@ -282,6 +282,12 @@ func (t *OpenAI2Gemini) TransformRequest(req *http.Request, body []byte, ctx *en
 			}
 		}
 	}
+	// reasoning_effort → thinkingConfig. "none" → thinkingBudget:0 (explicit
+	// OFF); a level → budget + includeThoughts; absent/empty → omit. Setting
+	// thinkingConfig alone keeps generationConfig present.
+	if cfg := geminiThinkingConfigForLevel(normalizeThinkingLevel(openAIReq.ReasoningEffort)); cfg != nil {
+		genCfg["thinkingConfig"] = cfg
+	}
 	if len(genCfg) > 0 {
 		geminiBody["generationConfig"] = genCfg
 	}

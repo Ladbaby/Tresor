@@ -132,10 +132,11 @@ func (t *OpenAI2Responses) TransformRequest(req *http.Request, body []byte, ctx 
 		respBody["tool_choice"] = convertChatCompletionsToolChoiceToResponses(tc)
 	}
 
-	// Map reasoning_effort → reasoning.effort
-	if effort, ok := request["reasoning_effort"].(string); ok {
+	// Map reasoning_effort → reasoning.effort. "off" normalizes to "none"; other
+	// values pass through unchanged. Absent/empty effort is omitted.
+	if effort, ok := request["reasoning_effort"].(string); ok && effort != "" {
 		respBody["reasoning"] = map[string]interface{}{
-			"effort": effort,
+			"effort": reasoningEffortWireValue(effort),
 		}
 	}
 

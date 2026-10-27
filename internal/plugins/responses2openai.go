@@ -323,9 +323,10 @@ func (t *Responses2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
 		oaiBody["tool_choice"] = convertResponsesToolChoiceToChatCompletions(respReq.ToolChoice)
 	}
 
-	// Reasoning effort
+	// Reasoning effort → reasoning_effort. "off" normalizes to "none"; other
+	// values pass through unchanged so unknown efforts are preserved.
 	if respReq.Reasoning != nil && respReq.Reasoning.Effort != "" {
-		oaiBody["reasoning_effort"] = respReq.Reasoning.Effort
+		oaiBody["reasoning_effort"] = reasoningEffortWireValue(respReq.Reasoning.Effort)
 	}
 
 	// Text.format → response_format

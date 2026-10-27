@@ -82,21 +82,12 @@ func (t *Anthropic2OpenAI) TransformRequest(req *http.Request, body []byte, ctx 
         openAIBody["stop"] = anthropicReq.StopSequences
     }
 
-    // Convert thinking param: thinking.type == "enabled" → thinking_budget_tokens
-    if len(anthropicReq.Thinking) > 0 {
-        var thinking struct {
-            Type         string `json:"type"`
-            BudgetTokens int    `json:"budget_tokens"`
-        }
-        if err := json.Unmarshal(anthropicReq.Thinking, &thinking); err == nil {
-            if thinking.Type == "enabled" {
-                budget := thinking.BudgetTokens
-                if budget <= 0 {
-                    budget = 10000
-                }
-                openAIBody["thinking_budget_tokens"] = budget
-            }
-        }
+    // Convert thinking param → reasoning_effort. Three-way semantics:
+    // absent → omit (downstream model default); disabled → "none"; enabled or
+    // adaptive → a bucketed canonical level. Never emits the non-standard
+    // thinking_budget_tokens field.
+    if level := anthropicThinkingLevel(anthropicReq.Thinking); level != "" {
+        openAIBody["reasoning_effort"] = reasoningEffortWireValue(level)
     }
 
     // Convert metadata.user_id → __metadata_user_id

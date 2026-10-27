@@ -55,6 +55,18 @@ func (t *Gemini2Anthropic) TransformRequest(req *http.Request, body []byte, ctx 
 		anthBody["stop_sequences"] = gem.GenerationConfig.StopSequences
 	}
 
+	// generationConfig.thinkingConfig → thinking. Absent budget → omit;
+	// thinkingBudget:0 without includeThoughts → disabled (explicit OFF);
+	// a budget → enabled with that budget.
+	if gem.GenerationConfig != nil && gem.GenerationConfig.ThinkingConfig != nil {
+		tc := gem.GenerationConfig.ThinkingConfig
+		if level := levelForGeminiThinking(tc.ThinkingBudget, tc.IncludeThoughts); level != "" {
+			if thinking := anthropicThinkingForLevel(level); thinking != nil {
+				anthBody["thinking"] = thinking
+			}
+		}
+	}
+
 	// --- systemInstruction → system ---
 	if gem.SystemInstruction != nil {
 		var sysText string

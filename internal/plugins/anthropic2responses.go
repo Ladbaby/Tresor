@@ -214,16 +214,11 @@ func (t *Anthropic2Responses) TransformRequest(req *http.Request, body []byte, c
 		}
 	}
 
-	// Thinking → reasoning.effort
-	if thinking, ok := anthropicReq["thinking"].(map[string]interface{}); ok {
-		if thinkingType, _ := thinking["type"].(string); thinkingType == "enabled" || thinkingType == "adaptive" {
-			if budget, ok := thinking["budget_tokens"].(float64); ok {
-				if effort := budgetToEffort(int(budget)); effort != "" {
-					respBody["reasoning"] = map[string]interface{}{
-						"effort": effort,
-					}
-				}
-			}
+	// Thinking → reasoning. Three-way semantics: absent → omit; disabled →
+	// effort "none"; enabled/adaptive → a bucketed canonical level.
+	if level := anthropicThinkingLevel(anthropicReq["thinking"]); level != "" {
+		if reasoning := responsesReasoningForLevel(level); reasoning != nil {
+			respBody["reasoning"] = reasoning
 		}
 	}
 
@@ -759,18 +754,6 @@ func (t *Anthropic2Responses) TransformStreamChunk(chunk engine.SSEChunk, ctx *e
 }
 
 // --- Helpers ---
-
-// budgetToEffort maps Anthropic thinking budget_tokens to Responses API reasoning effort.
-func budgetToEffort(budget int) string {
-	switch {
-	case budget <= 1024:
-		return "low"
-	case budget <= 8192:
-		return "medium"
-	default:
-		return "high"
-	}
-}
 
 func mapAnthropicStopReason(status string) string {
 	switch status {
