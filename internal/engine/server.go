@@ -91,8 +91,6 @@ func ServeProxy(eng *Engine, adminHandler http.Handler, webHandler http.Handler,
 	// Integration control and binding resolution are gateway endpoints, outside admin auth.
 	mux.Handle("/api/integrations/bindings/resolve", http.HandlerFunc(eng.HandleIntegrationBindingResolve))
 	mux.Handle("/api/integrations/bindings/resolve/", http.HandlerFunc(eng.HandleIntegrationBindingResolve))
-	mux.Handle("/api/integrations/executions", http.HandlerFunc(eng.HandleIntegrationControl))
-	mux.Handle("/api/integrations/executions/", http.HandlerFunc(eng.HandleIntegrationControl))
 
 	// Everything else: web UI for known paths, proxy for API-like paths
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

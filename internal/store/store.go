@@ -276,12 +276,6 @@ func (s *Store) migrate() error {
 			PRIMARY KEY (bucket, client_ip)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_ip_usage_bucket ON ip_usage_stats(bucket)`,
-		`CREATE TABLE IF NOT EXISTS integration_executions (
-			execution_id TEXT PRIMARY KEY, service TEXT NOT NULL, subject TEXT NOT NULL,
-			alias_id TEXT NOT NULL, assignment_id TEXT NOT NULL, epoch INTEGER NOT NULL,
-			token_hash BLOB NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','revoked')),
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, revoked_at DATETIME
-		)`,
 		`CREATE TABLE IF NOT EXISTS managed_inferences (
 			execution_id TEXT NOT NULL, epoch INTEGER NOT NULL, inference_id TEXT NOT NULL,
 			payload_hash BLOB NOT NULL, status TEXT NOT NULL, codec TEXT NOT NULL,

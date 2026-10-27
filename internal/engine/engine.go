@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -37,7 +36,6 @@ type Engine struct {
 	integrationMu    sync.RWMutex
 	integrations     *integrationSnapshot
 	executionMu      sync.Mutex
-	activeExecutions map[string]map[string]context.CancelFunc
 	managedLocks     map[string]*managedExecutionLock
 
 	// payloadStore receives the pre-transformer bytes from HandleProxy for

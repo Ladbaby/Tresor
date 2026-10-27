@@ -1,10 +1,8 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -70,35 +68,11 @@ func (e *Engine) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// ClientIP: trust forwarded headers when connected via localhost (reverse proxy).
 	entry.ClientIP = middleware.ExtractClientIP(r)
 
-	// Authenticate reserved metadata independently of broad proxy authentication.
-	if hasIntegrationHeaders(r.Header) {
-		if r.Body == nil {
-			stripIntegrationHeaders(r.Header)
-			integrationError(cw, 401, "execution_unauthorized")
-			return
-		}
-		body, err := io.ReadAll(http.MaxBytesReader(cw, r.Body, externalValueLimit))
-		r.Body.Close()
-		if err != nil {
-			stripIntegrationHeaders(r.Header)
-			integrationError(cw, 413, "invalid_request")
-			return
-		}
-		authenticated, authError := e.authenticateExecution(r, body)
-		if authError != nil {
-			e.logAndReturnError(cw, entry, start, authError)
-			return
-		}
-		r = authenticated
-		activeRequest, cleanup, activeErr := e.registerManagedExecution(r)
-		if activeErr != nil {
-			integrationError(cw, 401, "execution_unauthorized")
-			return
-		}
-		defer cleanup()
-		r = activeRequest
-		r.Body = io.NopCloser(bytes.NewReader(body))
-	}
+	// Strip any reserved integration metadata a client may have sent. Tool-loop
+	// identity is derived from routing, not from caller-supplied headers; there
+	// is no execution token to authenticate.
+	r = captureInferenceReplay(r)
+	stripIntegrationHeaders(r.Header)
 	namespace := ""
 	if e.proxyAuth != nil && e.proxyAuth.enabled {
 		namespace = proxyNamespace(r)

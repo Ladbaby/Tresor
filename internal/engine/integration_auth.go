@@ -3,16 +3,15 @@ package engine
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
+	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
-	"strconv"
 	"strings"
-	"tresor/internal/store"
 )
 
 // Reserved execution metadata is never a provider or ordinary plugin header.
+// It is retained only so a stale client cannot spoof identity into the managed
+// tool loop; there is no capability token to authenticate any more.
 func stripIntegrationHeaders(h http.Header) {
 	for k := range h {
 		if strings.HasPrefix(strings.ToLower(k), "x-tresor-execution-") || strings.EqualFold(k, "X-Tresor-Integration-Service") || strings.EqualFold(k, "X-Tresor-Inference-ID") {
@@ -20,26 +19,35 @@ func stripIntegrationHeaders(h http.Header) {
 		}
 	}
 }
-func executionFromRequest(r *http.Request) *IntegrationExecution {
-	x, _ := IntegrationExecutionFromContext(r.Context())
-	return x
-}
-func hasIntegrationHeaders(h http.Header) bool {
-	for k := range h {
-		if strings.HasPrefix(strings.ToLower(k), "x-tresor-execution-") || strings.EqualFold(k, "X-Tresor-Integration-Service") || strings.EqualFold(k, "X-Tresor-Inference-ID") {
-			return true
-		}
-	}
-	return false
-}
 
-type integrationExecutionContextKey struct{}
-
-// IntegrationExecution is the authenticated scope attached to managed execution requests.
+// IntegrationExecution is the identity + continuation key carried by managed
+// tool-loop requests. It is NOT an authorization grant: there is no capability
+// token and no liveness registration. Subject is the bot identity and AliasID
+// the requested bot alias, so a tool handler can scope memory and contacts;
+// ExecutionID/Epoch/InferenceID key the durable managed transcript and ledger.
 type IntegrationExecution struct {
 	ExecutionID, Service, Subject, AliasID, AssignmentID string
 	Epoch                                                int64
 	InferenceID                                          string
+}
+
+type integrationExecutionContextKey struct{}
+type inferenceReplayKey struct{}
+
+// captureInferenceReplay preserves an optional client-supplied replay key before
+// reserved headers are stripped. It is not a credential: it only stabilizes the
+// managed transcript key so identical retries replay.
+func captureInferenceReplay(r *http.Request) *http.Request {
+	v := r.Header.Get("X-Tresor-Inference-ID")
+	if v == "" || len(v) > 128 {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), inferenceReplayKey{}, v))
+}
+
+func inferenceReplayFrom(r *http.Request) string {
+	v, _ := r.Context().Value(inferenceReplayKey{}).(string)
+	return v
 }
 
 func IntegrationExecutionFromContext(ctx context.Context) (*IntegrationExecution, bool) {
@@ -47,122 +55,41 @@ func IntegrationExecutionFromContext(ctx context.Context) (*IntegrationExecution
 	return x, ok
 }
 
-// HandleIntegrationControl registers and revokes a capability for the authenticated service.
-func (e *Engine) HandleIntegrationControl(w http.ResponseWriter, r *http.Request) {
-	state := e.integrationState()
-	if state == nil {
-		integrationError(w, http.StatusUnauthorized, "execution_unauthorized")
-		return
-	}
-	serviceName := r.Header.Get("X-Tresor-Integration-Service")
-	service := e.configuredBinding(serviceName)
-	if service == nil {
-		service = state.services[serviceName]
-	}
-	if service == nil || service.ControlCredential() == "" || !constantCredential(service.ControlCredential(), bearerToken(r)) {
-		integrationError(w, http.StatusUnauthorized, "execution_unauthorized")
-		return
-	}
-	if r.URL.Path != "/api/integrations/executions" && !(r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/integrations/executions/")) {
-		integrationError(w, http.StatusNotFound, "not_found")
-		return
-	}
-	switch r.Method {
-	case http.MethodPost:
-		var input struct {
-			ExecutionID  string `json:"execution_id"`
-			Subject      string `json:"subject"`
-			AliasID      string `json:"alias"`
-			AssignmentID string `json:"assignment_id"`
-			Epoch        int64  `json:"epoch"`
-		}
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&input) != nil {
-			integrationError(w, 400, "invalid_request")
-			return
-		}
-		if input.ExecutionID == "" {
-			input.ExecutionID = newUUID()
-		}
-		if alias, err := e.store.FindActiveAlias(input.AliasID); err != nil || alias == nil {
-			integrationError(w, 400, "invalid_alias")
-			return
-		}
-		capability, err := e.store.RegisterExecution(store.ExecutionRegistration{ExecutionID: input.ExecutionID, Service: serviceName, Subject: input.Subject, AliasID: input.AliasID, AssignmentID: input.AssignmentID, Epoch: input.Epoch})
-		if err != nil {
-			integrationError(w, 400, "invalid_request")
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]string{"execution_id": input.ExecutionID, "capability": capability})
-	case http.MethodDelete:
-		id := strings.TrimPrefix(r.URL.Path, "/api/integrations/executions/")
-		if id == "" || strings.Contains(id, "/") || id == r.URL.Path {
-			integrationError(w, 400, "invalid_request")
-			return
-		}
-		if err := e.store.RevokeServiceExecution(id, serviceName); err != nil {
-			integrationError(w, 404, "execution_not_found")
-			return
-		}
-		e.executionMu.Lock()
-		for _, cancel := range e.activeExecutions[id] {
-			cancel()
-		}
-		delete(e.activeExecutions, id)
-		e.executionMu.Unlock()
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		w.Header().Set("Allow", "POST, DELETE")
-		integrationError(w, 405, "method_not_allowed")
-	}
+func executionFromRequest(r *http.Request) *IntegrationExecution {
+	x, _ := IntegrationExecutionFromContext(r.Context())
+	return x
 }
 
-func (e *Engine) registerManagedExecution(r *http.Request) (*http.Request, func(), error) {
-	ex := executionFromRequest(r)
-	if ex == nil {
-		return r, func() {}, nil
+// withSynthesizedExecution derives the managed tool-loop scope directly from the
+// requested model (the bot alias). A caller needs no capability token and no
+// pre-registration: identity comes from routing. The continuation key is
+// deterministic in the request identity so an identical retry replays against
+// the same managed transcript instead of re-running effects.
+func withSynthesizedExecution(r *http.Request, service, subject, aliasID string) *http.Request {
+	if subject == "" || aliasID == "" {
+		return r
 	}
-	e.executionMu.Lock()
-	defer e.executionMu.Unlock()
-	// Reauthenticate under the cancellation lock to close the revoke/register race.
-	current, err := e.store.ActiveExecution(ex.ExecutionID)
-	if err != nil || current.Epoch != ex.Epoch {
-		return r, nil, store.ErrIntegrationNotFound
+	// An optional client-supplied replay key keeps the managed transcript stable
+	// across retries of the same logical generation. It carries no authority.
+	replay := inferenceReplayFrom(r)
+	if replay == "" || len(replay) > 128 {
+		replay = newUUID()
 	}
-	ctx, cancel := context.WithCancel(r.Context())
-	id := newUUID()
-	if e.activeExecutions == nil {
-		e.activeExecutions = map[string]map[string]context.CancelFunc{}
+	base := subject + "\x00" + aliasID + "\x00" + replay
+	sum := sha256.Sum256([]byte(base))
+	execID := hex.EncodeToString(sum[:])
+	ex := &IntegrationExecution{
+		ExecutionID:  execID,
+		Service:      service,
+		Subject:      subject,
+		AliasID:      aliasID,
+		AssignmentID: "chat",
+		Epoch:        1,
+		InferenceID:  "chat-" + execID,
 	}
-	if e.activeExecutions[ex.ExecutionID] == nil {
-		e.activeExecutions[ex.ExecutionID] = map[string]context.CancelFunc{}
-	}
-	e.activeExecutions[ex.ExecutionID][id] = cancel
-	return r.WithContext(ctx), func() {
-		cancel()
-		e.executionMu.Lock()
-		defer e.executionMu.Unlock()
-		delete(e.activeExecutions[ex.ExecutionID], id)
-		if len(e.activeExecutions[ex.ExecutionID]) == 0 {
-			delete(e.activeExecutions, ex.ExecutionID)
-		}
-	}, nil
+	return r.WithContext(context.WithValue(r.Context(), integrationExecutionContextKey{}, ex))
 }
 
-func bearerToken(r *http.Request) string {
-	h := r.Header.Get("Authorization")
-	if strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimPrefix(h, "Bearer ")
-	}
-	return ""
-}
-func constantCredential(a, b string) bool {
-	if a == "" || b == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
 func newUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -174,49 +101,12 @@ func newUUID() string {
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
-// authenticateExecution strips reserved headers on every request and attaches authenticated scope when present.
-func (e *Engine) authenticateExecution(r *http.Request, body []byte) (*http.Request, *gatewayError) {
-	had := hasIntegrationHeaders(r.Header)
-	inference := r.Header.Get("X-Tresor-Inference-ID")
-	token := r.Header.Get("X-Tresor-Execution-Token")
-	epochText := r.Header.Get("X-Tresor-Execution-Epoch")
-	stripIntegrationHeaders(r.Header)
-	if !had {
-		return r, nil
+// bearerToken reads the Authorization bearer credential. Used by the binding
+// resolve endpoint to authenticate a plugin's control credential.
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimPrefix(h, "Bearer ")
 	}
-	fail := func() *gatewayError {
-		return &gatewayError{http.StatusUnauthorized, "execution unauthorized", "execution unauthorized", "unauthorized", nil}
-	}
-	if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" && r.URL.Path != "/chat/completions" {
-		return r, fail()
-	}
-	if token == "" || len(r.Header.Values("Authorization")) > 1 {
-		return r, fail()
-	}
-	x, err := e.store.AuthenticateExecution(token)
-	if err != nil {
-		return r, fail()
-	}
-	epoch, epochErr := strconv.ParseInt(epochText, 10, 64)
-	if epochErr != nil || epoch < 0 || strconv.FormatInt(epoch, 10) != epochText || epoch != x.Epoch {
-		return r, &gatewayError{http.StatusUnauthorized, "execution_stale", "execution_stale", "execution_stale", nil}
-	}
-	state := e.integrationState()
-	if e.configuredBinding(x.Service) == nil && (state == nil || state.services[x.Service] == nil) {
-		return r, fail()
-	}
-	model := extractModel(body, r.URL.Path)
-	resolved, ge := e.store.FindActiveAlias(model)
-	if ge != nil || resolved == nil || model != x.AliasID {
-		return r, fail()
-	}
-	if len(inference) == 0 || len(inference) > 128 {
-		return r, fail()
-	}
-	for _, c := range inference {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-			return r, fail()
-		}
-	}
-	return r.WithContext(context.WithValue(r.Context(), integrationExecutionContextKey{}, &IntegrationExecution{ExecutionID: x.ExecutionID, Service: x.Service, Subject: x.Subject, AliasID: x.AliasID, AssignmentID: x.AssignmentID, Epoch: x.Epoch, InferenceID: inference})), nil
+	return ""
 }

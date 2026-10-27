@@ -27,8 +27,15 @@ type managedExecutionLock struct {
 // downstream. It never re-enters HandleProxy, retries, or transforms the transcript.
 func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, result *modelResult, pipeline *Pipeline, owner *ExternalPlugin, decision jsplugins.Decision, entry *RequestLogEntry, start time.Time) bool {
 	s := e.requestIntegrationState(r)
+	// Derive tool-loop identity from the requested model (the bot alias). No
+	// capability token or registration is involved: the alias is both the bot
+	// identity and the continuation subject.
+	r = withSynthesizedExecution(r, owner.executionService(decision.Service), result.model, result.model)
 	ex := executionFromRequest(r)
 	trace := entry.integrationCapture
+	if trace != nil && ex != nil {
+		trace.executionID, trace.inferenceID = ex.ExecutionID, ex.InferenceID
+	}
 	fail := func(status int, code string) bool {
 		integrationError(w, status, code)
 		entry.Status, entry.Error, entry.Duration = status, code, DurationMs(time.Since(start))
@@ -42,7 +49,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		entry.Diagnostic = stage + ":" + string(reason)
 		return fail(http.StatusBadGateway, "unsupported_managed_route")
 	}
-	if ex == nil || s == nil || ex.Service != owner.executionService(decision.Service) || ex.AliasID == "" || !s.allows(owner, decision.Service, integrations.ExecuteTool) || s.serviceFor(owner, decision.Service) == nil {
+	if ex == nil || s == nil || ex.AliasID == "" || !s.allows(owner, decision.Service, integrations.ExecuteTool) || s.serviceFor(owner, decision.Service) == nil {
 		return fail(http.StatusUnauthorized, "execution_unauthorized")
 	}
 	lockKey := ex.ExecutionID + ":" + strconv.FormatInt(ex.Epoch, 10)
@@ -70,9 +77,6 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		defer func() { <-lock.gate }()
 	case <-r.Context().Done():
 		return fail(409, "operation_uncertain")
-	}
-	if current, err := e.store.ActiveExecution(ex.ExecutionID); err != nil || current.Epoch != ex.Epoch {
-		return fail(401, "execution_unauthorized")
 	}
 	if r.Method != http.MethodPost || (r.URL.Path != "/v1/chat/completions" && r.URL.Path != "/chat/completions") || decision.Codec != "openai-chat.v1" {
 		entry.Diagnostic = "route:unsupported_method_path_or_codec"
@@ -327,9 +331,6 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		}
 	}
 	for {
-		if active, err := e.store.ActiveExecution(ex.ExecutionID); err != nil || active.Epoch != ex.Epoch {
-			return fail(401, "execution_stale")
-		}
 		if r.Context().Err() != nil {
 			return fail(http.StatusBadGateway, "operation_uncertain")
 		}
@@ -419,9 +420,6 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		if r.Context().Err() != nil {
 			return fail(502, "operation_uncertain")
 		}
-		if active, err := e.store.ActiveExecution(ex.ExecutionID); err != nil || active.Epoch != ex.Epoch {
-			return fail(401, "execution_stale")
-		}
 		if _, err := ValidateOneChoiceResponse(data); err != nil {
 			return reject("response_validation", managedReason(err))
 		}
@@ -443,9 +441,6 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		for _, call := range calls {
 			if r.Context().Err() != nil {
 				return fail(502, "operation_uncertain")
-			}
-			if _, err := e.store.ActiveExecution(ex.ExecutionID); err != nil {
-				return fail(401, "execution_unauthorized")
 			}
 			if !call.HostOwned {
 				declared := false
@@ -470,9 +465,6 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		for _, call := range calls {
 			if r.Context().Err() != nil {
 				return fail(502, "operation_uncertain")
-			}
-			if _, err := e.store.ActiveExecution(ex.ExecutionID); err != nil {
-				return fail(401, "execution_unauthorized")
 			}
 			if !call.HostOwned {
 				clientCalls = append(clientCalls, call)
