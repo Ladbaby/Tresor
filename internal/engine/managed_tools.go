@@ -546,7 +546,7 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			if json.Unmarshal(resultBytes, &envelope) != nil || envelope.Version != integrations.EnvelopeVersion || !json.Valid(envelope.Payload) {
 				return fail(http.StatusBadGateway, "integration_unavailable")
 			}
-			toolMsg, _ := json.Marshal(map[string]any{"role": "tool", "tool_call_id": call.ID, "content": string(envelope.Payload)})
+			toolMsg, _ := json.Marshal(map[string]any{"role": "tool", "tool_call_id": call.ID, "content": toolResultText(envelope.Payload)})
 			if err := e.store.CompleteManagedToolCall(ex.ExecutionID, ex.InferenceID, call.ID, ex.Epoch, generation, "complete", toolMsg, ""); err != nil {
 				return fail(http.StatusBadGateway, "operation_uncertain")
 			}
@@ -619,4 +619,46 @@ func canonicalJSON(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(value)
+}
+
+// toolResultText renders a tool payload as readable plain text, matching the
+// OpenAI Chat Completions tool-result convention pi uses: {role:"tool",
+// content:<plain text>, tool_call_id}. A payload with a top-level "text" string
+// (e.g. TresorBotSendMessage) is used verbatim; an "error" object renders as a
+// short error line; anything else falls back to indented JSON so the model and
+// the inspector both see legible output instead of a compact JSON blob with
+// escaped newlines.
+func toolResultText(payload []byte) string {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(payload, &obj) == nil {
+		if raw, ok := obj["text"]; ok {
+			var s string
+			if json.Unmarshal(raw, &s) == nil && s != "" {
+				return s
+			}
+		}
+		if raw, ok := obj["error"]; ok {
+			var e struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(raw, &e) == nil && (e.Code != "" || e.Message != "") {
+				msg := e.Message
+				if msg == "" {
+					msg = e.Code
+				}
+				if e.Code != "" && e.Message != "" && e.Code != e.Message {
+					return e.Code + ": " + msg
+				}
+				return msg
+			}
+		}
+	}
+	// Fallback: any other JSON (object, array, or scalar) is indented so the
+	// model and inspector see legible output. Non-JSON input is returned as-is.
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, payload, "", "  "); err != nil {
+		return string(payload)
+	}
+	return buf.String()
 }
