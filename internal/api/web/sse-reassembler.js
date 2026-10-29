@@ -753,7 +753,16 @@
                 appendSystemContent(systemBlocks, m.content);
                 continue;
             }
-            messages.push({ role: m.role || 'user', content: m.content });
+            const out = { role: m.role || 'user', content: m.content };
+            // Preserve tool-call semantics so the renderer can show them:
+            // assistant turns carry a sibling tool_calls array (content is
+            // often empty), and role:"tool" results carry tool_call_id as the
+            // link back to the matching call. Dropping these made assistant
+            // turns render as "(empty)" in the inspector.
+            if (Array.isArray(m.tool_calls) && m.tool_calls.length) out.tool_calls = m.tool_calls;
+            if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+            if (m.name) out.name = m.name;
+            messages.push(out);
         }
         return {
             system: systemBlocks.length ? systemBlocks : null,

@@ -648,7 +648,7 @@ tr:hover {
 .inspect-msg-role-user    { background: rgba(26, 90, 184, 0.10); color: var(--color-success, #1a5ab8); border-left: 3px solid var(--color-success, #1a5ab8); }
 .inspect-msg-role-assistant { background: rgba(122, 90, 168, 0.10); color: #7a5aa8; border-left: 3px solid #7a5aa8; }
 .inspect-msg-role-system  { background: rgba(108, 117, 125, 0.10); color: var(--text-muted); border-left: 3px solid var(--text-muted); }
-.inspect-msg-role-tool    { background: rgba(212, 158, 0, 0.10); color: #d49e00; border-left: 3px solid #d49e00; }
+.inspect-msg-role-tool    { background: var(--bg-primary); color: #d49e00; border-left: 3px solid #d49e00; }
 .inspect-msg-role-developer { background: rgba(108, 117, 125, 0.10); color: var(--text-muted); border-left: 3px solid var(--text-muted); }
 
 .inspect-msg-body {
@@ -832,12 +832,6 @@ tr:hover {
 }
 .inspect-block-tool-result-error .inspect-block-tool-result-label {
     color: #dc3545;
-}
-.inspect-block-tool-result-id {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
-    font-size: 0.7rem;
-    color: var(--text-muted);
-    word-break: break-all;
 }
 .inspect-block-tool-result-body {
     /* Body may contain <pre> and <div class="...image"> children. */
@@ -3004,6 +2998,15 @@ td .ds-toggle.rule-toggle {
     font-size: 0.8rem;
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
 }
+
+.inspect-flow { margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.75rem; min-width: 0; }
+.inspect-flow-context { color: var(--text-secondary); font-size: 0.8rem; overflow-wrap: anywhere; margin: 0.4rem 0; }
+.inspect-flow-event { border: 1px solid var(--border-color); border-radius: 6px; margin: 0.5rem 0; padding: 0.6rem; min-width: 0; }
+.inspect-flow-event summary { cursor: pointer; overflow-wrap: anywhere; }
+/* Managed-flow tool result messages sit tight together, like history
+   message tool results do — no extra bottom gap on the last card. */
+.inspect-flow-toolresult-msg { margin-bottom: 0.5rem; }
+.inspect-flow-toolresult-msg:last-child { margin-bottom: 0; }
 
 .model-id-input:focus {
     outline: none;

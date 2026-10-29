@@ -81,11 +81,46 @@
         return [content];
     }
 
+    // normaliseToolCalls converts an OpenAI-style assistant tool_calls
+    // array ([{id, type, function:{name, arguments}}]) into the same
+    // tool_use blocks the content normaliser emits, so the renderer can
+    // dispatch them through the existing tool_use branch. The arguments
+    // field is an encoded JSON string; parse it when possible and fall
+    // back to the raw string when it is malformed. Returns [] for a
+    // missing or non-array input.
+    function normaliseToolCalls(toolCalls) {
+        if (!Array.isArray(toolCalls)) return [];
+        const out = [];
+        for (const tc of toolCalls) {
+            if (tc == null || typeof tc !== 'object') continue;
+            const fn = (tc.function && typeof tc.function === 'object') ? tc.function : {};
+            let input = {};
+            const args = fn.arguments;
+            if (typeof args === 'string') {
+                if (args.trim()) {
+                    try { input = JSON.parse(args); }
+                    catch (e) { input = args; }
+                }
+            } else if (args != null) {
+                input = args;
+            }
+            out.push({
+                type: 'tool_use',
+                id: tc.id || tc.tool_call_id || '',
+                name: fn.name || tc.name || 'tool_call',
+                input: input,
+            });
+        }
+        return out;
+    }
+
     // Export pattern matches sse-reassembler.js: browser attaches to
     // window, Node attaches to globalThis.
     if (typeof window !== 'undefined') {
         window.normaliseContentBlocks = normaliseContentBlocks;
+        window.normaliseToolCalls = normaliseToolCalls;
     } else if (typeof globalThis !== 'undefined') {
         globalThis.normaliseContentBlocks = normaliseContentBlocks;
+        globalThis.normaliseToolCalls = normaliseToolCalls;
     }
 })();

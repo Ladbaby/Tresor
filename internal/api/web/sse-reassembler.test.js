@@ -391,6 +391,36 @@ function eq(name, got, want) {
         'system=' + JSON.stringify(req && req.system));
 }
 
+// OpenAI Chat tool-call semantics must survive request normalisation:
+// assistant turns carry a sibling tool_calls array (content often empty),
+// and role:"tool" results carry tool_call_id. Dropping these made assistant
+// turns render as "(empty)" in the inspector's parsed request view.
+{
+    const req = normalizeRequest({
+        model: 'gpt-4o',
+        messages: [
+            { role: 'user', content: 'What is the weather?' },
+            {
+                role: 'assistant',
+                content: null,
+                tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"NYC"}' } }],
+            },
+            { role: 'tool', tool_call_id: 'call_1', content: '{"temp": 20}' },
+        ],
+    }, '/v1/chat/completions');
+    check('norm-req-toolcalls: 3 messages kept', req && req.messages && req.messages.length === 3,
+        'messages=' + JSON.stringify(req && req.messages));
+    const asst = req && req.messages && req.messages[1];
+    check('norm-req-toolcalls: assistant tool_calls preserved',
+        asst && Array.isArray(asst.tool_calls) && asst.tool_calls.length === 1 &&
+        asst.tool_calls[0].id === 'call_1' && asst.tool_calls[0].function.name === 'get_weather',
+        'asst=' + JSON.stringify(asst));
+    const toolMsg = req && req.messages && req.messages[2];
+    eq('norm-req-toolcalls: tool role preserved', toolMsg && toolMsg.role, 'tool');
+    eq('norm-req-toolcalls: tool_call_id preserved', toolMsg && toolMsg.tool_call_id, 'call_1');
+    eq('norm-req-toolcalls: tool content preserved', toolMsg && toolMsg.content, '{"temp": 20}');
+}
+
 // OpenAI Responses API request — input items do NOT carry an explicit
 // `type:'message'` field. The normaliser must default to message handling
 // when type is missing, otherwise the parser silently drops the user turn
@@ -877,6 +907,53 @@ function eq(name, got, want) {
     eq('mixed: first block text', blocks[0].type, 'text');
     eq('mixed: second block tool_result', blocks[1].type, 'tool_result');
     eq('mixed: order preserved', blocks[1].content, 'result');
+}
+
+// ---------- normaliseToolCalls ----------
+{
+    // Missing / non-array input yields an empty list.
+    eq('tool_calls: undefined -> []', normaliseToolCalls(undefined).length, 0);
+    eq('tool_calls: null -> []', normaliseToolCalls(null).length, 0);
+    eq('tool_calls: non-array -> []', normaliseToolCalls('nope').length, 0);
+}
+{
+    // A standard OpenAI assistant tool_calls array maps to tool_use blocks
+    // with parsed arguments, so the renderer shows "Tool call: name" + args
+    // instead of "(empty)".
+    const blocks = normaliseToolCalls([
+        { id: 'call_1', type: 'function', function: { name: 'TresorBotContactsList', arguments: '{}' } },
+        { id: 'call_2', type: 'function', function: { name: 'TresorBotEarthList', arguments: '{"scope":"private"}' } },
+    ]);
+    eq('tool_calls: count', blocks.length, 2);
+    eq('tool_calls: type', blocks[0].type, 'tool_use');
+    eq('tool_calls: id preserved', blocks[0].id, 'call_1');
+    eq('tool_calls: name preserved', blocks[0].name, 'TresorBotContactsList');
+    eq('tool_calls: args parsed', typeof blocks[1].input, 'object');
+    eq('tool_calls: args value', blocks[1].input.scope, 'private');
+}
+{
+    // Malformed arguments JSON falls back to the raw string rather than throwing.
+    const blocks = normaliseToolCalls([
+        { id: 'c', type: 'function', function: { name: 'f', arguments: '{not json' } },
+    ]);
+    eq('tool_calls: malformed args -> raw string', blocks[0].input, '{not json');
+}
+{
+    // Empty arguments string yields an empty object input.
+    const blocks = normaliseToolCalls([
+        { id: 'c', type: 'function', function: { name: 'f', arguments: '' } },
+    ]);
+    eq('tool_calls: empty args -> {}', JSON.stringify(blocks[0].input), '{}');
+}
+{
+    // Missing id / name fall back to safe defaults; non-object entries skipped.
+    const blocks = normaliseToolCalls([
+        { type: 'function', function: { arguments: '{}' } },
+        null,
+    ]);
+    eq('tool_calls: skips null entries', blocks.length, 1);
+    eq('tool_calls: missing id -> empty', blocks[0].id, '');
+    eq('tool_calls: missing name -> tool_call', blocks[0].name, 'tool_call');
 }
 
 // ---------- summarise ----------

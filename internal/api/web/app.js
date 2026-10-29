@@ -25,10 +25,17 @@ function formatIconStem(f) {
     return f;
 }
 
-// ---- Theme detection & toggle (session-only, no persistence) ----
+// ---- Theme detection & toggle (persists explicit user choice) ----
 (function initTheme() {
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+    const STORAGE_KEY = 'tresor-theme';
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+
+    // Use the saved preference if present; otherwise follow the OS/browser setting.
+    const stored = localStorage.getItem(STORAGE_KEY);
+    const theme = stored === 'dark' || stored === 'light'
+        ? stored
+        : (media.matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', theme);
 
     const toggle = document.getElementById('theme-toggle');
     if (toggle) {
@@ -36,12 +43,16 @@ function formatIconStem(f) {
             const current = document.documentElement.getAttribute('data-theme');
             const next = current === 'dark' ? 'light' : 'dark';
             document.documentElement.setAttribute('data-theme', next);
+            localStorage.setItem(STORAGE_KEY, next);
         });
     }
 
-    // Update theme when browser preference changes while the page is open
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function (e) {
-        document.documentElement.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+    // Only follow live OS/browser preference changes when the user hasn't
+    // explicitly chosen a theme.
+    media.addEventListener('change', function (e) {
+        if (!localStorage.getItem(STORAGE_KEY)) {
+            document.documentElement.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+        }
     });
 })();
 
@@ -3530,8 +3541,171 @@ function renderInspectBody() {
         bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response', respFmt, currentInspectData));
     } else {
         bodyEl.appendChild(renderInspectSection('Raw client request (before plugins)', currentInspectData.request));
-        bodyEl.appendChild(renderInspectSection('Raw downstream response (before plugins)', currentInspectData.response));
+        bodyEl.appendChild(renderInspectSection(currentInspectData.task_id || currentInspectData.execution_id ? 'Raw client response' : 'Raw downstream response (before plugins)', currentInspectData.response));
     }
+    appendInspectFlow(bodyEl);
+}
+
+function appendInspectFlow(bodyEl) {
+    const data = currentInspectData;
+    if (!data) return;
+    const events = Array.isArray(data.flow) ? data.flow : [];
+    // Round blocks merge the request/response/tool_result events of one
+    // generation; error events get their own block. Tool calls, client
+    // projections, stored replays, and recovered checkpoints are not
+    // shown.
+    const rounds = new Map();
+    const errors = [];
+    events.forEach(function (event) {
+        if (event.kind === 'error') { errors.push(event); return; }
+        if (event.kind !== 'generation_request' && event.kind !== 'generation_response' && event.kind !== 'tool_result') return;
+        const key = event.generation || 0;
+        if (!rounds.has(key)) rounds.set(key, []);
+        rounds.get(key).push(event);
+    });
+    if (!rounds.size && !errors.length && !data.flow_truncated) return;
+    const section = document.createElement('section');
+    section.className = 'inspect-flow';
+    const heading = document.createElement('h4');
+    heading.textContent = 'Integration details';
+    section.appendChild(heading);
+    rounds.forEach(function (roundEvents, generation) {
+        const detail = document.createElement('details');
+        detail.className = 'inspect-flow-event';
+        const summary = document.createElement('summary');
+        summary.textContent = 'Round ' + generation;
+        detail.appendChild(summary);
+        const roundErrors = roundEvents.filter(e => e.error).map(e => e.error);
+        if (roundErrors.length) {
+            const info = document.createElement('div');
+            info.className = 'inspect-flow-context';
+            info.textContent = roundErrors.join(' · ');
+            detail.appendChild(info);
+        }
+        detail.addEventListener('toggle', function () {
+            if (!detail.open || detail.dataset.rendered) return;
+            detail.dataset.rendered = 'true';
+            if (currentInspectView === 'parsed') {
+                detail.appendChild(renderFlowRound(roundEvents));
+            } else {
+                roundEvents.forEach(function (event) {
+                    const body = {body: event.body || '', content_type: event.content_type || 'application/json', truncated: event.truncated};
+                    if (event.kind === 'tool_result') {
+                        detail.appendChild(renderInspectSection('Tool result', body));
+                    } else {
+                        detail.appendChild(renderInspectSection(event.kind === 'generation_request' ? 'Request' : 'Response', body));
+                    }
+                });
+            }
+        });
+        section.appendChild(detail);
+    });
+    errors.forEach(function (event) {
+        const detail = document.createElement('details');
+        detail.className = 'inspect-flow-event';
+        const summary = document.createElement('summary');
+        summary.textContent = 'Request failed';
+        detail.appendChild(summary);
+        if (event.error) {
+            const info = document.createElement('div');
+            info.className = 'inspect-flow-context';
+            info.textContent = event.error;
+            detail.appendChild(info);
+        }
+        detail.addEventListener('toggle', function () {
+            if (!detail.open || detail.dataset.rendered) return;
+            detail.dataset.rendered = 'true';
+            const body = {body: event.body || '', content_type: event.content_type || 'application/json', truncated: event.truncated};
+            detail.appendChild(renderInspectSection('Payload', body));
+        });
+        section.appendChild(detail);
+    });
+    if (data.flow_truncated) {
+        const notice = document.createElement('div');
+        notice.className = 'inspect-status';
+        notice.textContent = 'Flow capture limit reached. Some payloads or later events were omitted; execution was not interrupted.';
+        section.appendChild(notice);
+    }
+    bodyEl.appendChild(section);
+}
+
+// Render a whole managed-integration round in the parsed style. Request
+// and Response get their usual parsed sections; all tool_result events
+// cluster into one section: a single "Tool result" h4 above a single
+// card with one TOOL role header holding every labelled TOOL RESULT
+// block — mirroring how multi-tool turns render in message history.
+// JSON envelopes with a "payload" key show only the payload contents,
+// exactly like a history tool_result block shows the tool's output
+// rather than the transport envelope.
+function renderFlowRound(roundEvents) {
+    const frag = document.createDocumentFragment();
+
+    // Collect runs of consecutive tool_result events so they cluster
+    // under one header + one card; everything else renders inline.
+    let i = 0;
+    while (i < roundEvents.length) {
+        const event = roundEvents[i];
+        if (event.kind === 'tool_result') {
+            let j = i;
+            while (j < roundEvents.length && roundEvents[j].kind === 'tool_result') j++;
+            frag.appendChild(renderFlowToolResults(roundEvents.slice(i, j)));
+            i = j;
+            continue;
+        }
+        const body = {body: event.body || '', content_type: event.content_type || 'application/json', truncated: event.truncated};
+        const title = event.kind === 'generation_request' ? 'Request' : 'Response';
+        frag.appendChild(renderInspectSectionParsed(title, body, currentInspectPath, event.kind === 'generation_request' ? 'request' : 'response', 'chat_completions'));
+        i++;
+    }
+
+    const wrap = document.createElement('div');
+    wrap.appendChild(frag);
+    return wrap;
+}
+
+function renderFlowToolResults(events) {
+    const section = document.createElement('div');
+    section.className = 'inspect-section';
+
+    const header = document.createElement('div');
+    header.className = 'inspect-section-header';
+    const h4 = document.createElement('h4');
+    h4.textContent = 'Tool result';
+    header.appendChild(h4);
+    section.appendChild(header);
+
+    const card = document.createElement('div');
+    card.className = 'inspect-msg inspect-flow-toolresult-msg';
+    const roleHeader = document.createElement('div');
+    roleHeader.className = 'inspect-msg-header inspect-msg-role-tool';
+    roleHeader.textContent = 'tool';
+    card.appendChild(roleHeader);
+
+    const cardBody = document.createElement('div');
+    cardBody.className = 'inspect-msg-body';
+    events.forEach(function (e) { cardBody.appendChild(renderFlowToolResultContent(e)); });
+    card.appendChild(cardBody);
+    section.appendChild(card);
+    return section;
+}
+
+// Extract + render just the tool output of a flow tool_result event as
+// a labelled TOOL RESULT block. JSON envelopes with a "payload" key
+// show only the payload contents, like history tool_result blocks do.
+function renderFlowToolResultContent(event) {
+    let content = event.body || '';
+    const ct = (event.content_type || '').toLowerCase();
+    if (ct.indexOf('json') !== -1) {
+        try {
+            const parsed = JSON.parse(content);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.prototype.hasOwnProperty.call(parsed, 'payload')) {
+                content = (typeof parsed.payload === 'string') ? parsed.payload : JSON.stringify(parsed.payload, null, 2);
+            } else {
+                content = JSON.stringify(parsed, null, 2);
+            }
+        } catch (e) { /* keep raw string */ }
+    }
+    return renderContentBlock({ type: 'tool_result', is_error: false, content: content });
 }
 
 // Build the small "Render as Markdown" checkbox that sits at the top of
@@ -3561,6 +3735,7 @@ function buildInspectMarkdownToggle() {
         const respFmt = backendFormatToInternal(currentInspectData.downstream_format);
         bodyEl.appendChild(renderInspectSectionParsed('Request (parsed)', currentInspectData.request, currentInspectPath, 'request', reqFmt));
         bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response', respFmt, currentInspectData));
+        appendInspectFlow(bodyEl);
     });
 
     const span = document.createElement('span');
@@ -4219,11 +4394,70 @@ function buildRawFallback(body) {
 function renderParsedMessages(view, responseMetadata) {
     const out = document.createElement('div');
     out.className = 'inspect-parsed';
-    for (const m of view.messages) {
-        out.appendChild(renderOneMessage(m));
-    }
+    appendMessagesGrouped(out, view.messages);
     renderUsageFooter(out, view.usage, responseMetadata);
     return out;
+}
+
+// Consecutive tool-result messages (OpenAI Chat role:"tool" turns) are
+// grouped into a single card with one TOOL header — same convention as
+// Anthropic's tool_result blocks living inside the user turn. Shared by
+// the flat message list and the request-section walker so history views
+// group consistently everywhere.
+function appendMessagesGrouped(out, messages) {
+    let i = 0;
+    while (i < messages.length) {
+        const m = messages[i];
+        if (isToolResultMessage(m)) {
+            let j = i;
+            while (j < messages.length && isToolResultMessage(messages[j])) j++;
+            out.appendChild(renderGroupedToolResults(messages.slice(i, j)));
+            i = j;
+        } else {
+            out.appendChild(renderOneMessage(m));
+            i++;
+        }
+    }
+}
+
+function isToolResultMessage(m) {
+    if (!m) return false;
+    const role = (m.role || '').toLowerCase();
+    if (role !== 'tool' && role !== 'function') return false;
+    // Only group messages that render as pure tool results (no extra
+    // text blocks); anything else keeps its own card.
+    const blocks = normaliseContentBlocks(m.content).concat(normaliseToolCalls(m.tool_calls));
+    if (role === 'tool' && m.tool_call_id) {
+        return !blocks.some(function (b) { return b.type !== 'text'; });
+    }
+    return blocks.length > 0 && blocks.every(function (b) { return b.type === 'tool_result'; });
+}
+
+// Render a run of tool-result messages as one .inspect-msg card: single
+// TOOL header on top, then each message's content blocks (labelled
+// TOOL RESULT boxes) stacked inside the same body.
+function renderGroupedToolResults(msgs) {
+    const wrap = document.createElement('div');
+    wrap.className = 'inspect-msg inspect-flow-toolresult-msg';
+
+    const header = document.createElement('div');
+    header.className = 'inspect-msg-header inspect-msg-role-tool';
+    header.textContent = 'tool';
+    wrap.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'inspect-msg-body';
+    for (const m of msgs) {
+        const rendered = renderOneMessage(m);
+        // Strip the per-message wrapper (role header + body) and keep
+        // just the content blocks so they share one TOOL card.
+        const msgBody = rendered.querySelector('.inspect-msg-body');
+        if (msgBody) {
+            while (msgBody.firstChild) body.appendChild(msgBody.firstChild);
+        }
+    }
+    wrap.appendChild(body);
+    return wrap;
 }
 
 function renderUsageFooter(out, usage, metadata) {
@@ -4232,7 +4466,7 @@ function renderUsageFooter(out, usage, metadata) {
     if (u.input_tokens != null) parts.push('<strong>' + esc(u.input_tokens) + '</strong> in');
     if (u.output_tokens != null) parts.push('<strong>' + esc(u.output_tokens) + '</strong> out');
     if (u.cache_read_input_tokens) parts.push('<strong>' + esc(u.cache_read_input_tokens) + '</strong> cached');
-    if (metadata) {
+    if (metadata && metadata.usage_scope !== 'task') {
         if (metadata.decode_tokens_per_second != null) parts.push('<strong>' + esc(Number(metadata.decode_tokens_per_second).toFixed(1)) + '</strong> token/s decode');
         else parts.push('N/A token/s decode');
     }
@@ -4264,8 +4498,21 @@ function renderOneMessage(m) {
 
     // Content can be: string, array of blocks, array of OpenAI-style
     // chat parts, image parts, etc. Normalise to a list of content blocks
-    // we can render.
-    const blocks = normaliseContentBlocks(m.content);
+    // we can render. An assistant turn that made tool calls carries them
+    // in a sibling tool_calls array (content is often empty), so fold
+    // those in as tool_use blocks to render through the same path.
+    let blocks = normaliseContentBlocks(m.content).concat(normaliseToolCalls(m.tool_calls));
+    // OpenAI Chat tool results arrive as role:"tool" messages with a plain
+    // string content and a tool_call_id sibling. Render them through the
+    // tool_result block path so they get the same labelled header as
+    // Anthropic tool_result blocks, instead of a bare text block.
+    if (role === 'tool' && m.tool_call_id && blocks.length && !blocks.some(b => b.type === 'tool_result')) {
+        blocks = [{
+            type: 'tool_result',
+            is_error: false,
+            content: (typeof m.content === 'string') ? m.content : blocks.map(b => b.type === 'text' ? b.text : '').filter(Boolean).join('\n'),
+        }];
+    }
     if (!blocks.length) {
         const raw = m.raw;
         if (raw) {
@@ -4369,11 +4616,10 @@ function renderContentBlock(block) {
             : (typeof input === 'string' ? input : '');
         w.appendChild(name); w.appendChild(args);
     } else if (block.type === 'tool_result') {
-        // Anthropic tool_result block: a labelled body with the
-        // tool_use_id as the link back to the matching tool_use. The
-        // body is either a string (most bash/file outputs) or an
-        // array of blocks (when a tool returned images, e.g. a
-        // screenshot from a headless browser).
+        // Anthropic tool_result block: a labelled body. The body is
+        // either a string (most bash/file outputs) or an array of
+        // blocks (when a tool returned images, e.g. a screenshot from
+        // a headless browser).
         w.className = 'inspect-block inspect-block-tool-result'
             + (block.is_error ? ' inspect-block-tool-result-error' : '');
         const header = document.createElement('div');
@@ -4381,15 +4627,7 @@ function renderContentBlock(block) {
         const label = document.createElement('span');
         label.className = 'inspect-block-tool-result-label';
         label.textContent = block.is_error ? 'Tool result (error)' : 'Tool result';
-        if (block.tool_use_id) {
-            const id = document.createElement('span');
-            id.className = 'inspect-block-tool-result-id';
-            id.textContent = block.tool_use_id;
-            header.appendChild(label);
-            header.appendChild(id);
-        } else {
-            header.appendChild(label);
-        }
+        header.appendChild(label);
         w.appendChild(header);
         const body = document.createElement('div');
         body.className = 'inspect-block-tool-result-body';
@@ -4623,7 +4861,7 @@ function renderParsedSections(sections, format, responseMetadata) {
         } else if (sec.type === 'tools') {
             out.appendChild(renderToolsSection(sec.tools || []));
         } else if (sec.type === 'messages') {
-            for (const m of (sec.messages || [])) out.appendChild(renderOneMessage(m));
+            appendMessagesGrouped(out, sec.messages || []);
             renderUsageFooter(out, sec.usage, responseMetadata);
             responseMetadata = null;
         } else if (sec.type === 'json') {
