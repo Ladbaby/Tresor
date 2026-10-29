@@ -107,7 +107,7 @@ func applyManagedProjection(pipeline *Pipeline, ctx *PipelineContext, req *http.
 			return nil, nil, errManagedProjection
 		}
 		streamedWire = append([]byte(nil), out.Bytes()...)
-		body, err = collectManagedSSE(bytes.NewReader(streamedWire), nil)
+		body, err = collectManagedSSE(bytes.NewReader(streamedWire), nil, nil)
 		if err != nil {
 			return nil, nil, err
 		}

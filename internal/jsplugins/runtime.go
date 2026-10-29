@@ -475,7 +475,7 @@ function __tresorInvoke(exports,name,raw,limit,stateLimit,maxEvents,body){
  if(result===undefined)return undefined;
  try {
  if(!result || typeof result!=='object' || Array.isArray(result) || typeof result.then==='function')__tresorFault('invalid_effect');
- const allowed={prepare:['service','operation','payload'],prepared:['kind','service','operation','payload','codec','instructions','tools'],request:['request','body','transport'],responseHeaders:['response'],response:['response','body'],upstreamStart:['events'],upstreamEvent:['events'],upstreamEnd:['events'],streamStart:['events'],streamEvent:['events'],streamEnd:['events'],collectStart:[],collectEvent:[],collectEnd:['body','response'],finish:[]}[name];
+ const allowed={prepare:['service','operation','payload'],prepared:['kind','service','operation','payload','codec','instructions','tools','stream'],request:['request','body','transport'],responseHeaders:['response'],response:['response','body'],upstreamStart:['events'],upstreamEvent:['events'],upstreamEnd:['events'],streamStart:['events'],streamEvent:['events'],streamEnd:['events'],collectStart:[],collectEvent:[],collectEnd:['body','response'],finish:[]}[name];
  for(const k of __tresorKeys(result))if(!allowed.includes(k))__tresorFault('invalid_effect');
 
  if(result.events!==undefined&&(!Array.isArray(result.events)||result.events.length>maxEvents))__tresorFault('invalid_effect');

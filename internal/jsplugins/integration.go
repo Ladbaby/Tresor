@@ -18,14 +18,35 @@ type Preparation struct {
 	Payload   any    `json:"payload"`
 }
 type Decision struct {
-	Kind         string     `json:"kind"`
-	Service      string     `json:"service,omitempty"`
-	Operation    string     `json:"operation,omitempty"`
-	Payload      any        `json:"payload,omitempty"`
-	Codec        string     `json:"codec,omitempty"`
-	Instructions string     `json:"instructions,omitempty"`
-	Tools        []HostTool `json:"tools,omitempty"`
+	Kind         string        `json:"kind"`
+	Service      string        `json:"service,omitempty"`
+	Operation    string        `json:"operation,omitempty"`
+	Payload      any           `json:"payload,omitempty"`
+	Codec        string        `json:"codec,omitempty"`
+	Instructions string        `json:"instructions,omitempty"`
+	Tools        []HostTool    `json:"tools,omitempty"`
+	Stream       *StreamPolicy `json:"stream,omitempty"`
 }
+
+// StreamPolicy shapes the content of a streaming managed response. The
+// client's stream request always governs the transport itself.
+type StreamPolicy struct {
+	Heartbeat        *bool `json:"heartbeat,omitempty"`
+	ShowIntermediate *bool `json:"show_intermediate,omitempty"`
+}
+
+// WantsHeartbeat reports whether waiting heartbeats should be emitted on a
+// streaming response. Absent means no heartbeats.
+func (d Decision) WantsHeartbeat() bool {
+	return d.Stream != nil && d.Stream.Heartbeat != nil && *d.Stream.Heartbeat
+}
+
+// ShowsIntermediate reports whether intermediate turn texts should be
+// forwarded on a streaming response. Absent means final answer only.
+func (d Decision) ShowsIntermediate() bool {
+	return d.Stream != nil && d.Stream.ShowIntermediate != nil && *d.Stream.ShowIntermediate
+}
+
 type HostTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
@@ -60,7 +81,7 @@ func ValidateDecision(value map[string]any) (Decision, error) {
 		allowed["operation"] = true
 		allowed["payload"] = true
 	case "managedTools":
-		for _, key := range []string{"service", "codec", "instructions", "tools"} {
+		for _, key := range []string{"service", "codec", "instructions", "tools", "stream"} {
 			allowed[key] = true
 		}
 	}
@@ -81,6 +102,22 @@ func ValidateDecision(value map[string]any) (Decision, error) {
 	case "managedTools":
 		if d.Service == "" || d.Codec != "openai-chat.v1" || len(d.Tools) == 0 {
 			return d, fmt.Errorf("invalid managed tools decision")
+		}
+		if v, ok := value["stream"]; ok {
+			var probe map[string]json.RawMessage
+			raw, _ := json.Marshal(v)
+			if json.Unmarshal(raw, &probe) != nil || probe == nil {
+				return d, fmt.Errorf("invalid stream policy")
+			}
+			for key, field := range probe {
+				// Strictly boolean: null, numbers, or strings are rejected.
+				if key != "heartbeat" && key != "show_intermediate" {
+					return d, fmt.Errorf("invalid stream policy")
+				}
+				if flag := string(field); flag != "true" && flag != "false" {
+					return d, fmt.Errorf("invalid stream policy")
+				}
+			}
 		}
 		if len(d.Tools) > 128 || len(d.Instructions) > 65536 {
 			return d, fmt.Errorf("managed tool limits exceeded")

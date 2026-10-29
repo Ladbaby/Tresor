@@ -223,6 +223,7 @@ func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, res
 	for _, p := range participants {
 		clients, err := p.configuredServices()
 		if err != nil {
+			entry.Diagnostic = "services:" + err.Error()
 			return fail("integration_unavailable")
 		}
 		p.services = clients
@@ -249,11 +250,13 @@ func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, res
 		p.ctx = ctx
 		p.request = r
 		if err := p.runtime.Reset(); err != nil {
+			entry.Diagnostic = "reset:" + err.Error()
 			return fail("integration_unavailable")
 		}
 		p.begun = true
 		prep, err := p.call("prepare", input)
 		if err != nil {
+			entry.Diagnostic = "prepare:" + err.Error()
 			return fail("integration_unavailable")
 		}
 		if kind, _ := prep["kind"].(string); kind == "pass" {
@@ -274,7 +277,12 @@ func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, res
 			return fail("execution_unauthorized")
 		}
 		response, data, err := client.Do(r.Context(), integrations.Prepare, declaration.Payload)
-		if err != nil || response.StatusCode != http.StatusOK {
+		if err != nil {
+			entry.Diagnostic = "prepare-do:" + err.Error()
+			return fail("integration_unavailable")
+		}
+		if response.StatusCode != http.StatusOK {
+			entry.Diagnostic = fmt.Sprintf("prepare-do:status=%d body=%s", response.StatusCode, data)
 			return fail("integration_unavailable")
 		}
 		var envelope integrations.Envelope
@@ -292,6 +300,7 @@ func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, res
 		prepared["result"] = serviceResult
 		out, err := p.call("prepared", prepared)
 		if err != nil {
+			entry.Diagnostic = "prepared:" + err.Error()
 			return fail("integration_unavailable")
 		}
 		d, err := jsplugins.ValidateDecision(out)

@@ -36,8 +36,17 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	if trace != nil && ex != nil {
 		trace.executionID, trace.inferenceID = ex.ExecutionID, ex.InferenceID
 	}
+	// Created once the client's stream flag is known; nil before that so early
+	// failures keep writing plain JSON errors.
+	var streamer *managedStreamer
 	fail := func(status int, code string) bool {
-		integrationError(w, status, code)
+		// A committed SSE response cannot carry a JSON error body: emit the
+		// documented error frame instead (never a terminal [DONE]).
+		if streamer != nil && streamer.isCommitted() {
+			streamer.writeError(code)
+		} else {
+			integrationError(w, status, code)
+		}
 		entry.Status, entry.Error, entry.Duration = status, code, DurationMs(time.Since(start))
 		if entry.Diagnostic != "" {
 			log.Printf("managed inference rejected: %s", entry.Diagnostic)
@@ -97,6 +106,16 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
 	clientStreaming := isStreamRequest(result.originalBody)
+	// A streaming client gets a live SSE response: headers commit before any
+	// generation work and the policy only shapes content (heartbeats,
+	// intermediate turns). The durable projection stays the replay authority.
+	streamer = newManagedStreamer(w, decision, decision.ShowsIntermediate())
+	heartbeatStop := make(chan struct{})
+	defer close(heartbeatStop)
+	if clientStreaming {
+		streamer.commit()
+		go streamer.heartbeats(heartbeatStop)
+	}
 	prior, priorErr := e.store.ListManagedExecutionSegments(ex.ExecutionID)
 	if priorErr != nil {
 		return fail(502, "operation_uncertain")
@@ -196,6 +215,11 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		}
 		if trace != nil {
 			trace.projection("replay", 0, stored.Response, true)
+		}
+		if streamer.isCommitted() {
+			// Silence heartbeats: the stored wire carries its own terminal
+			// marker and is written without the streamer's lock.
+			streamer.stop()
 		}
 		if err := writeStoredManagedProjection(w, stored.Response, clientStreaming); err != nil {
 			entry.Error = "integration_unavailable"
@@ -318,7 +342,23 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		if trace != nil {
 			trace.projection("projection", generation+1, stored, false)
 		}
-		if err = writeStoredManagedProjection(w, stored, clientStreaming); err != nil {
+		if streamer.isCommitted() {
+			// When the live stream already carried the final turn, only the
+			// terminal marker is missing; the stored wire stays the replay
+			// authority. When nothing reached the client (hold mode discarded a
+			// tool-call turn, or the downstream never streamed), the stored
+			// projection carries the response instead of an empty [DONE].
+			if streamer.hasLiveOutput() {
+				if err = streamer.finishTurn(); err != nil {
+					entry.Error = "integration_unavailable"
+				}
+			} else {
+				streamer.stop()
+				if err = writeStoredManagedProjection(w, stored, clientStreaming); err != nil {
+					entry.Error = "integration_unavailable"
+				}
+			}
+		} else if err = writeStoredManagedProjection(w, stored, clientStreaming); err != nil {
 			entry.Error = "integration_unavailable"
 		}
 		entry.Status = responseStatus
@@ -411,9 +451,16 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			}
 			var readErr error
 			if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+				// Relay chunks only to a streaming client; a buffered client
+				// must never receive SSE frames even if the downstream
+				// misbehaves and streams a non-stream request.
+				var forward func(string) error
+				if clientStreaming {
+					forward = streamer.onData
+				}
 				data, readErr = collectManagedSSE(resp.Body, func(d []byte) {
 					ctx.observeDecodeEvent(SSEChunk{Data: d}, time.Now())
-				})
+				}, forward)
 			} else {
 				data, readErr = io.ReadAll(io.LimitReader(resp.Body, externalCollectionLimit+1))
 			}
@@ -454,6 +501,9 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		calls, err := ParseToolCalls(message, hostNames)
 		if err != nil {
 			return reject("tool_calls", managedReason(err))
+		}
+		if len(calls) > 0 {
+			streamer.abortTurn()
 		}
 		if len(calls) == 0 {
 			transcript = append(transcript, message)
