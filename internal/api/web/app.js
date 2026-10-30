@@ -4462,10 +4462,15 @@ function renderGroupedToolResults(msgs) {
 
 function renderUsageFooter(out, usage, metadata) {
     const parts = [];
-    const u = usage || {};
+    // Token counts normally come from the response body (view.usage). A
+    // streaming body often carries no usage block, so fall back to the usage
+    // the gateway recorded for this request; otherwise the inspector shows
+    // only the decode speed and drops the token statistics.
+    const u = usage || (metadata && metadata.usage) || {};
     if (u.input_tokens != null) parts.push('<strong>' + esc(u.input_tokens) + '</strong> in');
     if (u.output_tokens != null) parts.push('<strong>' + esc(u.output_tokens) + '</strong> out');
-    if (u.cache_read_input_tokens) parts.push('<strong>' + esc(u.cache_read_input_tokens) + '</strong> cached');
+    if (u.cache_read_input_tokens != null) parts.push('<strong>' + esc(u.cache_read_input_tokens) + '</strong> cached');
+    else if (u.cached_tokens != null) parts.push('<strong>' + esc(u.cached_tokens) + '</strong> cached');
     if (metadata && metadata.usage_scope !== 'task') {
         if (metadata.decode_tokens_per_second != null) parts.push('<strong>' + esc(Number(metadata.decode_tokens_per_second).toFixed(1)) + '</strong> token/s decode');
         else parts.push('N/A token/s decode');

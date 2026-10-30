@@ -3,6 +3,7 @@ package jsplugins
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type PrepareInput struct {
@@ -33,7 +34,16 @@ type Decision struct {
 type StreamPolicy struct {
 	Heartbeat        *bool `json:"heartbeat,omitempty"`
 	ShowIntermediate *bool `json:"show_intermediate,omitempty"`
+	// Activity is an optional template for the progress line emitted while the
+	// bot works. It may reference the current tool by name ({tool}) and its
+	// host-declared display label ({label}), so a service can supply its own
+	// wording instead of the gateway inventing it.
+	Activity string `json:"activity,omitempty"`
 }
+
+// DefaultManagedActivity is the progress template used when the decision does
+// not supply one. {tool} is the tool name and {label} its display label.
+const DefaultManagedActivity = "Waiting for {label}…"
 
 // WantsHeartbeat reports whether waiting heartbeats should be emitted on a
 // streaming response. Absent means no heartbeats.
@@ -47,11 +57,23 @@ func (d Decision) ShowsIntermediate() bool {
 	return d.Stream != nil && d.Stream.ShowIntermediate != nil && *d.Stream.ShowIntermediate
 }
 
+// ActivityTemplate returns the progress template for waiting frames, falling
+// back to the documented default.
+func (d Decision) ActivityTemplate() string {
+	if d.Stream != nil && d.Stream.Activity != "" {
+		return d.Stream.Activity
+	}
+	return DefaultManagedActivity
+}
+
 type HostTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"parameters"`
 	Operation   string         `json:"operation"`
+	// Label is an optional short display name for progress lines. It lets a
+	// service say "TresorBotSendMessage" or "Bash" instead of the raw op name.
+	Label string `json:"label,omitempty"`
 }
 
 func ValidatePreparation(value map[string]any) (Preparation, error) {
@@ -110,11 +132,18 @@ func ValidateDecision(value map[string]any) (Decision, error) {
 				return d, fmt.Errorf("invalid stream policy")
 			}
 			for key, field := range probe {
-				// Strictly boolean: null, numbers, or strings are rejected.
-				if key != "heartbeat" && key != "show_intermediate" {
-					return d, fmt.Errorf("invalid stream policy")
-				}
-				if flag := string(field); flag != "true" && flag != "false" {
+				switch key {
+				case "heartbeat", "show_intermediate":
+					// Strictly boolean: null, numbers, or strings are rejected.
+					if flag := string(field); flag != "true" && flag != "false" {
+						return d, fmt.Errorf("invalid stream policy")
+					}
+				case "activity":
+					var tmpl string
+					if json.Unmarshal(field, &tmpl) != nil || strings.TrimSpace(tmpl) == "" || len(tmpl) > 200 {
+						return d, fmt.Errorf("invalid stream policy")
+					}
+				default:
 					return d, fmt.Errorf("invalid stream policy")
 				}
 			}

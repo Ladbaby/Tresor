@@ -27,6 +27,22 @@ type managedExecutionLock struct {
 // downstream. It never re-enters HandleProxy, retries, or transforms the transcript.
 func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, result *modelResult, pipeline *Pipeline, owner *ExternalPlugin, decision jsplugins.Decision, entry *RequestLogEntry, start time.Time) bool {
 	s := e.requestIntegrationState(r)
+	// Display labels let progress frames name the step a service understands
+	// ("TresorBotSendMessage") instead of the raw operation name.
+	toolLabels := map[string]string{}
+	for _, t := range decision.Tools {
+		label := t.Label
+		if label == "" {
+			label = t.Name
+		}
+		toolLabels[t.Name] = label
+	}
+	labelFor := func(name string) string {
+		if v, ok := toolLabels[name]; ok {
+			return v
+		}
+		return name
+	}
 	// Derive tool-loop identity from the requested model (the bot alias). No
 	// capability token or registration is involved: the alias is both the bot
 	// identity and the continuation subject.
@@ -397,6 +413,13 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		} else {
 			bodyMap["stream"] = json.RawMessage("false")
 		}
+		if streamer != nil {
+			if generation == 0 {
+				streamer.setActivity("Thinking…")
+			} else {
+				streamer.setActivity("Thinking about the results…")
+			}
+		}
 		body, _ := json.Marshal(bodyMap)
 		innerReq := r.Clone(r.Context())
 		innerReq.Header = r.Header.Clone()
@@ -542,6 +565,9 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 				clientCalls = append(clientCalls, call)
 				continue
 			}
+			if streamer != nil {
+				streamer.setActivity(streamer.toolActivity(call.Name, labelFor(call.Name)))
+			}
 			if trace != nil {
 				trace.add(inspect.Event{Kind: "tool_call", Generation: generation + 1, ToolName: call.Name, CallID: call.ID, ContentType: "application/json", Body: string(call.Arguments)})
 			}
@@ -606,6 +632,13 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			hostResults[call.ID] = tm
 		}
 		if len(clientCalls) > 0 {
+			if streamer != nil {
+				names := make([]string, 0, len(clientCalls))
+				for _, c := range clientCalls {
+					names = append(names, labelFor(c.Name))
+				}
+				streamer.setActivity(streamer.toolActivity(strings.Join(names, ", "), strings.Join(names, ", ")))
+			}
 			projected, _, projectionErr := ProjectAssistantMessage(message, hostNames)
 			if projectionErr != nil {
 				return reject("projection", managedReason(projectionErr))
