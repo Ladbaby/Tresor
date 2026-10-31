@@ -23,7 +23,32 @@ const MaxFiles = 128
 const MaxEvents = 256
 
 var hooks = map[string]bool{"request": true, "responseHeaders": true, "response": true, "streamStart": true, "streamEvent": true, "streamEnd": true, "collectStart": true, "collectEvent": true, "collectEnd": true, "finish": true, "upstreamStart": true, "upstreamEvent": true, "upstreamEnd": true, "prepare": true, "prepared": true}
-var features = map[string]bool{"sse.events.v2": true, "sse.collect.v2": true, "sse.upstream.v2": true, "buffer.v1": true, "json.lossless.v1": true, "query.v1": true, "encoding.v1": true, "json.patch.v1": true, "integration.prepare.v1": true, "integration.intercept.v1": true, "tools.host.v1": true}
+
+// features is the closed allowlist of manifest feature names. It is derived from
+// the module table plus the hook-only capabilities, so a capability cannot be
+// declared without a definition or defined without being declarable.
+var features = featureSet()
+
+func featureSet() map[string]bool {
+	set := map[string]bool{}
+	for spec, d := range hostModules {
+		if d.Feature == "" {
+			panic("jsplugins: module " + spec + " declares no feature")
+		}
+		if set[d.Feature] {
+			panic("jsplugins: feature " + d.Feature + " gates more than one module")
+		}
+		set[d.Feature] = true
+	}
+	for _, f := range capabilityFeatures {
+		if set[f] {
+			panic("jsplugins: capability feature " + f + " also gates a module")
+		}
+		set[f] = true
+	}
+	return set
+}
+
 var permissions = map[string]bool{"service.prepare": true, "service.invoke": true, "service.execute-tool": true}
 var identity = regexp.MustCompile(`^[a-z][a-z0-9_-]*(?:/[a-z][a-z0-9_-]*)?$`)
 var versionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?$`)

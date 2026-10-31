@@ -11,7 +11,9 @@ import (
 
 func fixture(t *testing.T, source string) *Package {
 	t.Helper()
-	pkg, err := LoadPackage(map[string]string{"manifest.json": `{"id":"test/fixture","version":"1.0.0","api_version":2,"entry":"plugin.js","requires":[],"permissions":[],"config_schema":{"type":"object"}}`, "plugin.js": source})
+	// Declare the module features fixture sources import: gating is strict, so a
+	// fixture that requires a tresor module must declare its feature.
+	pkg, err := LoadPackage(map[string]string{"manifest.json": `{"id":"test/fixture","version":"1.0.0","api_version":2,"entry":"plugin.js","requires":["json.lossless.v1","encoding.v1","query.v1","buffer.v1","kv.v1"],"permissions":[],"config_schema":{"type":"object"}}`, "plugin.js": source})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,5 +276,217 @@ func TestLosslessLibraryPatch(t *testing.T) {
 	instance, _ := NewInstance(pkg, nil)
 	if _, err := instance.Invoke("request", map[string]any{}); err == nil {
 		t.Fatal("replace missing key")
+	}
+}
+
+func TestKVSurvivesReset(t *testing.T) {
+	// Isolate the process-wide store: LoadPackage instantiates the package, so
+	// even the load below would otherwise touch ambient state and leak between
+	// runs of the suite.
+	restore := SetSharedKVForTesting(newMemoryStore())
+	defer restore()
+	pkg, err := LoadPackage(map[string]string{
+		"manifest.json": `{"id":"test/kv","version":"1.0.0","api_version":2,"entry":"plugin.js","requires":["kv.v1"],"permissions":[],"config_schema":{"type":"object"}}`,
+		"plugin.js":     `const kv=require('tresor/kv.v1');module.exports={request(){const first=kv.get('c');if(typeof first!=='string'){kv.set('c','stable-id');return {body:{encoding:'utf8',data:'new'}}}return {body:{encoding:'utf8',data:first}}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := NewInstance(pkg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := instance.Invoke("request", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["body"].(map[string]any)["data"] != "new" {
+		t.Fatal(out)
+	}
+	// Reset rebuilds the VM; the KV value must survive.
+	if err := instance.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	out, err = instance.Invoke("request", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["body"].(map[string]any)["data"] != "stable-id" {
+		t.Fatalf("kv did not survive reset: %v", out)
+	}
+}
+
+func TestKVGetOrSetNative(t *testing.T) {
+	restore := SetSharedKVForTesting(newMemoryStore())
+	defer restore()
+	pkg, err := LoadPackage(map[string]string{
+		"manifest.json": `{"id":"test/kv-cas","version":"1.0.0","api_version":2,"entry":"plugin.js","requires":["kv.v1"],"permissions":[],"config_schema":{"type":"object"}}`,
+		"plugin.js":     `const kv=require('tresor/kv.v1');module.exports={request({attempt}){return {body:{encoding:'utf8',data:kv.getOrSet('c','id-'+attempt.index)}}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := NewInstance(pkg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoke := func(index int) string {
+		t.Helper()
+		out, err := instance.Invoke("request", map[string]any{"attempt": map[string]any{"index": index}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out["body"].(map[string]any)["data"].(string)
+	}
+	first := invoke(0)
+	if first != "id-0" {
+		t.Fatalf("miss did not store the candidate: %q", first)
+	}
+	if err := instance.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if second := invoke(1); second != first {
+		t.Fatalf("getOrSet not stable across reset: %q vs %q", first, second)
+	}
+}
+
+func TestHostModulesGated(t *testing.T) {
+	// Importing a host module without declaring its feature is refused, and the
+	// message names the feature so the fix is a one-line manifest change.
+	for mod, feature := range map[string]string{
+		"tresor/json.v1":     "json.lossless.v1",
+		"tresor/query.v1":    "query.v1",
+		"tresor/encoding.v1": "encoding.v1",
+		"tresor/buffer.v1":   "buffer.v1",
+		"tresor/kv.v1":       "kv.v1",
+	} {
+		_, err := LoadPackage(map[string]string{
+			"manifest.json": `{"id":"test/gate","version":"1.0.0","api_version":2,"entry":"plugin.js","requires":[],"permissions":[],"config_schema":{"type":"object"}}`,
+			"plugin.js":     `const m=require('` + mod + `');module.exports={}`,
+		})
+		if err == nil {
+			t.Errorf("%s: accepted without declaring %s", mod, feature)
+			continue
+		}
+		if strings.Contains(err.Error(), feature) {
+			t.Errorf("%s: error leaked the feature name past sanitization: %v", mod, err)
+		}
+	}
+	// Declaring the feature makes the same import legal.
+	for mod, feature := range map[string]string{
+		"tresor/json.v1":     "json.lossless.v1",
+		"tresor/query.v1":    "query.v1",
+		"tresor/encoding.v1": "encoding.v1",
+		"tresor/buffer.v1":   "buffer.v1",
+	} {
+		if _, err := LoadPackage(map[string]string{
+			"manifest.json": `{"id":"test/gate-ok","version":"1.0.0","api_version":2,"entry":"plugin.js","requires":["` + feature + `"],"permissions":[],"config_schema":{"type":"object"}}`,
+			"plugin.js":     `const m=require('` + mod + `');module.exports={}`,
+		}); err != nil {
+			t.Errorf("%s: rejected despite declaring %s: %v", mod, feature, err)
+		}
+	}
+}
+
+func TestKVGatedRequire(t *testing.T) {
+	// Without the kv.v1 feature the require is forbidden at load time.
+	files := map[string]string{
+		"manifest.json": `{"id":"test/nokv","version":"1.0.0","api_version":2,"entry":"plugin.js","requires":[],"permissions":[],"config_schema":{"type":"object"}}`,
+		"plugin.js":     `const kv=require('tresor/kv.v1');module.exports={}`,
+	}
+	if _, err := LoadPackage(files); err == nil {
+		t.Fatal("ungated kv require accepted")
+	}
+}
+
+func TestV2ConfigSchemaResolves(t *testing.T) {
+	pkg, err := LoadPackage(map[string]string{
+		"manifest.json": `{"id":"test/cfg","version":"1.0.0","api_version":2,"entry":"plugin.js","requires":[],"permissions":[],"config_schema":{"type":"object","properties":{"greeting":{"type":"string","default":"hi"}}}}`,
+		"plugin.js":     `module.exports={request({config}){return {body:{encoding:'utf8',data:config.greeting}}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := NewInstance(pkg, map[string]any{"greeting": "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := instance.Invoke("request", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["body"].(map[string]any)["data"] != "hello" {
+		t.Fatalf("step config not applied: %v", out)
+	}
+	// Default fills when not provided.
+	instance2, err := NewInstance(pkg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = instance2.Invoke("request", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["body"].(map[string]any)["data"] != "hi" {
+		t.Fatalf("default not applied: %v", out)
+	}
+}
+
+func TestSandboxGlobals(t *testing.T) {
+	// Math.random and Date.now must be present (the prelude only removes Promise),
+	// and 48-bit id arithmetic must round-trip without BigInt or bitwise ops.
+	pkg := fixture(t, `module.exports={request(){var ok=(typeof Math.random==='function')&&(typeof Date.now==='function')&&(typeof Number.isFinite==='function');return {body:{encoding:'utf8',data:ok?'yes':'no'}};}};`)
+	instance, err := NewInstance(pkg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := instance.Invoke("request", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["body"].(map[string]any)["data"] != "yes" {
+		t.Fatal("sandbox missing Math.random / Date.now / Number.isFinite")
+	}
+}
+
+func TestDeletePurgesNamespaceOnLastVersion(t *testing.T) {
+	store := newMemoryStore()
+	restore := SetSharedKVForTesting(store)
+	defer restore()
+
+	dir := t.TempDir()
+	m, err := NewManager(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := func(version string) string {
+		return `{"id":"test/purge","version":"` + version + `","api_version":2,"entry":"plugin.js","requires":["kv.v1"],"permissions":[],"config_schema":{"type":"object"}}`
+	}
+	v1 := map[string]string{"manifest.json": manifest("1.0.0"), "plugin.js": `module.exports={}`}
+	v2 := map[string]string{"manifest.json": manifest("2.0.0"), "plugin.js": `module.exports={}`}
+	if _, err := m.Install(v1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Install(v2); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("test/purge", "ses:abc", "value", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Deleting one version must not drop data the other version still uses.
+	if err := m.Delete("test/purge", "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Get("test/purge", "ses:abc"); !ok {
+		t.Fatal("namespace purged while another version remains")
+	}
+
+	// Deleting the last version drops it.
+	if err := m.Delete("test/purge", "2.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Get("test/purge", "ses:abc"); ok {
+		t.Fatal("namespace survived uninstall of the last version")
 	}
 }

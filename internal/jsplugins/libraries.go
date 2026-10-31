@@ -1,12 +1,46 @@
 package jsplugins
 
-// Versioned libraries have no engine access. JSON token helpers are bounded,
-// pure host operations; plugins receive no filesystem or network capabilities.
-var libraries = map[string]string{
-	"tresor/json.v1":     losslessJSON,
-	"tresor/query.v1":    queryLibrary,
-	"tresor/encoding.v1": encodingLibrary,
-	"tresor/buffer.v1":   `module.exports=__tresorBuffers;`,
+// moduleDescriptor describes one importable tresor/*.v1 module. Source is the
+// module body; Feature is the manifest feature a package must declare to import
+// it. Keeping both in one entry means a new capability cannot be added
+// half-wired: the allowlist, the import gate, and the injected natives all read
+// from this table.
+type moduleDescriptor struct {
+	Source  string
+	Feature string
+}
+
+// hostModules is the single source of truth for importable modules. Versioned
+// modules have no engine access: JSON token helpers are bounded, pure host
+// operations, and plugins receive no filesystem or network capabilities.
+var hostModules = map[string]moduleDescriptor{
+	"tresor/json.v1":     {losslessJSON, "json.lossless.v1"},
+	"tresor/query.v1":    {queryLibrary, "query.v1"},
+	"tresor/encoding.v1": {encodingLibrary, "encoding.v1"},
+	"tresor/buffer.v1":   {`module.exports=__tresorBuffers;`, "buffer.v1"},
+	"tresor/kv.v1": {`module.exports=Object.freeze({get:k=>__tresorKVGet(k),` +
+		`set:(k,v,t)=>__tresorKVSet(k,v,t===undefined?0:t),` +
+		`getOrSet:(k,v,t)=>__tresorKVGetOrSet(k,v,t===undefined?0:t),` +
+		`del:k=>__tresorKVDelete(k)});`, "kv.v1"},
+}
+
+// capabilityFeatures are manifest features that gate host behaviour rather than
+// a module: SSE hook families, an option inside tresor/json.v1, and the API V3
+// integration protocols. They are valid in "requires" but import nothing.
+var capabilityFeatures = []string{
+	"sse.events.v2", "sse.collect.v2", "sse.upstream.v2",
+	"json.patch.v1",
+	"integration.prepare.v1", "integration.intercept.v1", "tools.host.v1",
+}
+
+// gatedFeature reports the manifest feature a module requires. The second result
+// is false for an unknown spec.
+func gatedFeature(spec string) (string, bool) {
+	d, ok := hostModules[spec]
+	if !ok {
+		return "", false
+	}
+	return d.Feature, true
 }
 
 const losslessJSON = `

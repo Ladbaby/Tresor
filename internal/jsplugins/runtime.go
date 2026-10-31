@@ -14,6 +14,7 @@ import (
 type Instance struct {
 	pkg          *Package
 	config       map[string]any
+	kv           *KVStore
 	vm           *goja.Runtime
 	exports      *goja.Object
 	invoke       goja.Callable
@@ -58,7 +59,7 @@ func newInstance(pkg *Package, config map[string]any, validate bool) (*Instance,
 			return nil, err
 		}
 	}
-	instance := &Instance{pkg: pkg, config: resolved}
+	instance := &Instance{pkg: pkg, config: resolved, kv: shared()}
 	if validate {
 		for _, cfg := range instance.ServiceConfigs() {
 			if _, err := integrations.NewConfiguredClient(cfg.Service, cfg.Token, cfg.ControlToken, 8<<20); err != nil {
@@ -229,6 +230,51 @@ func (i *Instance) Reset() (result error) {
 			i.detachedBody = map[string]any{"encoding": encoding, "data": data}
 			return goja.Undefined()
 		})
+		if contains(i.pkg.Manifest.Requires, "kv.v1") {
+			ns := i.pkg.Manifest.ID
+			i.vm.Set("__tresorKVGet", func(call goja.FunctionCall) goja.Value {
+				key, ok := call.Argument(0).Export().(string)
+				if !ok {
+					panic(i.vm.NewTypeError("kv key must be a string"))
+				}
+				if v, found := i.kv.Get(ns, key); found {
+					return i.vm.ToValue(v)
+				}
+				return goja.Undefined()
+			})
+			i.vm.Set("__tresorKVSet", func(call goja.FunctionCall) goja.Value {
+				key, kok := call.Argument(0).Export().(string)
+				val, vok := call.Argument(1).Export().(string)
+				if !kok || !vok {
+					panic(i.vm.NewTypeError("kv key and value must be strings"))
+				}
+				ttl := call.Argument(2).ToInteger()
+				if err := i.kv.Set(ns, key, val, ttl); err != nil {
+					panic(i.vm.NewTypeError(err.Error()))
+				}
+				return goja.Undefined()
+			})
+			i.vm.Set("__tresorKVGetOrSet", func(call goja.FunctionCall) goja.Value {
+				key, kok := call.Argument(0).Export().(string)
+				val, vok := call.Argument(1).Export().(string)
+				if !kok || !vok {
+					panic(i.vm.NewTypeError("kv key and value must be strings"))
+				}
+				ttl := call.Argument(2).ToInteger()
+				winning, err := i.kv.GetOrSet(ns, key, val, ttl)
+				if err != nil {
+					panic(i.vm.NewTypeError(err.Error()))
+				}
+				return i.vm.ToValue(winning)
+			})
+			i.vm.Set("__tresorKVDelete", func(call goja.FunctionCall) goja.Value {
+				key, ok := call.Argument(0).Export().(string)
+				if !ok {
+					panic(i.vm.NewTypeError("kv key must be a string"))
+				}
+				return i.vm.ToValue(i.kv.Delete(ns, key))
+			})
+		}
 		modules := map[string]goja.Value{}
 		var load func(string) (goja.Value, error)
 		load = func(name string) (goja.Value, error) {
@@ -237,10 +283,11 @@ func (i *Instance) Reset() (result error) {
 			}
 			program, ok := i.pkg.programs[name]
 			if !ok {
-				source, exists := libraries[name]
+				descriptor, exists := hostModules[name]
 				if !exists {
 					return nil, fmt.Errorf("module not available: %s", name)
 				}
+				source := descriptor.Source
 				var err error
 				program, err = goja.Compile(name, "(function(module,exports,require){\"use strict\";\n"+source+"\n})", true)
 				if err != nil {
@@ -273,8 +320,12 @@ func (i *Instance) Reset() (result error) {
 					if _, ok := i.pkg.programs[resolved]; !ok {
 						resolved += ".js"
 					}
-				} else if _, ok := libraries[spec]; !ok {
+				} else if feature, known := gatedFeature(spec); !known {
 					panic(i.vm.NewTypeError("forbidden import: %s", spec))
+				} else if !contains(i.pkg.Manifest.Requires, feature) {
+					// Self-diagnosing: the fix is a one-line manifest change, so
+					// name the missing feature rather than a bare refusal.
+					panic(i.vm.NewTypeError("plugin imports %s but its manifest does not declare %s", spec, feature))
 				}
 				out, err := load(resolved)
 				if err != nil {

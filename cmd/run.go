@@ -99,6 +99,12 @@ func runDaemon(cfg *config.AppConfig) error {
 	if pluginCacheDir == "" {
 		pluginCacheDir = filepath.Join(filepath.Dir(cfg.DBPath), "tresor-plugins")
 	}
+	// The plugin KV store is a cache: an unusable path degrades to memory-only
+	// with a logged warning rather than preventing the gateway from serving.
+	// StopSharedKV is deferred so the final flush runs on every exit path,
+	// including the early return in the signal select below.
+	jsplugins.InitSharedKV(filepath.Join(pluginCacheDir, "kv.json"))
+	defer jsplugins.StopSharedKV()
 	pluginManager, err := jsplugins.NewManager(pluginCacheDir, plugins.BuiltinIDs())
 	if err != nil {
 		return fmt.Errorf("init JS plugin manager: %w", err)

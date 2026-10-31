@@ -231,6 +231,10 @@ func (m *Manager) Delete(id, version string) error {
 	delete(m.installed[id], version)
 	if len(m.installed[id]) == 0 {
 		delete(m.installed, id)
+		// Uninstalling the last version drops the plugin's persisted KV data.
+		// Other versions of the same id share the namespace, so purging per
+		// version would destroy live state.
+		shared().PurgeNamespace(id)
 	}
 	m.active = next
 	return nil
