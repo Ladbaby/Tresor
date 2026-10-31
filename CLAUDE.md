@@ -162,7 +162,7 @@ Plugins implement Go interfaces: `RequestTransformer` (modifies outgoing request
 - **gemini2responses**: Converts Google Gemini generateContent format to OpenAI Responses API format (and vice versa)
 
 
-External packages use API V2 (`internal/jsplugins/api.d.ts`): immutable `context` distinguishes client/downstream/current formats, requested versus observed HTTP/SSE transport, stage, phase and effective limits. Explicit `upstreamStart/Event/End` hooks process upstream SSE before collection or regular response-event transforms; ordinary stream hooks are not automatically run before collection. Error termination receives sanitized failure metadata and statistics; finish always releases managed storage. 
+External packages use API V2 (`internal/jsplugins/api.d.ts`): immutable `context` distinguishes client/downstream/current formats, requested versus observed HTTP/SSE transport, stage, phase and effective limits. Importable host modules are declared once in the `hostModules` table (`internal/jsplugins/libraries.go`); each is gated by a manifest feature, and `features` in `package.go` is derived from that table plus the hook-only capabilities.  Explicit `upstreamStart/Event/End` hooks process upstream SSE before collection or regular response-event transforms; ordinary stream hooks are not automatically run before collection. Error termination receives sanitized failure metadata and statistics; finish always releases managed storage. 
 
 Pipeline config is stored as ordered JSON steps in `rules.pipeline_config`.
 
