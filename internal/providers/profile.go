@@ -77,6 +77,17 @@ type AuthSpec struct {
 	ExtraHeaders         map[string]config.HeaderValue `json:"extra_headers,omitempty"`
 	Wire                 string                        `json:"wire,omitempty"`
 	AllowedEndpointHosts []string                      `json:"allowed_endpoint_hosts,omitempty"`
+
+	// OAuth policy. These decide how a token is obtained and renewed, and a
+	// provider for whom they are wrong fails only at request time — long after the
+	// install looked fine — so a profile that names OAuth must be able to state
+	// them. All six are publishable: none holds a credential.
+	RequestNonce               bool `json:"request_nonce,omitempty"`
+	RequireRefreshToken        bool `json:"require_refresh_token,omitempty"`
+	RefreshOnUnknownExpiry     bool `json:"refresh_on_unknown_expiry,omitempty"`
+	RefreshSkewSecs            int  `json:"refresh_skew_secs,omitempty"`
+	DefaultTokenLifetimeSecs   int  `json:"default_token_lifetime_secs,omitempty"`
+	PersistDiscoveredEndpoints bool `json:"persist_discovered_endpoints,omitempty"`
 }
 
 // PluginBinding names a JS plugin package that this provider needs, and the
@@ -337,6 +348,13 @@ func (a *AuthSpec) AuthConfig() *config.DownstreamAuthCfg {
 		ExtraHeaders:           a.ExtraHeaders,
 		Wire:                   a.Wire,
 		AllowedEndpointHosts:   a.AllowedEndpointHosts,
+
+		RequestNonce:               a.RequestNonce,
+		RequireRefreshToken:        a.RequireRefreshToken,
+		RefreshOnUnknownExpiry:     a.RefreshOnUnknownExpiry,
+		RefreshSkewSecs:            a.RefreshSkewSecs,
+		DefaultTokenLifetimeSecs:   a.DefaultTokenLifetimeSecs,
+		PersistDiscoveredEndpoints: a.PersistDiscoveredEndpoints,
 	}
 	if cfg.Type == "" {
 		cfg.Type = "api_key"
