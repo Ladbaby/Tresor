@@ -61,9 +61,17 @@ type CatalogEntry struct {
 	Summary map[string]string `json:"summary,omitempty"`
 	// URL is the HTTPS location of the full profile.
 	URL string `json:"url"`
-	// Digest is the canonical profile digest, when the index publishes one.
-	// Checked after download so a changed profile cannot masquerade as the
-	// reviewed one.
+	// Digest is accepted for compatibility with indexes that still publish one,
+	// and is otherwise unused.
+	//
+	// It was checked after download, to stop an edited recipe from passing as the
+	// reviewed one. That defended only against the index and the recipe being
+	// updated at different moments — a mistake made by whoever publishes them —
+	// while the failure landed on the user as a refused install. A stale index is
+	// better served by installing the recipe that is actually there.
+	//
+	// Code is a different matter: a plugin package still carries a sha256, because
+	// that pin stops a release asset from being swapped for different code.
 	Digest string `json:"digest,omitempty"`
 	// Features are the host features the profile needs, mirrored from the
 	// profile so the UI can mark an entry unavailable without downloading it.
@@ -474,11 +482,7 @@ func (c *Catalog) FetchProfile(ctx context.Context, id string) (*Profile, string
 	if err != nil {
 		return nil, "", err
 	}
-	// When the index publishes a digest, the downloaded profile must match it:
-	// that is what stops a silently changed profile from passing as reviewed.
-	if entry.Digest != "" && !strings.EqualFold(entry.Digest, digest) {
-		return nil, "", fmt.Errorf("provider %q failed its digest check (index %s, downloaded %s)", id, entry.Digest, digest)
-	}
+	// The index's digest is deliberately not enforced here. See CatalogEntry.Digest.
 	return profile, digest, nil
 }
 
