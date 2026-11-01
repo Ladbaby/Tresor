@@ -4,14 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
 	"strings"
 	"tresor/internal/proxy"
 
-	"tresor/internal/jsplugins"
 	"sort"
+	"tresor/internal/config"
+	"tresor/internal/jsplugins"
 )
 
 // SetPluginManager wires trusted local-package management before serving.
@@ -231,6 +233,56 @@ func (r *Router) managedPluginOwners() map[string][]string {
 		sort.Strings(owners[id])
 	}
 	return owners
+}
+
+// packageIDsManagedBy lists the plugin packages that only downstream serves.
+//
+// Called after the downstream is deleted, so the ownership map has already lost it:
+// whatever this downstream used to bind and nothing else claims is now orphaned.
+// Deleting the last provider therefore removes the code it installed, instead of
+// leaving a package behind that no provider owns — which then reappears in the
+// ordinary plugin table as though the user had installed it.
+func (r *Router) packageIDsManagedBy(downstreamID string, bound []config.PipelineStep) []string {
+	if r.pluginManager == nil || len(bound) == 0 {
+		return nil
+	}
+	owners := r.managedPluginOwners()
+	seen := map[string]bool{}
+	var out []string
+	for _, step := range bound {
+		id := step.PluginID
+		if id == "" {
+			id = step.ID
+		}
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		// Still claimed by another provider: keep it.
+		if len(owners[id]) > 0 {
+			continue
+		}
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// removeOrphanedPlugins deletes the packages that belonged only to a downstream
+// that no longer exists. Best effort: a failure is logged and never fails the
+// delete the user asked for.
+func (r *Router) removeOrphanedPlugins(bound []config.PipelineStep, downstreamID string) {
+	for _, id := range r.packageIDsManagedBy(downstreamID, bound) {
+		for _, pkg := range r.pluginManager.List() {
+			if pkg.ID != id {
+				continue
+			}
+			if err := r.pluginManager.Delete(pkg.ID, pkg.Version); err != nil {
+				log.Printf("provider plugins: could not remove %s@%s after deleting %s: %v",
+					pkg.ID, pkg.Version, downstreamID, err)
+			}
+		}
+	}
 }
 
 // contains reports whether list already holds want.

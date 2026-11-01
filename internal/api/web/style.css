@@ -2360,11 +2360,19 @@ html[data-theme="light"] form select {
 .tresor-managed-plugins { margin-top: 1.5rem; }
 .tresor-managed-plugins[hidden] { display: none; }
 .managed-plugin-count { font-weight: 400; text-transform: none; letter-spacing: 0; }
-.managed-plugin-state {
-    font-size: 0.72rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+/* The owning provider, shown under the package name in the managed table. The
+   columns themselves match the rule plugin table. */
+.package-managed-by {
+    font-size: 0.76rem;
     color: var(--text-secondary);
+    margin-top: 0.15rem;
+}
+/* A managed row's controls are present so the columns line up, but the provider
+   owns them: the provider's page is where that state is changed. */
+.ds-toggle.is-managed,
+.btn-danger:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 .tresor-managed-plugins .plugin-table-scroll { margin-top: 0.25rem; }
 
@@ -4283,49 +4291,4 @@ td .ds-toggle.rule-toggle {
     margin-top: 0.25rem;
     font-size: 0.8rem;
     color: var(--text-secondary, #777);
-}
-
-/* .hidden is only defined for specific components in this stylesheet, so the
-   catalog's own panels need their own rule. */
-.provider-catalog-install.hidden { display: none; }
-
-.provider-catalog-install {
-    margin-top: 0.9rem;
-    padding: 0.85rem;
-    border: 1px solid var(--border, #e2e2e2);
-    border-radius: 8px;
-}
-
-.catalog-field { margin-bottom: 0.6rem; }
-.catalog-field label { display: block; font-size: 0.8rem; margin-bottom: 0.2rem; }
-.catalog-field input {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 0.4rem 0.5rem;
-    border: 1px solid var(--border, #ccc);
-    border-radius: 6px;
-    background: var(--bg-input, var(--bg-secondary, #fff));
-    color: var(--text-primary, inherit);
-    font: inherit;
-}
-
-.catalog-consent {
-    display: flex;
-    gap: 0.5rem;
-    align-items: flex-start;
-    font-size: 0.82rem;
-    margin-bottom: 0.75rem;
-}
-
-.catalog-install-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-}
-
-.provider-catalog-footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-top: 0.75rem;
 }

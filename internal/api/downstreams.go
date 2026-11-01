@@ -391,9 +391,15 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 		writeJSONWithWarning(w, http.StatusOK, *existing, proxy.IsBareIP(existing.BaseURL))
 
 	case http.MethodDelete:
+		// Read the bindings before deleting: afterwards there is no record that
+		// this downstream was the one asking for the code.
+		existing, _ := r.store.GetDownstream(id)
 		if err := r.store.DeleteDownstream(id); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if existing != nil {
+			r.removeOrphanedPlugins(existing.Plugins, id)
 		}
 		r.requestConfigWrite()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

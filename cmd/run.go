@@ -211,8 +211,25 @@ func runDaemon(cfg *config.AppConfig) error {
 			return
 		case <-time.After(2 * time.Second):
 		}
-		if err := catalog.Refresh(refreshCtx); err != nil {
-			log.Printf("provider catalog: %v", err)
+		// Retried, not attempted once: the catalog has no compiled-in fallback and
+		// nothing else refreshes it, so a single transient network failure would
+		// leave the provider list empty until the daemon restarted. Backoff keeps a
+		// long outage from hammering the host, and a success ends the loop.
+		backoff := 30 * time.Second
+		for {
+			err := catalog.RefreshNow(refreshCtx)
+			if err == nil {
+				return
+			}
+			log.Printf("provider catalog: %v (retrying in %s)", err, backoff)
+			select {
+			case <-refreshCtx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 10*time.Minute {
+				backoff *= 2
+			}
 		}
 	}()
 	adminRouter.SetOAuthManager(oauthMgr)

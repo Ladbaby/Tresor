@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tresor — LLM Gateway</title>
-    <link rel="stylesheet" href="style.css?v=17">
+    <link rel="stylesheet" href="style.css?v=19">
 </head>
 <body>
     <!-- Login Screen (shown when auth is enabled and not logged in) -->
@@ -203,11 +203,6 @@
                             <span class="close">&times;</span>
                             <h3>Provider Catalog</h3>
                             <div id="provider-catalog-list" class="provider-catalog-list"></div>
-                            <div id="provider-catalog-install" class="provider-catalog-install hidden"></div>
-                            <div class="provider-catalog-footer">
-                                <span id="provider-catalog-source" class="text-muted"></span>
-                                <button type="button" class="btn-small" id="btn-provider-catalog-refresh">Refresh</button>
-                            </div>
                         </div>
                     </div>
 
@@ -344,9 +339,9 @@
                     <details class="detail-advanced tresor-managed-plugins" id="tresor-managed-plugins" hidden>
                         <summary>Tresor managed plugins<span class="managed-plugin-count" id="tresor-managed-count"></span></summary>
                         <div class="detail-advanced-content">
-                            <p class="package-help">Installed and enabled by a provider when it was added.</p>
+                            <p class="package-help">DANGER ZONE: Plugins installed and enabled by a provider.</p>
                             <div class="plugin-table-scroll">
-                                <table id="managed-packages-table"><thead><tr><th>Plugin</th><th>Description</th><th>Provider</th><th>Enabled</th></tr></thead><tbody id="managed-packages-body"></tbody></table>
+                                <table id="managed-packages-table"><thead><tr><th>Plugin</th><th>Description</th><th>Enabled</th><th>Actions</th></tr></thead><tbody id="managed-packages-body"></tbody></table>
                             </div>
                         </div>
                     </details>
@@ -615,6 +610,6 @@
     <script src="wrapper-detect.js?v=13"></script>
     <script src="content-normalise.js?v=14"></script>
     <script src="sse-reassembler.js?v=14"></script>
-    <script src="app.js?v=19"></script>
+    <script src="app.js?v=21"></script>
 </body>
 </html>

@@ -1950,7 +1950,8 @@ function renderPackageManagement(packages) {
 
     // A package that a provider recipe installed belongs to that provider, not to
     // a rule. Splitting it out keeps the rule plugin list to what the user can
-    // actually add to a pipeline.
+    // actually add to a pipeline. Both tables are built by the same row renderer:
+    // the columns and their behaviour are identical, only the source differs.
     const userPackages = packages.filter(p => !isManagedPackage(p));
     const managedPackages = packages.filter(isManagedPackage);
     renderManagedPackages(managedPackages);
@@ -1963,38 +1964,69 @@ function renderPackageManagement(packages) {
             : 'No plugins installed.';
         row.appendChild(cell); body.appendChild(row);
     }
-    for (const p of userPackages) {
-        const row = document.createElement('tr');
-        const identity = document.createElement('td');
-        const name = document.createElement('strong'); name.textContent = `${p.id}@${p.version}`; identity.appendChild(name); row.appendChild(identity);
-        const description = document.createElement('td');
-        description.textContent = p.description || 'No description';
-        if (!p.compatible || !p.executable) {
-            const unavailable = document.createElement('div'); unavailable.className = 'package-unavailable';
-            unavailable.textContent = 'Unavailable'; description.appendChild(unavailable);
-        }
-        row.appendChild(description);
-        const enabledCell = document.createElement('td');
-        const toggle = document.createElement('label'); toggle.className = 'ds-toggle rule-toggle';
+    for (const p of userPackages) body.appendChild(packageRow(p, { managed: false }));
+}
+
+// packageRow builds one plugin row. managed rows are owned by a provider, so their
+// enabled state and deletion belong to that provider — the switch and the delete
+// button are shown in the same place but inert, with the reason in the tooltip.
+function packageRow(p, opts) {
+    const managed = !!(opts && opts.managed);
+    const row = document.createElement('tr');
+
+    const identity = document.createElement('td');
+    const name = document.createElement('strong'); name.textContent = `${p.id}@${p.version}`;
+    identity.appendChild(name);
+    if (managed && (p.managed_by || []).length) {
+        const via = document.createElement('div'); via.className = 'package-managed-by';
+        via.textContent = 'via ' + p.managed_by.join(', ');
+        identity.appendChild(via);
+    }
+    row.appendChild(identity);
+
+    const description = document.createElement('td');
+    description.textContent = p.description || 'No description';
+    if (!p.compatible || !p.executable) {
+        const unavailable = document.createElement('div'); unavailable.className = 'package-unavailable';
+        unavailable.textContent = 'Unavailable'; description.appendChild(unavailable);
+    }
+    row.appendChild(description);
+
+    const enabledCell = document.createElement('td');
+    const toggle = document.createElement('label'); toggle.className = 'ds-toggle rule-toggle';
+    const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
+    checkbox.checked = managed ? !!p.active : !!p.active;
+    checkbox.setAttribute('aria-label', `Enable ${p.id}@${p.version}`);
+    const track = document.createElement('span'); track.className = 'ds-toggle-track';
+    if (managed) {
+        checkbox.disabled = true;
+        toggle.classList.add('is-managed');
+        toggle.title = 'Enabled by the provider that installed it. Remove the provider to remove the plugin.';
+    } else {
         toggle.title = p.active ? 'Plugin is enabled — click to disable' : 'Plugin is disabled — click to enable';
-        const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = !!p.active; checkbox.setAttribute('aria-label', `Enable ${p.id}@${p.version}`);
-        const track = document.createElement('span'); track.className = 'ds-toggle-track';
         checkbox.addEventListener('change', async () => {
             checkbox.disabled = true;
             try { await api('/plugin-packages/enabled', {method:'POST', body:JSON.stringify({id:p.id, version:p.version, enabled:checkbox.checked})}); await loadPlugins(); }
             catch (error) { checkbox.checked = !checkbox.checked; document.getElementById('package-management-status').textContent = 'Could not update plugin.'; checkbox.disabled = false; }
         });
-        toggle.append(checkbox, track); enabledCell.appendChild(toggle); row.appendChild(enabledCell);
-        const actions = document.createElement('td');
-        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn-danger'; remove.textContent = 'Delete';
+    }
+    toggle.append(checkbox, track); enabledCell.appendChild(toggle); row.appendChild(enabledCell);
+
+    const actions = document.createElement('td');
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn-danger'; remove.textContent = 'Delete';
+    if (managed) {
+        remove.disabled = true;
+        remove.title = 'Installed by a provider. Removing the provider removes the plugin.';
+    } else {
         remove.addEventListener('click', async () => {
             if (!confirm(`Delete ${p.id}@${p.version}?`)) return;
             remove.disabled = true;
             try { await api('/plugin-packages/delete', {method:'POST', body:JSON.stringify({id:p.id, version:p.version})}); document.getElementById('package-management-status').textContent = 'Plugin deleted.'; await loadPlugins(); }
             catch (error) { document.getElementById('package-management-status').textContent = 'Could not delete plugin.'; remove.disabled = false; }
         });
-        actions.appendChild(remove); row.appendChild(actions); body.appendChild(row);
     }
+    actions.appendChild(remove); row.appendChild(actions);
+    return row;
 }
 
 // isManagedPackage reports whether a provider recipe installed this package.
@@ -2002,9 +2034,9 @@ function isManagedPackage(p) {
     return !!(p && Array.isArray(p.managed_by) && p.managed_by.length > 0);
 }
 
-// renderManagedPackages fills the collapsible "Tresor managed plugins" block. The
-// block is hidden entirely when nothing is managed, so a user who never installed
-// a provider never sees an empty section.
+// renderManagedPackages fills the collapsible "Tresor managed plugins" block. It is
+// hidden entirely when nothing is managed, so a user who never installed a provider
+// never sees an empty section.
 function renderManagedPackages(packages) {
     const block = document.getElementById('tresor-managed-plugins');
     const body = document.getElementById('managed-packages-body');
@@ -2012,32 +2044,9 @@ function renderManagedPackages(packages) {
     if (!block || !body) return;
     block.hidden = packages.length === 0;
     if (count) count.textContent = packages.length ? ` (${packages.length})` : '';
-    if (!packages.length) { body.replaceChildren(); return; }
     body.replaceChildren();
-    for (const p of packages) {
-        const row = document.createElement('tr');
-        const identity = document.createElement('td');
-        const name = document.createElement('strong'); name.textContent = `${p.id}@${p.version}`;
-        identity.appendChild(name); row.appendChild(identity);
-        const description = document.createElement('td');
-        description.textContent = p.description || 'No description';
-        row.appendChild(description);
-        const provider = document.createElement('td');
-        // The provider's downstream id is what the package serves; it is the
-        // actionable half of "managed", so show it rather than a generic label.
-        provider.textContent = (p.managed_by || []).join(', ');
-        row.appendChild(provider);
-        const enabledCell = document.createElement('td');
-        const state = document.createElement('span');
-        state.className = 'managed-plugin-state';
-        state.textContent = p.active ? 'ON' : 'OFF';
-        // Enabled state is the provider's decision; changing it belongs with the
-        // provider, not with a plugin list.
-        state.title = 'Enabled by the provider that installed it.';
-        enabledCell.appendChild(state);
-        row.appendChild(enabledCell);
-        body.appendChild(row);
-    }
+    if (!packages.length) return;
+    for (const p of packages) body.appendChild(packageRow(p, { managed: true }));
 }
 
 document.querySelectorAll('.package-source-btn').forEach(button => button.addEventListener('click', () => {
@@ -5904,29 +5913,26 @@ async function loadAbout() {
 checkAuth();
 
 // ---- Provider Catalog ----
-// Browse installable provider profiles. A profile is data: installing one
-// creates an ordinary downstream. Credentials are always user input here, and a
-// plugin binding needs an explicit opt-in because a plugin is code.
+// Browse installable providers. Clicking one installs it — the profile already
+// declares the endpoint, auth shape and models — and opens it, so the provider
+// page stays the only place credentials are entered. A recipe that binds a plugin
+// is executable code, so that part is asked about first.
 let _catalogEntries = [];
-let _catalogSelected = null;
+let _catalogError = '';
 
 async function openProviderCatalog() {
     const modal = document.getElementById('provider-catalog-modal');
-    document.getElementById('provider-catalog-install').classList.add('hidden');
-    _catalogSelected = null;
     modal.classList.remove('hidden');
     await loadProviderCatalog();
 }
 
-async function loadProviderCatalog(refresh) {
+async function loadProviderCatalog() {
     const listEl = document.getElementById('provider-catalog-list');
-    const sourceEl = document.getElementById('provider-catalog-source');
     listEl.innerHTML = '<div class="text-muted" style="padding:0.75rem;">Loading catalog…</div>';
     try {
-        if (refresh) await api('/provider-catalog/refresh', { method: 'POST', body: '{}' });
         const data = await api('/provider-catalog');
         _catalogEntries = data.entries || [];
-        if (sourceEl) sourceEl.textContent = 'source: ' + (data.source || 'unknown');
+        _catalogError = data.error || '';
         renderProviderCatalog();
     } catch (err) {
         listEl.innerHTML = '<div class="text-muted" style="padding:0.75rem;">Could not load the catalog: ' + esc(err.message) + '</div>';
@@ -5936,7 +5942,10 @@ async function loadProviderCatalog(refresh) {
 function renderProviderCatalog() {
     const listEl = document.getElementById('provider-catalog-list');
     if (_catalogEntries.length === 0) {
-        listEl.innerHTML = '<div class="text-muted" style="padding:0.75rem;">The catalog is empty.</div>';
+        // An empty list must say why: "no providers" and "the fetch failed" look
+        // identical otherwise, and only one of them is worth acting on.
+        listEl.innerHTML = '<div class="text-muted" style="padding:0.75rem;">' +
+            (_catalogError ? 'Could not load the catalog: ' + esc(_catalogError) : 'The catalog is empty.') + '</div>';
         return;
     }
     listEl.innerHTML = _catalogEntries.map(e => {
@@ -5959,100 +5968,48 @@ function renderProviderCatalog() {
     }).join('');
 
     listEl.querySelectorAll('button.catalog-row').forEach(row => {
-        row.onclick = () => {
-            const entry = _catalogEntries.find(e => e.id === row.dataset.id);
-            if (!entry || entry.available === false) return;
-            _catalogSelected = entry;
-            renderCatalogInstallForm(entry);
-        };
+        row.onclick = () => catalogOpenOrInstall(row.dataset.id);
     });
 }
 
-// The install form. Only the credential fields are required; everything else is
-// pre-filled from the profile and stays editable afterwards in the provider pane.
-function renderCatalogInstallForm(entry) {
-    const el = document.getElementById('provider-catalog-install');
-    el.classList.remove('hidden');
-    const installed = (entry.installed || []).length > 0;
-    el.innerHTML = `
-        <h4 style="margin:0.25rem 0 0.5rem;">${esc(entry.name)}</h4>
-        <p class="text-muted" style="margin-bottom:0.75rem;">
-            ${installed
-            ? 'Already installed as <strong>' + esc(entry.installed.join(', ')) + '</strong>. You can install another copy under a new id.'
-            : 'Enter the credentials for this provider. They are stored in your Tresor config and never sent to the catalog.'}
-        </p>
-        <div class="catalog-field">
-            <label for="catalog-api-key">API key</label>
-            <input type="password" id="catalog-api-key" placeholder="sk-…" autocomplete="off">
-        </div>
-        <div class="catalog-field">
-            <label for="catalog-client-secret">OAuth client secret <span class="text-muted">(only if the provider needs one)</span></label>
-            <input type="password" id="catalog-client-secret" autocomplete="off">
-        </div>
-        <div class="catalog-field">
-            <label for="catalog-downstream-id">Provider id <span class="text-muted">(optional)</span></label>
-            <input type="text" id="catalog-downstream-id" placeholder="${esc(entry.id)}" autocomplete="off">
-        </div>
-        ${entry.needs_plugins ? `
-        <label class="catalog-consent">
-            <input type="checkbox" id="catalog-allow-plugins">
-            <span>This provider binds a plugin. A plugin is executable code, so it is only
-            attached if you allow it here.</span>
-        </label>` : ''}
-        <div class="catalog-install-actions">
-            <button type="button" class="btn-small btn-primary" id="btn-catalog-install">Install</button>
-            <span id="catalog-install-status" class="text-muted"></span>
-        </div>`;
+// Clicking an entry installs it. Installing the same provider more than once is
+// ordinary — two accounts on one provider — so an installed entry adds a copy
+// rather than opening one; the name and id are made unique on install.
+async function catalogOpenOrInstall(profileID) {
+    const entry = _catalogEntries.find(e => e.id === profileID);
+    if (!entry || entry.available === false) return;
 
-    document.getElementById('btn-catalog-install').onclick = async () => {
-        const status = document.getElementById('catalog-install-status');
-        const apiKey = document.getElementById('catalog-api-key').value.trim();
-        const clientSecret = document.getElementById('catalog-client-secret').value.trim();
-        const downstreamID = document.getElementById('catalog-downstream-id').value.trim();
-        const allowPluginsEl = document.getElementById('catalog-allow-plugins');
+    if (entry.needs_plugins) {
+        const ok = confirm(entry.name + ' needs a plugin.\n\n' +
+            'A plugin is executable code that shapes requests for this provider. ' +
+            'Install it from the provider catalog?');
+        if (!ok) return;
+    }
 
-        if (!apiKey && !clientSecret) {
-            status.textContent = 'Enter an API key first.';
-            return;
-        }
-        const body = { profile_id: entry.id };
-        if (apiKey) body.api_key = apiKey;
-        if (clientSecret) body.client_secret = clientSecret;
-        if (downstreamID) body.downstream_id = downstreamID;
-        if (allowPluginsEl && allowPluginsEl.checked) body.allow_plugins = true;
+    try {
+        const res = await api('/providers/install', {
+            method: 'POST',
+            // Credentials are not part of installing a provider: the provider page
+            // has the same fields, plus everything else about the provider.
+            body: JSON.stringify({ profile_id: entry.id, allow_plugins: !!entry.needs_plugins }),
+        });
+        await loadDownstreams();
+        document.getElementById('provider-catalog-modal').classList.add('hidden');
+        openCatalogProvider(res.downstream_id);
+    } catch (err) {
+        alert('Could not install ' + entry.name + ': ' + err.message);
+    }
+}
 
-        status.textContent = 'Installing…';
-        try {
-            // api() passes options to fetch verbatim, so the body must be
-            // serialized here; buildAuthHeaders already sets Content-Type.
-            const res = await api('/providers/install', {
-                method: 'POST',
-                body: JSON.stringify(body),
-            });
-            await loadDownstreams();
-            if (res.downstream_id) {
-                _currentDownstreamId = res.downstream_id;
-                const ds = (cachedDownstreams || []).find(d => d.id === res.downstream_id);
-                if (ds) {
-                    selectSidebarItem(ds.id);
-                    renderDownstreamDetail(ds);
-                }
-            }
-            document.getElementById('provider-catalog-modal').classList.add('hidden');
-            // A recipe can bring its own plugin code. Say so, because installing
-            // code is the part the user should be aware of, not just the provider.
-            const pkgs = (res.installed_packages || []).filter(p => p && p.id);
-            const notes = (res.conflicts || []).filter(Boolean);
-            const lines = [];
-            if (pkgs.length) {
-                lines.push('Also installed: ' + pkgs.map(p => p.id + ' ' + p.version).join(', '));
-            }
-            if (notes.length) lines.push(...notes);
-            if (lines.length) alert('Provider installed.\n\n' + lines.join('\n'));
-        } catch (err) {
-            status.textContent = err.message;
-        }
-    };
+// openCatalogProvider reveals the provider this entry produced.
+function openCatalogProvider(downstreamID) {
+    if (!downstreamID) return;
+    _currentDownstreamId = downstreamID;
+    const ds = (cachedDownstreams || []).find(d => d.id === downstreamID);
+    if (ds) {
+        selectSidebarItem(ds.id);
+        renderDownstreamDetail(ds);
+    }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

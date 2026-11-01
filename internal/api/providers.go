@@ -82,9 +82,13 @@ func (r *Router) handleProviders(w http.ResponseWriter, req *http.Request) {
 					"downstream "+segments[0]+" was not installed from a provider profile; delete it from the Downstreams tab")
 				return
 			}
+			existing, _ := r.store.GetDownstream(segments[0])
 			if err := r.store.DeleteDownstream(segments[0]); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
+			}
+			if existing != nil {
+				r.removeOrphanedPlugins(existing.Plugins, segments[0])
 			}
 			r.requestConfigWrite()
 			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

@@ -232,20 +232,28 @@ func (in *Installer) Install(p *Profile, opts InstallOptions) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The name follows the id. Installing the same provider more than once is
+	// ordinary (two accounts on one provider), and without a distinct label the
+	// list shows identical rows that cannot be told apart.
+	name, err := in.freeDownstreamName(p.Name)
+	if err != nil {
+		return nil, err
+	}
 
 	auth := p.Provider.Auth.AuthConfig()
 	if auth.Type == "api_key" {
-		if strings.TrimSpace(opts.APIKey) == "" {
-			return nil, fmt.Errorf("provider %s: an API key is required", p.ID)
-		}
-		auth.APIKey = opts.APIKey
+		// A key is not required to create the downstream: the provider page has the
+		// same field, and forcing it here made the catalog ask for a credential in a
+		// second, less capable form. An empty key is an installable provider that is
+		// not yet usable, which is what the user sees and can fix in place.
+		auth.APIKey = strings.TrimSpace(opts.APIKey)
 	} else if opts.ClientSecret != "" {
 		auth.ClientSecret = opts.ClientSecret
 	}
 
 	ds := &store.Downstream{
 		ID:             id,
-		Name:           p.Name,
+		Name:           name,
 		BaseURL:        p.Provider.BaseURL,
 		ApiFormats:     append([]string{}, p.Provider.ApiFormats...),
 		FormatURLs:     cloneMap(p.Provider.FormatURLs),
@@ -582,6 +590,35 @@ func (in *Installer) freeDownstreamID(id string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("cannot find a free downstream id for %q", id)
+}
+
+// freeDownstreamName returns base, or base plus the lowest free " N" suffix.
+//
+// Numbering is by name, not by a count of how many copies exist: after deleting
+// "Foo 2" the next install must reuse that number, or the list grows gaps that
+// look like missing providers.
+func (in *Installer) freeDownstreamName(base string) (string, error) {
+	downstreams, err := in.store.ListDownstreams()
+	if err != nil {
+		return "", err
+	}
+	taken := make(map[string]bool, len(downstreams))
+	for _, d := range downstreams {
+		taken[strings.ToLower(strings.TrimSpace(d.Name))] = true
+	}
+	if base == "" {
+		base = "Provider"
+	}
+	if !taken[strings.ToLower(base)] {
+		return base, nil
+	}
+	for n := 2; n < 1000; n++ {
+		candidate := fmt.Sprintf("%s %d", base, n)
+		if !taken[strings.ToLower(candidate)] {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("cannot find a free name for %q", base)
 }
 
 func cloneMap(m map[string]string) map[string]string {

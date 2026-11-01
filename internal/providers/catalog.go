@@ -301,14 +301,32 @@ func (c *Catalog) Availability(e CatalogEntry) Availability {
 // Refresh fetches the remote index. A failure is reported but never discards
 // entries already known, so a transient network problem does not empty the
 // catalog.
+//
+// The cooldown is a guard against callers that ask repeatedly, so it applies here.
+// A caller that owns its own retry schedule uses RefreshNow.
 func (c *Catalog) Refresh(ctx context.Context) error {
 	c.mu.Lock()
 	if time.Now().Before(c.cooldown) {
 		c.mu.Unlock()
 		return fmt.Errorf("provider catalog refresh is cooling down after a recent failure")
 	}
-	url := c.indexURL
 	c.mu.Unlock()
+	return c.refreshLocked(ctx)
+}
+
+// RefreshNow refreshes without consulting the cooldown. It exists for the daemon's
+// background retry loop: the catalog has no compiled-in fallback, so that loop is
+// the only thing that can recover an empty catalog, and it already spaces its own
+// attempts. Without this, one transient failure left the provider list empty for a
+// full hour with nothing able to retry it.
+func (c *Catalog) RefreshNow(ctx context.Context) error {
+	return c.refreshLocked(ctx)
+}
+
+func (c *Catalog) refreshLocked(ctx context.Context) error {
+	c.mu.RLock()
+	url := c.indexURL
+	c.mu.RUnlock()
 
 	if url == "" {
 		return fmt.Errorf("provider catalog is disabled by %s=off", CatalogEnv)
