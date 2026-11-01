@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tresor — LLM Gateway</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=17">
 </head>
 <body>
     <!-- Login Screen (shown when auth is enabled and not logged in) -->
@@ -189,11 +189,26 @@
                                 <input type="search" id="downstreams-search" placeholder="Search providers…" autocomplete="off">
                             </div>
                             <ul class="downstreams-list" id="downstreams-list"></ul>
+                            <button type="button" class="btn-add-downstream-sidebar btn-catalog" id="btn-provider-catalog" title="Install a provider from the online catalog">⟳ Fetch Providers</button>
                             <button type="button" class="btn-add-downstream-sidebar" id="btn-add-downstream">＋ Add Provider</button>
                         </aside>
                         <section class="downstreams-detail" id="downstreams-detail">
                             <div class="downstreams-detail-empty">No providers yet. Click ＋ Add Provider.</div>
                         </section>
+                    </div>
+
+                    <!-- Provider Catalog — browse installable provider profiles -->
+                    <div id="provider-catalog-modal" class="modal hidden">
+                        <div class="modal-content" style="max-width:640px;">
+                            <span class="close">&times;</span>
+                            <h3>Provider Catalog</h3>
+                            <div id="provider-catalog-list" class="provider-catalog-list"></div>
+                            <div id="provider-catalog-install" class="provider-catalog-install hidden"></div>
+                            <div class="provider-catalog-footer">
+                                <span id="provider-catalog-source" class="text-muted"></span>
+                                <button type="button" class="btn-small" id="btn-provider-catalog-refresh">Refresh</button>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Fetch Models Popup — commit is per-row, × to close -->
@@ -322,6 +337,19 @@
                     <div class="plugin-table-scroll">
                         <table id="packages-table"><thead><tr><th>Plugin</th><th>Description</th><th>Enabled</th><th>Actions</th></tr></thead><tbody id="package-management-body"></tbody></table>
                     </div>
+
+                    <!-- Plugins a provider recipe installed. They belong to a
+                         downstream, not to a rule, so they are kept out of the
+                         table above and out of the rule pipeline picker. -->
+                    <details class="detail-advanced tresor-managed-plugins" id="tresor-managed-plugins" hidden>
+                        <summary>Tresor managed plugins<span class="managed-plugin-count" id="tresor-managed-count"></span></summary>
+                        <div class="detail-advanced-content">
+                            <p class="package-help">Installed and enabled by a provider when it was added.</p>
+                            <div class="plugin-table-scroll">
+                                <table id="managed-packages-table"><thead><tr><th>Plugin</th><th>Description</th><th>Provider</th><th>Enabled</th></tr></thead><tbody id="managed-packages-body"></tbody></table>
+                            </div>
+                        </div>
+                    </details>
 
                     <!-- Rule Editor Modal -->
                     <div id="rule-modal" class="modal hidden">
@@ -587,6 +615,6 @@
     <script src="wrapper-detect.js?v=13"></script>
     <script src="content-normalise.js?v=14"></script>
     <script src="sse-reassembler.js?v=14"></script>
-    <script src="app.js?v=14"></script>
+    <script src="app.js?v=19"></script>
 </body>
 </html>

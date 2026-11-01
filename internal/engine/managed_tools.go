@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -465,6 +466,12 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			resp, cancel, err := e.forwardRequest(innerReq, body, ctx)
 			if err != nil {
 				cancel()
+				// A shaping failure is a local fault; do not report it as an
+				// unavailable upstream, which would suggest retrying.
+				var shapeErr *shapingError
+				if errors.As(err, &shapeErr) {
+					return fail(http.StatusInternalServerError, "request_shaping_failed")
+				}
 				return fail(http.StatusBadGateway, "integration_unavailable")
 			}
 			var raw *boundedResponseCapture

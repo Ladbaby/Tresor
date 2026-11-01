@@ -23,15 +23,15 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	// --- Downstreams with output_model_ids ---
 	var downstreams []config.DownstreamCfg
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return fmt.Errorf("query downstreams: %w", err)
 	}
 	for rows.Next() {
 		var d config.DownstreamCfg
-		var formatsJSON, urlsJSON, pathsJSON, authJSON string
+		var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
 		var enabled int
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan downstream: %w", err)
 		}
@@ -74,6 +74,9 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 			d.Auth.Type = "api_key"
 		}
 		d.Auth.OAuthProvider = "" // never persist the transient migration field
+		// Downstream-scoped plugin bindings round-trip so an installed provider
+		// stays self-contained in YAML.
+		d.Plugins = decodePluginsJSON(pluginsJSON)
 		d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 		if d.OutputModelIDs == nil {
 			d.OutputModelIDs = []string{}

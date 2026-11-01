@@ -13,11 +13,23 @@ type moduleDescriptor struct {
 // hostModules is the single source of truth for importable modules. Versioned
 // modules have no engine access: JSON token helpers are bounded, pure host
 // operations, and plugins receive no filesystem or network capabilities.
+//
+// crypto.v1 and compress.v1 are deliberately in the host rather than in JS. A
+// provider dialect has to reproduce a reference client's request byte for byte,
+// and zstd output is only identical when produced by the same encoder, so these
+// wrap pure Go functions behind the same closed table as everything else. Both
+// are bounded and side-effect free, and both are gated by a feature so they cost
+// nothing to a package that does not ask for them.
 var hostModules = map[string]moduleDescriptor{
 	"tresor/json.v1":     {losslessJSON, "json.lossless.v1"},
 	"tresor/query.v1":    {queryLibrary, "query.v1"},
 	"tresor/encoding.v1": {encodingLibrary, "encoding.v1"},
 	"tresor/buffer.v1":   {`module.exports=__tresorBuffers;`, "buffer.v1"},
+	"tresor/crypto.v1": {`module.exports=Object.freeze({` +
+		`sha256Hex:text=>__tresorSHA256Hex(text)});`, "crypto.v1"},
+	"tresor/compress.v1": {`module.exports=Object.freeze({` +
+		`zstdCompress:text=>__tresorZstdCompress(text),` +
+		`utf8Length:text=>__tresorUTF8(text)});`, "compress.v1"},
 	"tresor/kv.v1": {`module.exports=Object.freeze({get:k=>__tresorKVGet(k),` +
 		`set:(k,v,t)=>__tresorKVSet(k,v,t===undefined?0:t),` +
 		`getOrSet:(k,v,t)=>__tresorKVGetOrSet(k,v,t===undefined?0:t),` +
@@ -25,12 +37,14 @@ var hostModules = map[string]moduleDescriptor{
 }
 
 // capabilityFeatures are manifest features that gate host behaviour rather than
-// a module: SSE hook families, an option inside tresor/json.v1, and the API V3
-// integration protocols. They are valid in "requires" but import nothing.
+// a module: SSE hook families, an option inside tresor/json.v1, the API V3
+// integration protocols, and the provider-dialect hooks. They are valid in
+// "requires" but import nothing.
 var capabilityFeatures = []string{
 	"sse.events.v2", "sse.collect.v2", "sse.upstream.v2",
 	"json.patch.v1",
 	"integration.prepare.v1", "integration.intercept.v1", "tools.host.v1",
+	"wire.v3",
 }
 
 // gatedFeature reports the manifest feature a module requires. The second result

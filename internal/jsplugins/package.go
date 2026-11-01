@@ -22,7 +22,7 @@ const maxCollectionWireBytes = 6*MaxCollectionBytes + (1 << 20)
 const MaxFiles = 128
 const MaxEvents = 256
 
-var hooks = map[string]bool{"request": true, "responseHeaders": true, "response": true, "streamStart": true, "streamEvent": true, "streamEnd": true, "collectStart": true, "collectEvent": true, "collectEnd": true, "finish": true, "upstreamStart": true, "upstreamEvent": true, "upstreamEnd": true, "prepare": true, "prepared": true}
+var hooks = map[string]bool{"request": true, "responseHeaders": true, "response": true, "streamStart": true, "streamEvent": true, "streamEnd": true, "collectStart": true, "collectEvent": true, "collectEnd": true, "finish": true, "upstreamStart": true, "upstreamEvent": true, "upstreamEnd": true, "prepare": true, "prepared": true, "wirePrepare": true, "wireDiscover": true, "wireParseModels": true}
 
 // features is the closed allowlist of manifest feature names. It is derived from
 // the module table plus the hook-only capabilities, so a capability cannot be
@@ -53,6 +53,18 @@ var permissions = map[string]bool{"service.prepare": true, "service.invoke": tru
 var identity = regexp.MustCompile(`^[a-z][a-z0-9_-]*(?:/[a-z][a-z0-9_-]*)?$`)
 var versionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?$`)
 
+// DialectDeclaration marks a package as a provider request dialect: the thing a
+// downstream selects with `auth.wire`, replacing what used to be compiled-in Go.
+//
+// NoReplay and Discovery are manifest data rather than hook return values on
+// purpose. Engine policy has to be auditable without executing plugin code, and
+// neither is a per-request decision.
+type DialectDeclaration struct {
+	Name      string `json:"name"`
+	NoReplay  bool   `json:"no_replay,omitempty"`
+	Discovery string `json:"discovery,omitempty"`
+}
+
 type Manifest struct {
 	ID           string                        `json:"id"`
 	Version      string                        `json:"version"`
@@ -63,6 +75,7 @@ type Manifest struct {
 	Permissions  []string                      `json:"permissions"`
 	Services     map[string]ServiceDeclaration `json:"services,omitempty"`
 	ConfigSchema map[string]any                `json:"config_schema"`
+	Dialect      *DialectDeclaration           `json:"dialect,omitempty"`
 }
 type Package struct {
 	Manifest   Manifest
@@ -236,5 +249,48 @@ func loadPackage(files map[string]string, discover bool) (*Package, error) {
 			return nil, fmt.Errorf("upstream hooks require sse.upstream.v2")
 		}
 	}
+	// A dialect is a package that a downstream selects by name to shape its
+	// requests. Declaring one and implementing the hook are inseparable, so a
+	// manifest can neither advertise a dialect it does not implement nor smuggle
+	// request shaping in as an ordinary plugin.
+	if manifest.Dialect != nil {
+		if !seen["wire.v3"] {
+			return nil, fmt.Errorf("dialect requires wire.v3")
+		}
+		if strings.TrimSpace(manifest.Dialect.Name) == "" {
+			return nil, fmt.Errorf("dialect requires a name")
+		}
+		if !instance.HasHook("wirePrepare") {
+			return nil, fmt.Errorf("dialect requires a wirePrepare hook")
+		}
+		switch manifest.Dialect.Discovery {
+		case "", "plugin":
+			if manifest.Dialect.Discovery == "plugin" && (!instance.HasHook("wireDiscover") || !instance.HasHook("wireParseModels")) {
+				return nil, fmt.Errorf("dialect discovery plugin requires wireDiscover and wireParseModels")
+			}
+		default:
+			return nil, fmt.Errorf("dialect discovery must be omitted or \"plugin\"")
+		}
+	} else {
+		for _, hook := range []string{"wirePrepare", "wireDiscover", "wireParseModels"} {
+			if instance.HasHook(hook) {
+				return nil, fmt.Errorf("%s requires a dialect declaration", hook)
+			}
+		}
+	}
 	return pkg, nil
+}
+
+// SupportedFeatures returns the sorted list of host feature names this build
+// accepts in a plugin manifest's `requires`. Callers outside the plugin runtime
+// use it to tell a user whether a package (or a provider profile that depends on
+// one) can run here before attempting an install, which turns "your build is too
+// old" into a specific message rather than a feature-rejection error.
+func SupportedFeatures() []string {
+	out := make([]string, 0, len(features))
+	for name := range features {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }

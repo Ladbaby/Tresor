@@ -279,6 +279,16 @@ func TestLosslessLibraryPatch(t *testing.T) {
 	}
 }
 
+// newMemoryStore is a store with no backing file, so a test never touches disk and
+// never sees another test's data.
+func newMemoryStore() *KVStore {
+	s, err := NewKVStore("")
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
 func TestKVSurvivesReset(t *testing.T) {
 	// Isolate the process-wide store: LoadPackage instantiates the package, so
 	// even the load below would otherwise touch ambient state and leak between
@@ -488,5 +498,54 @@ func TestDeletePurgesNamespaceOnLastVersion(t *testing.T) {
 	}
 	if _, ok := store.Get("test/purge", "ses:abc"); ok {
 		t.Fatal("namespace survived uninstall of the last version")
+	}
+}
+
+// A bundle declares a full manifest, so the identity check a recipe relies on must
+// not impose a narrower schema than LoadPackage does. Reading one field strictly
+// rejected every real manifest with `unknown field "version"`, which broke every
+// remote install.
+func TestVerifyBundleExpectIDAcceptsRealManifest(t *testing.T) {
+	files := map[string]string{
+		"manifest.json": `{"id":"codex","version":"1.0.0","api_version":3,"entry":"plugin.js","description":"d","requires":["wire.v3"],"permissions":[]}`,
+		"plugin.js":     `module.exports={}`,
+	}
+	data, err := json.Marshal(map[string]any{"files": files})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := SourceDigest(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := VerifyBundle(data, RemoteInput{
+		URL:      "https://example.test/pkg.json",
+		SHA256:   digest,
+		ExpectID: "codex",
+	})
+	if err != nil {
+		t.Fatalf("a valid bundle was rejected: %v", err)
+	}
+	if len(got) != len(files) {
+		t.Fatalf("files = %d, want %d", len(got), len(files))
+	}
+}
+
+func TestVerifyBundleExpectIDRejectsOtherPackage(t *testing.T) {
+	files := map[string]string{
+		"manifest.json": `{"id":"something-else","version":"1.0.0","api_version":2,"entry":"plugin.js"}`,
+		"plugin.js":     `module.exports={}`,
+	}
+	data, _ := json.Marshal(map[string]any{"files": files})
+	digest, err := SourceDigest(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := VerifyBundle(data, RemoteInput{
+		URL:      "https://example.test/pkg.json",
+		SHA256:   digest,
+		ExpectID: "codex",
+	}); err == nil {
+		t.Fatal("a bundle declaring another package was accepted")
 	}
 }

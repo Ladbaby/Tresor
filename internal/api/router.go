@@ -17,7 +17,9 @@ import (
 	"tresor/internal/jsplugins"
 	"tresor/internal/middleware"
 	"tresor/internal/oauth"
+	"tresor/internal/providers"
 	"tresor/internal/store"
+	"tresor/internal/wire"
 )
 
 // setAuthCookie is a convenience wrapper for the middleware cookie function.
@@ -42,6 +44,10 @@ type Router struct {
 	version      string
 	buildTime    string
 
+	// catalog is the online provider catalog. Nil (tests) disables catalog
+	// listing; inline profile installs keep working.
+	catalog *providers.Catalog
+
 	// oauthMgr manages OAuth logins/tokens for downstreams. Nil when no
 	// OAuth providers are configured; all oauth routes degrade gracefully.
 	oauthMgr      *oauth.Manager
@@ -51,6 +57,13 @@ type Router struct {
 	// when multiple mutations occur in rapid succession.
 	configDebounceTimer *time.Timer
 	configDebounceMu    sync.Mutex
+}
+
+// SetProviderCatalog attaches the online provider catalog. Called at daemon
+// startup; when never called, catalog routes report the catalog as unavailable
+// while inline profile installs keep working.
+func (r *Router) SetProviderCatalog(c *providers.Catalog) {
+	r.catalog = c
 }
 
 // NewRouter creates an admin API router with all API endpoints.
@@ -95,6 +108,12 @@ func (r *Router) SetOAuthManager(m *oauth.Manager) {
 }
 
 // Stop cleans up background goroutines (rate limiter, debounce timer).
+//
+// A pending debounced config write is flushed rather than discarded: the
+// debounce window is two seconds, so stopping the daemon shortly after a
+// mutation (create a downstream, install a provider, toggle a rule) would
+// otherwise drop that change from the YAML while the SQLite row still has it.
+// The next startup would then upsert the stale YAML back over the DB.
 func (r *Router) Stop() {
 	if r.authMW != nil {
 		r.authMW.Stop()
@@ -102,6 +121,8 @@ func (r *Router) Stop() {
 	r.configDebounceMu.Lock()
 	if r.configDebounceTimer != nil {
 		r.configDebounceTimer.Stop()
+		r.configDebounceTimer = nil
+		r.flushConfigLocked()
 	}
 	r.configDebounceMu.Unlock()
 }
@@ -166,9 +187,12 @@ func (r *Router) Handler() http.Handler {
 	})
 	mux.HandleFunc("/api/version", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// wire_adapters is the closed set of built-in dialects this build has, so
+		// the UI can offer exactly those and never invent a name.
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"version":    r.version,
-			"build_time": r.buildTime,
+			"version":       r.version,
+			"build_time":    r.buildTime,
+			"wire_adapters": wire.Names(),
 		})
 	})
 
@@ -229,6 +253,10 @@ func (r *Router) Handler() http.Handler {
 			r.handleLogInspect(w, req)
 		case path == "stats":
 			r.handleStats(w, req)
+		case path == "providers" || strings.HasPrefix(path, "providers/"):
+			r.handleProviders(w, req)
+		case path == "provider-catalog" || strings.HasPrefix(path, "provider-catalog/"):
+			r.handleProviderCatalog(w, req)
 		default:
 			http.NotFound(w, req)
 		}
@@ -251,6 +279,10 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/logs", protected)
 	mux.Handle("/api/logs/", protected)
 	mux.Handle("/api/stats", protected)
+	mux.Handle("/api/providers", protected)
+	mux.Handle("/api/providers/", protected)
+	mux.Handle("/api/provider-catalog", protected)
+	mux.Handle("/api/provider-catalog/", protected)
 
 	return mux
 }

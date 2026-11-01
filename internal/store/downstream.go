@@ -35,6 +35,10 @@ type Downstream struct {
 	// downstream and all its models behave "as if deleted": the gateway stops
 	// resolving to it and its models are hidden from listings. Defaults to true.
 	IsEnabled bool `json:"is_enabled"`
+	// Plugins are transformers bound to this downstream rather than to a rule,
+	// applied after automatic format translation and before matched rules.
+	// Empty means the downstream contributes no transforms of its own.
+	Plugins []config.PipelineStep `json:"plugins"`
 	// Auth holds the per-downstream authentication configuration (API key or
 	// OAuth). It is the single source of truth for how this downstream is
 	// authenticated. Tokens are stored separately in oauth_tokens (SQLite only).
@@ -82,7 +86,7 @@ func decodeAuthJSON(d *Downstream, authJSON string) {
 // ListDownstreams returns all downstreams with their output model IDs.
 func (s *Store) ListDownstreams() ([]Downstream, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, created_at FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, created_at FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("list downstreams: %w", err)
 	}
@@ -91,13 +95,14 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 	var ds []Downstream
 	for rows.Next() {
 		var d Downstream
-		var formatsJSON, urlsJSON, pathsJSON, authJSON string
+		var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
 		var enabled int
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		decodeDownstreamJSON(&d, formatsJSON, urlsJSON, pathsJSON)
 		decodeAuthJSON(&d, authJSON)
+		d.Plugins = decodePluginsJSON(pluginsJSON)
 		d.IsEnabled = enabled == 1
 		d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 		ds = append(ds, d)
@@ -108,16 +113,17 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 // GetDownstream returns a single downstream by ID with output model IDs.
 func (s *Store) GetDownstream(id string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON, urlsJSON, pathsJSON, authJSON string
+	var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
 	var enabled int
 	err := s.db.QueryRow(
-		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, created_at FROM downstreams WHERE id = ?`, id).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &d.CreatedAt)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, created_at FROM downstreams WHERE id = ?`, id).
+		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get downstream %s: %w", id, err)
 	}
 	decodeDownstreamJSON(&d, formatsJSON, urlsJSON, pathsJSON)
 	decodeAuthJSON(&d, authJSON)
+	d.Plugins = decodePluginsJSON(pluginsJSON)
 	d.IsEnabled = enabled == 1
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil
@@ -141,6 +147,34 @@ func decodeDownstreamJSON(d *Downstream, formatsJSON, urlsJSON, pathsJSON string
 	if pathsJSON != "" && pathsJSON != "{}" {
 		_ = json.Unmarshal([]byte(pathsJSON), &d.FormatPaths)
 	}
+}
+
+// decodePluginsJSON parses the downstreams.plugins column. It always returns a
+// non-nil slice so API responses carry a JSON array rather than null, and
+// treats an unparsable value as "no bindings" — a corrupt column must not make
+// the whole downstream unreadable.
+func decodePluginsJSON(pluginsJSON string) []config.PipelineStep {
+	steps := []config.PipelineStep{}
+	if pluginsJSON != "" && pluginsJSON != "[]" {
+		_ = json.Unmarshal([]byte(pluginsJSON), &steps)
+	}
+	if steps == nil {
+		steps = []config.PipelineStep{}
+	}
+	return steps
+}
+
+// pluginsJSONColumn returns the JSON blob stored in the downstreams.plugins
+// column. A nil or empty binding normalizes to "[]".
+func pluginsJSONColumn(steps []config.PipelineStep) string {
+	if len(steps) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(steps)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }
 
 // CreateDownstream inserts a new downstream and its output model IDs.
@@ -174,8 +208,8 @@ func (s *Store) CreateDownstream(d *Downstream) error {
 	authJSON := authJSONColumn(d)
 
 	_, err = tx.Exec(
-		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth) VALUES (?, ?, ?, '', ?, ?, ?, 1, ?)`,
-		d.ID, d.Name, d.BaseURL, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON)
+		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth, plugins) VALUES (?, ?, ?, '', ?, ?, ?, 1, ?, ?)`,
+		d.ID, d.Name, d.BaseURL, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, pluginsJSONColumn(d.Plugins))
 	if err != nil {
 		return fmt.Errorf("create downstream: %w", err)
 	}
@@ -227,8 +261,8 @@ func (s *Store) UpdateDownstream(d *Downstream) error {
 	}
 
 	res, err := tx.Exec(
-		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ? WHERE id = ?`,
-		d.Name, d.BaseURL, d.EffectiveAPIKey(), string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, d.ID)
+		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ?, plugins = ? WHERE id = ?`,
+		d.Name, d.BaseURL, d.EffectiveAPIKey(), string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSONColumn(d.Plugins), d.ID)
 	if err != nil {
 		return fmt.Errorf("update downstream: %w", err)
 	}
@@ -299,6 +333,10 @@ func (s *Store) DeleteDownstream(id string) error {
 	}
 	// Delete output model IDs for this downstream
 	if _, err := tx.Exec("DELETE FROM output_model_ids WHERE downstream_id = ?", id); err != nil {
+		return err
+	}
+	// Forget provider provenance: a re-created row must not inherit it.
+	if _, err := tx.Exec("DELETE FROM downstream_profiles WHERE downstream_id = ?", id); err != nil {
 		return err
 	}
 	if _, err := tx.Exec("DELETE FROM downstreams WHERE id = ?", id); err != nil {
@@ -413,16 +451,16 @@ func (s *Store) ListAllModels() ([]string, error) {
 // the same model, the one with the earliest created_at wins (deterministic).
 func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON, urlsJSON, pathsJSON, authJSON string
+	var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
 	var enabled int
 	err := s.db.QueryRow(
-		`SELECT d.id, d.name, d.base_url, d.api_formats, d.format_urls, d.format_paths, d.is_enabled, d.auth, d.created_at
+		`SELECT d.id, d.name, d.base_url, d.api_formats, d.format_urls, d.format_paths, d.is_enabled, d.auth, d.plugins, d.created_at
 		 FROM downstreams d
 		 JOIN output_model_ids o ON o.downstream_id = d.id
 		 WHERE o.model_id = ? AND d.is_enabled = 1
 		 ORDER BY d.created_at ASC
 		 LIMIT 1`, model).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &d.CreatedAt)
+		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.CreatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -431,6 +469,7 @@ func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 	}
 	decodeDownstreamJSON(&d, formatsJSON, urlsJSON, pathsJSON)
 	decodeAuthJSON(&d, authJSON)
+	d.Plugins = decodePluginsJSON(pluginsJSON)
 	d.IsEnabled = enabled == 1
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil

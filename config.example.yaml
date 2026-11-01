@@ -49,6 +49,9 @@ icon_cache_dir: "~/.config/tresor/tresor-icons/"
 # Trusted local JavaScript plugins.
 plugin_cache_dir: "~/.config/tresor/tresor-plugins/"
 
+# Cache for the online provider catalog (installable provider definitions).
+provider_cache_dir: "~/.config/tresor/tresor-providers/"
+
 # Downstream LLM providers
 # Example downstreams below. You can add more providers using similar format.
 downstreams:
@@ -67,6 +70,13 @@ downstreams:
       token_url: https://auth.openai.com/oauth/token
       client_id: app_EMoamEEZ73f0CkXaXp7hrann
       device_redirect_uri: https://auth.openai.com/deviceauth/callback
+      # Declared request headers.
+      extra_headers:
+        chatgpt-account-id:
+          from_claim: "https://api.openai.com/auth.chatgpt_account_id"
+        originator: pi
+        User-Agent:
+          template: "pi ({os} {os_release}; {arch})"
     output_model_ids: [gpt-6-astra]
 
   - id: xai

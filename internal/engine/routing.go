@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -8,6 +9,9 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strings"
+
+	"tresor/internal/config"
 	"tresor/internal/store"
 )
 
@@ -277,7 +281,68 @@ func (e *Engine) buildPipelineWithRegistry(path, model string, inputFormat strin
 		}
 	}
 
+	// Downstream-scoped plugin bindings. These make a provider self-contained:
+	// the downstream carries its own request shaping, so no rule is needed.
+	// They run after automatic format translation (the pipeline above) and
+	// before matched rules (appended earlier in this function), so an explicit
+	// user rule still takes precedence for the same transform.
+	//
+	// A binding naming a plugin that is missing or incompatible degrades to a
+	// reported diagnostic rather than failing the request: the provider keeps
+	// working with its generic path, which is far more useful than an HTTP 500
+	// on every call.
+	if ds != nil && len(ds.Plugins) > 0 {
+		if err := e.applyDownstreamPlugins(&pipeline, ds, registry); err != nil {
+			log.Printf("warning: downstream %s: %v", ds.ID, err)
+		}
+	}
+
 	return pipeline, rules, nil
+}
+
+// applyDownstreamPlugins inserts a downstream's own plugin bindings into the
+// pipeline. Individual bindings that cannot be created are collected into one
+// error so a single bad entry does not hide the healthy ones.
+func (e *Engine) applyDownstreamPlugins(pipeline *Pipeline, ds *store.Downstream, registry PluginRegistry) error {
+	var failures []string
+	for _, step := range ds.Plugins {
+		pluginID := strings.TrimSpace(step.PluginID)
+		if pluginID == "" {
+			continue
+		}
+		p, err := ParsePipelineConfig(mustPipelineJSON([]config.PipelineStep{step}), registry)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("plugin %q: %v", pluginID, err))
+			continue
+		}
+		if len(p.UpstreamSteps)+len(p.ExternalSteps)+len(p.RequestSteps)+len(p.ResponseSteps)+len(p.StreamResponseSteps) == 0 {
+			failures = append(failures, fmt.Sprintf("plugin %q resolved to no usable transform", pluginID))
+			continue
+		}
+		for _, external := range p.ExternalSteps {
+			external.downstreamID = ds.ID
+		}
+		pipeline.UpstreamSteps = append(pipeline.UpstreamSteps, p.UpstreamSteps...)
+		pipeline.ExternalSteps = append(pipeline.ExternalSteps, p.ExternalSteps...)
+		pipeline.RequestSteps = append(pipeline.RequestSteps, p.RequestSteps...)
+		pipeline.ResponseSteps = append(pipeline.ResponseSteps, p.ResponseSteps...)
+		pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, p.StreamResponseSteps...)
+		e.logger.Debug("applied downstream plugin %s for %s", pluginID, ds.ID)
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("downstream plugin bindings unavailable: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// mustPipelineJSON marshals pipeline steps that were already validated by the
+// caller's store, so a marshal failure is a programming error, not user input.
+func mustPipelineJSON(steps []config.PipelineStep) string {
+	b, err := json.Marshal(steps)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }
 
 // pluginInList checks if a transformer with the given type name is already in the pipeline.

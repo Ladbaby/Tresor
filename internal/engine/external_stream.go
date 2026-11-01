@@ -533,7 +533,7 @@ func collectExternalPipeline(resp *http.Response, ctx *PipelineContext, pipeline
 	if _, ok := result["body"]; !ok {
 		return nil, fmt.Errorf("collectEnd must return body")
 	}
-	body, err = applyResponseLimit(result, resp, nil, true, externalCollectionLimit, true)
+	body, err = applyResponseLimit(result, resp, nil, true, externalCollectionLimit, true, ctx)
 	if err == nil {
 		e.Statistics.CollectedBytes = int64(len(body))
 	}

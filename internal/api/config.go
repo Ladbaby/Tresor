@@ -316,6 +316,12 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		if r.iconFetcher != nil {
 			r.iconFetcher.SetProxyMode(mode)
 		}
+		// The provider catalog makes its own outbound requests, so it needs the same
+		// update; without it, a proxy configured live left the catalog on the old
+		// route until the next restart.
+		if r.catalog != nil {
+			r.catalog.SetProxyMode(mode)
+		}
 
 		// Update auth middleware password live (only when explicitly provided).
 		if passwordProvided {

@@ -32,10 +32,15 @@ type ExternalPlugin struct {
 	upstream, stream, collection Session
 	ctx                          *PipelineContext
 	ruleID                       string
-	stepID                       string
-	stepConfig                   map[string]any
-	services                     map[string]*integrations.Snapshot
-	stepIndex                    int
+	// downstreamID is set instead of ruleID when the plugin is bound to a
+	// downstream rather than written into a rule's pipeline_config. Keeping
+	// them separate means rule-scoped services and configuration never apply
+	// to a binding that has no rule, while the origin stays visible in logs.
+	downstreamID string
+	stepID       string
+	stepConfig   map[string]any
+	services     map[string]*integrations.Snapshot
+	stepIndex    int
 }
 
 func NewExternalPlugin(runtime ExternalRuntime) *ExternalPlugin {
@@ -87,18 +92,55 @@ func decodePayloadLimit(value any, limit int, collection bool) ([]byte, error) {
 		return nil, fmt.Errorf("invalid body encoding")
 	}
 }
-func protectedHeader(key string) bool {
-	switch strings.ToLower(key) {
-	case "authorization", "proxy-authorization", "x-api-key", "api-key", "cookie", "set-cookie", "host", "content-length", "transfer-encoding", "connection", "content-encoding", "openai-beta", "chatgpt-account-id", "originator":
+
+// protectedHeader reports whether the host owns this header, so a plugin may
+// neither read it from the input snapshot nor set or delete it. The static list
+// covers only generic, protocol-level headers: credentials, framing, and the
+// content coding (a plugin that claimed an encoding without performing it would
+// corrupt the body). Provider identity headers are not named here — hostDeclared
+// covers whatever the downstream declared, so a provider's own header is
+// protected without this function knowing any provider.
+func protectedHeader(key string, hostDeclared map[string]bool) bool {
+	lower := strings.ToLower(key)
+	switch lower {
+	case "authorization", "proxy-authorization", "x-api-key", "api-key", "cookie", "set-cookie", "host", "content-length", "transfer-encoding", "connection", "content-encoding", "openai-beta":
 		return true
 	}
-	return strings.HasPrefix(strings.ToLower(key), "sec-") || strings.HasPrefix(strings.ToLower(key), "x-tresor-")
+	if hostDeclared[lower] {
+		return true
+	}
+	return strings.HasPrefix(lower, "sec-") || strings.HasPrefix(lower, "x-tresor-")
 }
-func headerSnapshot(headers http.Header) map[string]any {
+
+// declaredHeaderSet lowercases a downstream's declared header names so they can be
+// protected alongside the static list.
+func declaredHeaderSet(ctx *PipelineContext) map[string]bool {
+	if ctx == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	// Protected if the downstream declared it, whether or not it resolved. A declared
+	// claim that produced no value is still the host's to decide: letting a plugin
+	// set it would let the plugin speak as the provider on exactly the header the
+	// operator meant to control.
+	if ds := ctx.TargetDownstream; ds != nil && ds.Auth != nil {
+		for name := range ds.Auth.ExtraHeaders {
+			out[strings.ToLower(name)] = true
+		}
+	}
+	for name := range ctx.ExtraHeaders {
+		out[strings.ToLower(name)] = true
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+func headerSnapshot(headers http.Header, hostDeclared map[string]bool) map[string]any {
 	out := map[string]any{}
 	for key, values := range headers {
 		key = strings.ToLower(key)
-		if !protectedHeader(key) {
+		if !protectedHeader(key, hostDeclared) {
 			copy := append([]string{}, values...)
 			out[key] = copy
 		}
@@ -112,7 +154,7 @@ func requestSnapshot(req *http.Request, ctx *PipelineContext) map[string]any {
 	} else if ctx.TargetDownstream != nil && ctx.TargetDownstream.FormatPaths[ctx.DownstreamFormat] != "" {
 		path = ctx.TargetDownstream.FormatPaths[ctx.DownstreamFormat]
 	}
-	return map[string]any{"method": req.Method, "path": path, "query": req.URL.RawQuery, "headers": headerSnapshot(req.Header)}
+	return map[string]any{"method": req.Method, "path": path, "query": req.URL.RawQuery, "headers": headerSnapshot(req.Header, declaredHeaderSet(ctx))}
 }
 func (p *ExternalPlugin) input(ctx *PipelineContext) map[string]any {
 	p.ctx = ctx
@@ -145,7 +187,7 @@ func validKeys(m map[string]any, allowed ...string) error {
 	}
 	return nil
 }
-func patchHeaders(original http.Header, raw map[string]any) (http.Header, error) {
+func patchHeaders(original http.Header, raw map[string]any, hostDeclared map[string]bool) (http.Header, error) {
 	out := original.Clone()
 	seen := map[string]bool{}
 	if value, ok := raw["setHeaders"]; ok {
@@ -155,7 +197,7 @@ func patchHeaders(original http.Header, raw map[string]any) (http.Header, error)
 		}
 		for key, value := range sets {
 			lower := strings.ToLower(key)
-			if !httpguts.ValidHeaderFieldName(key) || protectedHeader(key) || seen[lower] {
+			if !httpguts.ValidHeaderFieldName(key) || protectedHeader(key, hostDeclared) || seen[lower] {
 				return nil, fmt.Errorf("unsafe/duplicate header %s", key)
 			}
 			seen[lower] = true
@@ -192,7 +234,7 @@ func patchHeaders(original http.Header, raw map[string]any) (http.Header, error)
 		}
 		for _, entry := range array {
 			key, ok := entry.(string)
-			if !ok || !httpguts.ValidHeaderFieldName(key) || protectedHeader(key) || seen[strings.ToLower(key)] {
+			if !ok || !httpguts.ValidHeaderFieldName(key) || protectedHeader(key, hostDeclared) || seen[strings.ToLower(key)] {
 				return nil, fmt.Errorf("unsafe/conflicting header deletion")
 			}
 			seen[strings.ToLower(key)] = true
@@ -244,7 +286,7 @@ func (p *ExternalPlugin) transformRequest(req *http.Request, body []byte, ctx *P
 		if err := validKeys(patch, "method", "path", "query", "setHeaders", "deleteHeaders"); err != nil {
 			return nil, nil, err
 		}
-		clone.Header, err = patchHeaders(req.Header, patch)
+		clone.Header, err = patchHeaders(req.Header, patch, declaredHeaderSet(ctx))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -313,13 +355,13 @@ func (p *ExternalPlugin) transformRequest(req *http.Request, body []byte, ctx *P
 func (p *ExternalPlugin) metadata(ctx *PipelineContext, resp *http.Response) map[string]any {
 	input := p.input(ctx)
 	input["request"] = requestSnapshot(p.request, ctx)
-	input["response"] = map[string]any{"status": resp.StatusCode, "headers": headerSnapshot(resp.Header)}
+	input["response"] = map[string]any{"status": resp.StatusCode, "headers": headerSnapshot(resp.Header, declaredHeaderSet(ctx))}
 	return input
 }
-func applyResponse(result map[string]any, resp *http.Response, body []byte, allowBody bool) ([]byte, error) {
-	return applyResponseLimit(result, resp, body, allowBody, externalValueLimit, false)
+func applyResponse(result map[string]any, resp *http.Response, body []byte, allowBody bool, ctx *PipelineContext) ([]byte, error) {
+	return applyResponseLimit(result, resp, body, allowBody, externalValueLimit, false, ctx)
 }
-func applyResponseLimit(result map[string]any, resp *http.Response, body []byte, allowBody bool, limit int, collection bool) ([]byte, error) {
+func applyResponseLimit(result map[string]any, resp *http.Response, body []byte, allowBody bool, limit int, collection bool, ctx *PipelineContext) ([]byte, error) {
 	if result == nil {
 		return body, nil
 	}
@@ -347,7 +389,7 @@ func applyResponseLimit(result map[string]any, resp *http.Response, body []byte,
 		if err := validKeys(patch, "setHeaders", "deleteHeaders"); err != nil {
 			return nil, err
 		}
-		headers, err = patchHeaders(resp.Header, patch)
+		headers, err = patchHeaders(resp.Header, patch, declaredHeaderSet(ctx))
 		if err != nil {
 			return nil, err
 		}
@@ -375,7 +417,7 @@ func (t externalResponse) TransformResponse(resp *http.Response, body []byte, ct
 		return nil, err
 	}
 	limits := jsplugins.EffectiveLimits(ctx.execution().Large)
-	out, err := applyResponseLimit(result, resp, body, true, limits.BodyBytes, true)
+	out, err := applyResponseLimit(result, resp, body, true, limits.BodyBytes, true, ctx)
 	return out, t.p.invocationFailure("response", err)
 }
 func (p *Pipeline) beginAttempt(ctx *PipelineContext, req *http.Request, index int) error {
@@ -457,7 +499,7 @@ func (p *Pipeline) responseHeaders(resp *http.Response, ctx *PipelineContext) er
 		if err != nil {
 			return err
 		}
-		if _, err := applyResponse(result, resp, nil, false); err != nil {
+		if _, err := applyResponse(result, resp, nil, false, ctx); err != nil {
 			return step.invocationFailure("responseHeaders", err)
 		}
 	}

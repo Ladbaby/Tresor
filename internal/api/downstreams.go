@@ -4,18 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
-	"time"
 
 	"tresor/internal/config"
+	"tresor/internal/discovery"
 	"tresor/internal/engine"
 	"tresor/internal/oauth"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
+	"tresor/internal/wire"
 )
 
 // handleDownstreams handles GET and POST on /api/downstreams.
@@ -72,6 +71,12 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		plugins, err := validateDownstreamPlugins(ds.Plugins)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		ds.Plugins = plugins
 		if err := r.store.CreateDownstream(&ds); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -104,6 +109,29 @@ func maskDownstreamAPIKey(ds *store.Downstream) {
 	}
 }
 
+// validateDownstreamPlugins checks and normalizes the downstream-scoped plugin
+// bindings in place, reusing the rule pipeline validator so both kinds of
+// binding obey one set of rules (unique ids, bounded config, failure policy).
+//
+// The plugin id itself is deliberately NOT resolved here: a downstream may
+// legitimately be saved before its plugin is installed, and the install order
+// is the user's choice. An unloadable binding is reported at request time and
+// degrades to the downstream's generic path rather than failing the request.
+func validateDownstreamPlugins(steps []config.PipelineStep) ([]config.PipelineStep, error) {
+	if len(steps) == 0 {
+		return []config.PipelineStep{}, nil
+	}
+	for i := range steps {
+		if strings.TrimSpace(steps[i].PluginID) == "" {
+			return nil, fmt.Errorf("plugins[%d]: plugin_id is required", i)
+		}
+	}
+	if err := config.NormalizePipeline(&steps); err != nil {
+		return nil, fmt.Errorf("plugins: %w", err)
+	}
+	return steps, nil
+}
+
 // validateFormatPath ensures a per-format request path is a well-formed
 // relative path: it must start with "/" and must not be an absolute URL or a
 // protocol-relative reference ("//host/..."), since it is concatenated onto
@@ -134,6 +162,15 @@ func validateAuthForStore(auth *config.DownstreamAuthCfg) error {
 	}
 	if auth.Type == "" {
 		auth.Type = "api_key"
+	}
+	// Declared headers are validated for every auth type, and an unknown wire
+	// adapter is an error here rather than a silent downgrade to generic
+	// behavior at request time.
+	if err := config.ValidateHeaderValues(auth.ExtraHeaders); err != nil {
+		return err
+	}
+	if _, ok := wire.For(auth.Wire); !ok {
+		return fmt.Errorf("wire: unknown adapter %q (available: %s)", auth.Wire, strings.Join(wire.Names(), ", "))
 	}
 	if auth.Type == "oauth" {
 		if _, err := oauth.Normalize(*auth, http.DefaultClient); err != nil {
@@ -243,14 +280,15 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 
 	case http.MethodPut:
 		var patch struct {
-			Name           *string            `json:"name"`
-			BaseURL        *string            `json:"base_url"`
-			ApiFormats     *[]string          `json:"api_formats"`
-			OutputModelIDs *[]string          `json:"output_model_ids"`
-			FormatURLs     *map[string]string `json:"format_urls"`
-			FormatPaths    *map[string]string `json:"format_paths"`
-			IsEnabled      *bool              `json:"is_enabled"`
+			Name           *string                   `json:"name"`
+			BaseURL        *string                   `json:"base_url"`
+			ApiFormats     *[]string                 `json:"api_formats"`
+			OutputModelIDs *[]string                 `json:"output_model_ids"`
+			FormatURLs     *map[string]string        `json:"format_urls"`
+			FormatPaths    *map[string]string        `json:"format_paths"`
+			IsEnabled      *bool                     `json:"is_enabled"`
 			Auth           *config.DownstreamAuthCfg `json:"auth"`
+			Plugins        *[]config.PipelineStep    `json:"plugins"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -324,6 +362,17 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 				patch.Auth.ClientSecret = existing.Auth.ClientSecret
 			}
 			existing.Auth = patch.Auth
+		}
+
+		// Downstream-scoped plugin bindings. A non-nil Plugins replaces the
+		// whole list, so clearing a binding is an explicit empty array.
+		if patch.Plugins != nil {
+			plugins, err := validateDownstreamPlugins(*patch.Plugins)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			existing.Plugins = plugins
 		}
 
 		if existing.BaseURL != "" {
@@ -491,6 +540,11 @@ func (r *Router) handleDownstreamFetchModels(w http.ResponseWriter, req *http.Re
 
 // fetchModels calls the downstream provider's /models endpoint to discover available models.
 // It tries multiple URL patterns (/v1/models, /models) and returns specific error messages.
+// dialectDiscoveryPlugin is the DialectDeclaration.Discovery value that means
+// "ask the dialect". The constant lives here rather than in jsplugins so the API
+// package does not take a dependency on the plugin runtime.
+const dialectDiscoveryPlugin = "plugin"
+
 func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 	// Use the per-format URL for the primary format when configured, matching
 	// the engine's URL selection rule (format_urls[primary] if set, else base_url).
@@ -500,6 +554,31 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 			baseURL = u
 		}
 	}
+
+	in := discovery.Input{BaseURL: baseURL, Formats: ds.ApiFormats}
+
+	// A provider whose auth block names a wire adapter also inherits that
+	// dialect's model discovery. Reading it from the adapter (rather than from a
+	// separate profile field) keeps the schema at exactly one field per axis and
+	// ties discovery to the provider's identity, not to a guess.
+	//
+	// With no adapter, the declared formats decide — a gemini downstream is asked
+	// in Google's shape, everything else in the OpenAI shape — so a downstream
+	// that declares nothing keeps the behavior it had before strategies existed.
+	var adapter wire.Adapter
+	if ds.Auth != nil {
+		if a, ok := wire.For(ds.Auth.Wire); ok && a != nil {
+			adapter = a
+		}
+	}
+	strategy := ""
+	if adapter != nil {
+		strategy = adapter.Discovery()
+	}
+	if strategy == "" {
+		strategy = discovery.Pick(ds.ApiFormats)
+	}
+
 	if ds.IsOAuth() {
 		if r.oauthMgr == nil {
 			return nil, fmt.Errorf("OAuth support is not enabled on this daemon")
@@ -508,374 +587,43 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("provider not connected — finish the OAuth login in the Downstreams tab")
 		}
-		// The ChatGPT/Codex backend (identified by the chatgpt-account-id
-		// header the OAuth manager injects) serves a Codex models manifest at
-		// {base}/models, not an OpenAI-style /models. Fetch it with the Codex
-		// client identity + version headers the endpoint requires.
-		if _, ok := extraHeaders["chatgpt-account-id"]; ok {
-			return fetchCodexModels(baseURL, token, extraHeaders["chatgpt-account-id"])
-		}
-		return fetchModelsByCreds(baseURL, token, ds.ApiFormats)
-	}
-	return fetchModelsByCreds(baseURL, ds.EffectiveAPIKey(), ds.ApiFormats)
-}
-
-// Codex models-manifest client identity. The ChatGPT Codex backend serves a
-// models manifest (not an OpenAI-style /models) and only accepts it under the
-// official Codex CLI identity, with a client version at or above an upstream
-// floor — below that the endpoint 404s. These values mirror the known-good
-// sub2api recipe, which has been verified against the live backend. Package
-// vars so tests can pin them.
-var (
-	codexModelsOriginator = "codex-tui"
-	// codexModelsVersion is the FALLBACK client version used when the GitHub
-	// release lookup (below) fails. The Codex backend gates the manifest on an
-	// upper bound, and returns different model catalogs per version, so we
-	// prefer the newest released version and only fall back here.
-	codexModelsVersion = "0.146.0"
-	// codexLatestReleaseURL points at the GitHub releases API for the newest
-	// openai/codex release. Overridable in tests.
-	codexLatestReleaseURL = "https://api.github.com/repos/openai/codex/releases/latest"
-	// codexVersionLookup discovers the newest codex version. Tests override
-	// this to keep the fetch offline and deterministic.
-	codexVersionLookup = latestCodexVersion
-)
-
-// codexUserAgent builds the Codex CLI User-Agent for a given client version.
-func codexUserAgent(version string) string {
-	return "codex-tui/" + version + " (Ubuntu 22.4.0; x86_64) xterm-256color"
-}
-
-// latestCodexVersion queries the GitHub releases API for the newest
-// openai/codex release and returns its clean version string — the release
-// "name" (e.g. "0.157.1"), which is the semver without the "rust-v" tag
-// prefix. Returns "" on any failure (network error, non-200, unparseable or
-// non-numeric version) so the caller falls back to codexModelsVersion.
-func latestCodexVersion(ctx context.Context) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexLatestReleaseURL, nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
-	var rel struct {
-		Name string `json:"name"`
-		Tag  string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
-		return ""
-	}
-	v := strings.TrimSpace(rel.Name)
-	if v == "" {
-		// Fall back to the tag name, stripping the codex "rust-v" prefix and
-		// a leading "v" if present.
-		v = strings.TrimPrefix(strings.TrimSpace(rel.Tag), "rust-v")
-		v = strings.TrimPrefix(v, "v")
-	}
-	if !isCodexVersion(v) {
-		return ""
-	}
-	return v
-}
-
-// isCodexVersion loosely validates that v looks like a dotted numeric version
-// (e.g. "0.157.1"), guarding against garbage from the API.
-func isCodexVersion(v string) bool {
-	if v == "" {
-		return false
-	}
-	for _, part := range strings.Split(v, ".") {
-		if part == "" {
-			return false
-		}
-		for _, c := range part {
-			if c < '0' || c > '9' {
-				return false
+		in.Token = token
+		// The OAuth manager's headers carry the identity the runtime sends
+		// (chatgpt-account-id, originator, User-Agent), so discovery asks as the
+		// same client instead of guessing.
+		in.ExtraHeaders = extraHeaders
+	} else {
+		in.Token = ds.EffectiveAPIKey()
+		// Declared headers apply to api_key providers too (literal and template
+		// values; a claim finds nothing). They must reach discovery as well, or a
+		// relay whose model list is gated on an identity header fetches anonymously
+		// and 401s while its chat requests work.
+		if ds.Auth != nil && len(ds.Auth.ExtraHeaders) > 0 {
+			if resolved, err := oauth.ResolveHeaderValues(ds.Auth.ExtraHeaders, in.Token, nil); err == nil {
+				in.ExtraHeaders = resolved
 			}
 		}
 	}
-	return true
-}
 
-// fetchCodexModels lists the models a ChatGPT/Codex OAuth account can serve.
-// It GETs {base}/models with the Codex CLI identity headers (Originator,
-// User-Agent, Version) and a client_version query param, then parses the
-// manifest envelope { "models": [ { "slug": "gpt-6-luna", ... }, ... ] }.
-func fetchCodexModels(baseURL, token, accountID string) ([]string, error) {
-	if token == "" {
-		return nil, fmt.Errorf("no access token — finish the ChatGPT login in the Downstreams tab")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), discovery.Timeout)
 	defer cancel()
 
-	// Prefer the newest released codex version (the manifest catalog is
-	// version-gated and differs per release); fall back to the pinned version
-	// if the GitHub lookup is unavailable.
-	version := codexVersionLookup(ctx)
-	if version == "" {
-		version = codexModelsVersion
+	// A dialect that knows its provider's model protocol answers it itself. The
+	// host still performs the HTTP request, so this is provider knowledge without
+	// giving a package network access.
+	if strategy == dialectDiscoveryPlugin {
+		discoverer, ok := adapter.(wire.Discoverer)
+		if !ok {
+			return nil, fmt.Errorf("wire adapter %q declares plugin discovery but does not implement it", adapter.Name())
+		}
+		return discoverer.DiscoverModels(ctx, baseURL, in.Token, in.ExtraHeaders)
 	}
 
-	endpoint := strings.TrimSuffix(baseURL, "/") + "/models"
-	q := url.Values{}
-	q.Set("client_version", version)
-	endpoint = endpoint + "?" + q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	s, err := discovery.For(strategy)
 	if err != nil {
-		return nil, fmt.Errorf("build codex models request: %w", err)
+		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if accountID != "" {
-		req.Header.Set("chatgpt-account-id", accountID)
-	}
-	req.Header.Set("Originator", codexModelsOriginator)
-	req.Header.Set("User-Agent", codexUserAgent(version))
-	req.Header.Set("Version", version)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch codex models: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return nil, fmt.Errorf("codex backend rejected the token while listing models (HTTP %d) — the login may have expired, reconnect in the Downstreams tab", resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("codex models endpoint returned HTTP %d", resp.StatusCode)
-	}
-
-	// The manifest is a Codex envelope; the model id lives under each entry's
-	// "slug" (e.g. "gpt-6-luna"). Fall back to "id" in case the shape drifts.
-	var envelope struct {
-		Models []struct {
-			Slug string `json:"slug"`
-			ID   string `json:"id"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("parse codex models response: %w", err)
-	}
-	models := make([]string, 0, len(envelope.Models))
-	seen := make(map[string]struct{}, len(envelope.Models))
-	for _, m := range envelope.Models {
-		id := m.Slug
-		if id == "" {
-			id = m.ID
-		}
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		if _, dup := seen[id]; dup {
-			continue
-		}
-		seen[id] = struct{}{}
-		models = append(models, id)
-	}
-	if len(models) == 0 {
-		return nil, fmt.Errorf("codex models endpoint returned no models")
-	}
-	return models, nil
-}
-
-// fetchModelsByCreds fetches models given raw credentials (used for both existing
-// downstreams and the create-new-downstream form).
-// apiFormats is used to choose provider-specific endpoints (e.g. Gemini).
-func fetchModelsByCreds(baseURL, apiKey string, apiFormats []string) ([]string, error) {
-	if apiKey == "" {
-		return nil, fmt.Errorf("no API key configured — add an API key before fetching models")
-	}
-
-	baseURL = strings.TrimSuffix(baseURL, "/")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Gemini probe: GET {baseURL}{path}?key={apiKey} (or x-goog-api-key header).
-	// Response shape: { "models": [ { "name": "models/gemini-2.5-pro", ... }, ... ] }.
-	// The official Google Generative AI endpoint is {baseURL}/v1beta/models,
-	// but providers occasionally mount it at bare /models. Probe both.
-	if slices.Contains(apiFormats, "gemini") {
-		geminiEndpoints := []string{baseURL + "/v1beta/models", baseURL + "/models"}
-		for _, url := range geminiEndpoints {
-			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-			if err != nil {
-				continue
-			}
-			req.Header.Set("x-goog-api-key", apiKey)
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				// Try the next probe URL.
-				continue
-			}
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
-				return nil, fmt.Errorf("authentication failed — check the API key")
-			}
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				var geminiResp struct {
-					Models []struct {
-						Name string `json:"name"`
-					} `json:"models"`
-				}
-				if err := json.Unmarshal(body, &geminiResp); err == nil && len(geminiResp.Models) > 0 {
-					models := make([]string, 0, len(geminiResp.Models))
-					for _, m := range geminiResp.Models {
-						// Strip the "models/" prefix from each entry.
-						name := strings.TrimPrefix(m.Name, "models/")
-						if name != "" {
-							models = append(models, name)
-						}
-					}
-					if len(models) > 0 {
-						return models, nil
-					}
-				}
-				// Body decoded but no models found — try the next URL.
-				continue
-			}
-			// Non-2xx (e.g. 404): try the next URL.
-		}
-		return nil, fmt.Errorf("gemini /v1beta/models and /models both returned no models in expected format")
-	}
-
-	// Try common model endpoint patterns (OpenAI / Anthropic / generic)
-	endpoints := []string{
-		baseURL + "/models",   // OpenAI-style /v1/models (base_url already includes /v1)
-		baseURL + "/v1/models", // Some providers need explicit /v1 prefix
-	}
-
-	// Decide which auth styles to try. A downstream declaring multiple
-	// formats (e.g. minimax with [openai, anthropic]) may serve /models on
-	// EITHER scheme — probe each declared format with its matching auth
-	// header and succeed on the first one that returns a parseable body.
-	// When apiFormats is empty, fall back to Bearer (OpenAI-compatible).
-	authSchemes := buildAuthSchemeList(apiFormats)
-
-	var lastError string
-
-	for _, url := range endpoints {
-		for _, scheme := range authSchemes {
-			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-			if err != nil {
-				continue
-			}
-			scheme.apply(req, apiKey)
-
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				lastError = "unable to connect to provider"
-				continue
-			}
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
-				// Wrong auth style for this endpoint — try the next scheme.
-				lastError = "authentication failed — check the API key"
-				continue
-			}
-			if resp.StatusCode >= 400 {
-				lastError = "provider returned unexpected response"
-				continue
-			}
-
-			// Try to parse as OpenAI-style response: {"data": [{"id": "..."}]}
-			var openaiResp struct {
-				Data []struct {
-					ID string `json:"id"`
-				} `json:"data"`
-			}
-			if err := json.Unmarshal(body, &openaiResp); err == nil && len(openaiResp.Data) > 0 {
-				models := make([]string, 0, len(openaiResp.Data))
-				for _, m := range openaiResp.Data {
-					models = append(models, m.ID)
-				}
-				return models, nil
-			}
-
-			// Fallback: try raw array of strings
-			var strArr []string
-			if err := json.Unmarshal(body, &strArr); err == nil && len(strArr) > 0 {
-				return strArr, nil
-			}
-
-			lastError = "unrecognized response format"
-			// Body decoded but no models found — try the next URL or scheme.
-			break
-		}
-	}
-
-	return nil, fmt.Errorf("%s. No working models endpoint found", lastError)
-}
-
-// authScheme describes how to attach credentials to a fetch-models probe
-// request. The fetch-models probe loops over declared formats, so an
-// api_formats: [openai, anthropic] downstream tries BOTH Bearer and
-// x-api-key rather than hardcoding whichever the list contains.
-type authScheme struct {
-	name  string
-	apply func(req *http.Request, apiKey string)
-}
-
-var (
-	bearerAuth = authScheme{
-		name: "bearer",
-		apply: func(req *http.Request, apiKey string) {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		},
-	}
-	anthropicAuth = authScheme{
-		name: "anthropic",
-		apply: func(req *http.Request, apiKey string) {
-			req.Header.Set("x-api-key", apiKey)
-			req.Header.Set("anthropic-version", "2023-06-01")
-		},
-	}
-)
-
-// buildAuthSchemeList picks the auth styles to probe, in priority order,
-// based on the downstream's declared api_formats. When the list contains
-// only one format we only need to try that one; when it contains several
-// we try each so multi-format providers (minimax, llama-swap) don't lock
-// out the format that actually serves /models. An empty list falls back
-// to Bearer.
-func buildAuthSchemeList(apiFormats []string) []authScheme {
-	if len(apiFormats) == 0 {
-		return []authScheme{bearerAuth}
-	}
-	seen := map[string]bool{}
-	var out []authScheme
-	for _, f := range apiFormats {
-		switch f {
-		case "openai", "openai_responses":
-			if !seen["bearer"] {
-				out = append(out, bearerAuth)
-				seen["bearer"] = true
-			}
-		case "anthropic":
-			if !seen["anthropic"] {
-				out = append(out, anthropicAuth)
-				seen["anthropic"] = true
-			}
-		}
-	}
-	if len(out) == 0 {
-		return []authScheme{bearerAuth}
-	}
-	return out
+	return s.Models(ctx, in)
 }
 
 // handleFetchModels handles POST /api/fetch-models.
@@ -905,11 +653,18 @@ func (r *Router) handleFetchModels(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	var formats []string
-	if len(body.Formats) > 0 {
-		formats = body.Formats
+	strategy, err := discovery.For(discovery.Pick(body.Formats))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "fetch failed: "+err.Error())
+		return
 	}
-	models, err := fetchModelsByCreds(body.BaseURL, body.APIKey, formats)
+	ctx, cancel := context.WithTimeout(req.Context(), discovery.Timeout)
+	defer cancel()
+	models, err := strategy.Models(ctx, discovery.Input{
+		BaseURL: body.BaseURL,
+		Token:   body.APIKey,
+		Formats: body.Formats,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "fetch failed: "+err.Error())
 		return

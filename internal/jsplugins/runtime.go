@@ -1,6 +1,9 @@
 package jsplugins
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -9,7 +12,21 @@ import (
 	"tresor/internal/integrations"
 
 	"github.com/dop251/goja"
+	"github.com/klauspost/compress/zstd"
 )
+
+// zstdEncoder is built once and shared. klauspost's encoder is safe for
+// concurrent use, and SpeedDefault maps to the level a provider's reference
+// client uses, which is what makes an encoded body comparable.
+var zstdEncoder = newZstdEncoder()
+
+func newZstdEncoder() *zstd.Encoder {
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		return nil
+	}
+	return enc
+}
 
 type Instance struct {
 	pkg          *Package
@@ -275,6 +292,42 @@ func (i *Instance) Reset() (result error) {
 				return i.vm.ToValue(i.kv.Delete(ns, key))
 			})
 		}
+		if contains(i.pkg.Manifest.Requires, "crypto.v1") {
+			// A digest over UTF-8 text. Text, not a byte array, because every value
+			// a dialect hashes here is a JSON body or a derived string; treating it
+			// as text avoids a lossy marshalling step and keeps the boundary small.
+			i.vm.Set("__tresorSHA256Hex", func(call goja.FunctionCall) goja.Value {
+				text, ok := call.Argument(0).Export().(string)
+				if !ok || len(text) > i.limits.BodyBytes {
+					panic(i.vm.NewTypeError("sha256 input must be bounded text"))
+				}
+				sum := sha256.Sum256([]byte(text))
+				return i.vm.ToValue(hex.EncodeToString(sum[:]))
+			})
+		}
+		if contains(i.pkg.Manifest.Requires, "compress.v1") {
+			// The encoder is the same one the provider's reference client is matched
+			// against, so a dialect that compresses inside JS could never be
+			// byte-identical. Input and output limits reuse the body limit, and the
+			// result is returned base64 so no byte array crosses the boundary.
+			i.vm.Set("__tresorZstdCompress", func(call goja.FunctionCall) goja.Value {
+				text, ok := call.Argument(0).Export().(string)
+				if !ok || len(text) > i.limits.BodyBytes {
+					panic(i.vm.NewTypeError("compress input must be bounded text"))
+				}
+				if zstdEncoder == nil {
+					panic(i.vm.NewTypeError("compression unavailable"))
+				}
+				out := zstdEncoder.EncodeAll([]byte(text), nil)
+				if len(out) > i.limits.BodyBytes {
+					panic(i.vm.NewTypeError("compressed body exceeds limit"))
+				}
+				result := i.vm.NewObject()
+				result.Set("base64", base64.StdEncoding.EncodeToString(out))
+				result.Set("byteLength", len(out))
+				return result
+			})
+		}
 		modules := map[string]goja.Value{}
 		var load func(string) (goja.Value, error)
 		load = func(name string) (goja.Value, error) {
@@ -526,7 +579,7 @@ function __tresorInvoke(exports,name,raw,limit,stateLimit,maxEvents,body){
  if(result===undefined)return undefined;
  try {
  if(!result || typeof result!=='object' || Array.isArray(result) || typeof result.then==='function')__tresorFault('invalid_effect');
- const allowed={prepare:['service','operation','payload'],prepared:['kind','service','operation','payload','codec','instructions','tools','stream'],request:['request','body','transport'],responseHeaders:['response'],response:['response','body'],upstreamStart:['events'],upstreamEvent:['events'],upstreamEnd:['events'],streamStart:['events'],streamEvent:['events'],streamEnd:['events'],collectStart:[],collectEvent:[],collectEnd:['body','response'],finish:[]}[name];
+ const allowed={prepare:['service','operation','payload'],prepared:['kind','service','operation','payload','codec','instructions','tools','stream'],wirePrepare:['body','headers'],wireDiscover:['path','query','headers'],wireParseModels:['models'],request:['request','body','transport'],responseHeaders:['response'],response:['response','body'],upstreamStart:['events'],upstreamEvent:['events'],upstreamEnd:['events'],streamStart:['events'],streamEvent:['events'],streamEnd:['events'],collectStart:[],collectEvent:[],collectEnd:['body','response'],finish:[]}[name];
  for(const k of __tresorKeys(result))if(!allowed.includes(k))__tresorFault('invalid_effect');
 
  if(result.events!==undefined&&(!Array.isArray(result.events)||result.events.length>maxEvents))__tresorFault('invalid_effect');

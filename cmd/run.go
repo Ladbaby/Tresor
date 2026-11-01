@@ -19,10 +19,13 @@ import (
 	"tresor/internal/jsplugins"
 	"tresor/internal/oauth"
 	"tresor/internal/plugins"
+	"tresor/internal/providers"
 	"tresor/internal/proxy"
 	"tresor/internal/store"
 
 	"github.com/spf13/cobra"
+	"strings"
+	"tresor/internal/wire"
 )
 
 var runCmd = &cobra.Command{
@@ -112,6 +115,20 @@ func runDaemon(cfg *config.AppConfig) error {
 	reg := plugins.NewManagedRegistry(pluginManager)
 	eng.SetRegistry(reg)
 
+	// Provider dialects are plugins, not compiled-in Go. Installing the resolver
+	// here makes `auth.wire` resolve through the manager's enabled packages, so a
+	// new dialect is an install rather than a build.
+	wire.SetSource(engine.NewDialectSource(pluginManager))
+
+	// Checked only now, because a dialect comes from an installed package: the
+	// resolver must exist first, or a config that correctly names an installed
+	// dialect would look broken. A missing dialect is reported loudly but does not
+	// stop the daemon — the dashboard is where the package gets installed, so
+	// refusing to start would lock the user out of the only fix. Requests to that
+	// downstream fail per-request with a shaping error; they are never forwarded
+	// unshaped, which is what would silently strip the provider's policy.
+	warnWireAdapters(cfg, s)
+
 	// Configure outbound proxy for downstream requests
 	eng.SetProxyMode(proxy.Mode(cfg.ProxyMode))
 
@@ -175,6 +192,29 @@ func runDaemon(cfg *config.AppConfig) error {
 
 	// Build admin API router
 	adminRouter := api.NewRouter(s, eng, logger, payloadStore, iconFetcher, cfg, Version, BuildTime)
+
+	// Provider catalog: an online index of installable provider profiles, cached
+	// beside the DB. There is no compiled-in copy, so the catalog starts empty
+	// until the cached index is read or the refresh below lands; that refresh is
+	// best-effort and never blocks startup.
+	providerCacheDir := cfg.ProviderCacheDir
+	if providerCacheDir == "" {
+		providerCacheDir = filepath.Join(filepath.Dir(cfg.DBPath), "tresor-providers")
+	}
+	catalog := providers.NewCatalog(providerCacheDir, proxy.Mode(cfg.ProxyMode),
+		jsplugins.SupportedFeatures(), Version, nil)
+	adminRouter.SetProviderCatalog(catalog)
+	go func() {
+		// A short delay keeps a catalog fetch off the startup path entirely.
+		select {
+		case <-refreshCtx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+		if err := catalog.Refresh(refreshCtx); err != nil {
+			log.Printf("provider catalog: %v", err)
+		}
+	}()
 	adminRouter.SetOAuthManager(oauthMgr)
 	adminRouter.SetPluginManager(pluginManager)
 	webHandler := api.WebHandler()
@@ -267,6 +307,57 @@ func purgeOldUsageStats(s *store.Store) error {
 		log.Printf("usage_stats janitor: no rows older than %s to delete", cutoff.Format("2006-01-02"))
 	}
 	return nil
+}
+
+// warnWireAdapters reports every downstream whose auth block names a dialect this
+// daemon cannot execute. The name is resolved through the registry, so this needs
+// no list of its own and a newly installed dialect is accepted automatically.
+//
+// It warns rather than fails: the fix is installing a package through the
+// dashboard, so refusing to start would make the problem unfixable. The request
+// path still fails loudly for that downstream (see dialect_adapter), so the
+// provider is never sent an unshaped request.
+//
+// Both the YAML and the stored rows are checked: a provider added through the
+// dashboard lives only in the database, and it breaks the same way if the package
+// that provides its dialect is later deleted.
+func warnWireAdapters(cfg *config.AppConfig, st *store.Store) {
+	checked := map[string]bool{}
+	for _, ds := range cfg.Downstreams {
+		checked[ds.ID] = true
+		logMissingWire(ds.ID, ds.Auth)
+	}
+	if st == nil {
+		return
+	}
+	stored, err := st.ListDownstreams()
+	if err != nil {
+		log.Printf("warning: could not check stored downstreams for a missing provider dialect: %v", err)
+		return
+	}
+	for _, ds := range stored {
+		if checked[ds.ID] {
+			continue
+		}
+		logMissingWire(ds.ID, ds.Auth)
+	}
+}
+
+// logMissingWire warns about one downstream whose dialect is unavailable.
+func logMissingWire(id string, auth *config.DownstreamAuthCfg) {
+	if auth == nil || auth.Wire == "" {
+		return
+	}
+	if _, ok := wire.For(auth.Wire); ok {
+		return
+	}
+	available := strings.Join(wire.Names(), ", ")
+	if available == "" {
+		available = "none installed"
+	}
+	log.Printf("warning: downstream %s: auth.wire %q is not provided by any installed plugin package "+
+		"(available: %s). Requests to this provider will fail until the package is installed "+
+		"(Dashboard > Downstreams > Browse providers).", id, auth.Wire, available)
 }
 
 // migrateLegacyOAuthProvidersYAML clears the parsed legacy oauth_providers

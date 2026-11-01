@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"tresor/internal/wire"
 )
 
 // SSRF validation is not applied here — downstreams are admin-configured via auth-protected API.
@@ -61,10 +63,19 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	}
 
 	outBody := body
-	var codex codexRequest
-	if ctx.CodexBackend {
-		codex = prepareCodexRequest(original, body)
-		outBody = codex.body
+	var wirePrepared wire.Prepared
+	if ctx.Wire != nil {
+		wirePrepared = ctx.Wire.PrepareRequest(wire.Request{Original: original, Body: body})
+		// A dialect that failed to shape the request must stop the attempt. Forwarding
+		// the unshaped body would send the provider a request without its identity,
+		// storage opt-out, or correlation id — a silent fingerprint drift, and for a
+		// subscription backend an account-safety problem — while looking like success.
+		if wirePrepared.Err != nil {
+			return nil, func() {}, &shapingError{err: wirePrepared.Err}
+		}
+		if wirePrepared.Body != nil {
+			outBody = wirePrepared.Body
+		}
 	}
 
 	// Build forwarded request. Use a detached context so the downstream connection
@@ -126,10 +137,10 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 			}
 		}
 	}
-	// Apply provider-specific extra headers (e.g. ChatGPT "originator").
+	// Apply the downstream's declared extra headers (resolved earlier).
 	// These do not affect auth selection above; they are additive metadata
 	// the OAuth provider requires on LLM requests.
-	for k, v := range ctx.OAuthExtraHeaders {
+	for k, v := range ctx.ExtraHeaders {
 		forwardedReq.Header.Set(k, v)
 	}
 	forwardedReq.Header.Set("Host", parsedURL.Host)
@@ -142,8 +153,8 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	// fix can be added when that becomes a real problem.
 	forwardedReq.Header.Set("Accept-Encoding", "identity")
 
-	if ctx.CodexBackend {
-		codex.applyHeaders(forwardedReq)
+	if wirePrepared.ApplyHeaders != nil {
+		wirePrepared.ApplyHeaders(forwardedReq)
 	}
 
 	resp, err := e.client.Do(forwardedReq)
@@ -153,3 +164,12 @@ func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *Pipeli
 	}
 	return resp, forwardCancel, nil
 }
+
+// shapingError marks a failure to apply a provider dialect to the outbound
+// request. It is deliberately distinguished from an upstream failure: the request
+// was never sent, the cause is local (a config or package problem), and retrying
+// or falling back to another provider would only hide it.
+type shapingError struct{ err error }
+
+func (e *shapingError) Error() string { return e.err.Error() }
+func (e *shapingError) Unwrap() error { return e.err }

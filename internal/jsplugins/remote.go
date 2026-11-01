@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"errors"
 	"tresor/internal/proxy"
 )
 
@@ -26,6 +28,10 @@ type RemoteInput struct {
 	SHA256    string `json:"sha256,omitempty"`
 	Signature string `json:"signature,omitempty"`
 	PublicKey string `json:"public_key,omitempty"`
+	// ExpectID, when set, requires the bundle to declare this package id. A caller
+	// that installs code on a recipe's behalf uses it so a URL serving a different
+	// package is refused before anything is persisted or enabled.
+	ExpectID string `json:"expect_id,omitempty"`
 }
 
 func validDigest(s string) bool {
@@ -63,6 +69,26 @@ func VerifyBundle(data []byte, input RemoteInput) (map[string]string, Provenance
 	}
 	if input.SHA256 != "" && digest != input.SHA256 {
 		return nil, p, fmt.Errorf("package integrity mismatch")
+	}
+	// Checked here, during verification, so a bundle that is not the package the
+	// caller asked for is refused before it is written to disk or enabled. Checking
+	// after installation would leave the wrong package installed and active.
+	if input.ExpectID != "" {
+		var manifest struct {
+			ID string `json:"id"`
+		}
+		if raw, ok := bundle.Files["manifest.json"]; ok {
+			// Plain decoding, not StrictJSON: this reads one field to confirm the
+			// bundle is the package the caller asked for, and must not impose the
+			// full manifest schema — LoadPackage below does that. Rejecting unknown
+			// fields here would fail every real manifest.
+			if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+				return nil, p, fmt.Errorf("invalid manifest: %w", err)
+			}
+		}
+		if manifest.ID != input.ExpectID {
+			return nil, p, fmt.Errorf("bundle declares package %q, expected %q", manifest.ID, input.ExpectID)
+		}
 	}
 	if input.Signature != "" {
 		key, e := base64.StdEncoding.Strict().DecodeString(input.PublicKey)
@@ -196,9 +222,15 @@ func downloadBundle(ctx context.Context, input RemoteInput, mode proxy.Mode, res
 	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(req)
 	if err != nil {
-		// Do wraps errors with the URL, which may contain signed query secrets.
+		// Do wraps errors with the URL, which may contain signed query secrets, so
+		// the wrapped error is used alone: it carries the cause (refused, timeout,
+		// certificate) that makes the failure actionable, without the URL.
 		if redirectErr != nil {
 			return nil, redirectErr
+		}
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && urlErr.Err != nil {
+			return nil, fmt.Errorf("package download failed: %w", urlErr.Err)
 		}
 		return nil, fmt.Errorf("package download failed")
 	}

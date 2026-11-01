@@ -216,7 +216,7 @@ func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, res
 	}
 	var owner *ExternalPlugin
 	var decision jsplugins.Decision
-	input := map[string]any{"context": ctx.invocationContext(), "routing": jsonObject(routingContext(result, downstreamFormat)), "execution": nil, "request": map[string]any{"method": r.Method, "path": r.URL.Path, "query": r.URL.RawQuery, "headers": headerSnapshot(r.Header)}, "body": payload(result.originalBody)}
+	input := map[string]any{"context": ctx.invocationContext(), "routing": jsonObject(routingContext(result, downstreamFormat)), "execution": nil, "request": map[string]any{"method": r.Method, "path": r.URL.Path, "query": r.URL.RawQuery, "headers": headerSnapshot(r.Header, declaredHeaderSet(ctx))}, "body": payload(result.originalBody)}
 	if ex := executionFromRequest(r); ex != nil {
 		input["execution"] = map[string]any{"id": ex.ExecutionID, "subject": ex.Subject, "assignment": ex.AssignmentID, "epoch": ex.Epoch}
 	}

@@ -2249,6 +2249,7 @@ html[data-theme="light"] form select {
 
 .btn-add-downstream-sidebar {
     margin: 0.5rem;
+    margin-top: 0;
     padding: 0.55rem;
     border: 1px dashed var(--border-color);
     border-radius: 7px;
@@ -2353,6 +2354,19 @@ html[data-theme="light"] form select {
     margin: 1rem 0 0;
 }
 .detail-advanced-content .detail-section:first-child { margin-top: 0.75rem; }
+
+/* Plugins a provider recipe installed. Same table style as the rule plugin table,
+   inside a detail block so they read as "not yours to add to a rule". */
+.tresor-managed-plugins { margin-top: 1.5rem; }
+.tresor-managed-plugins[hidden] { display: none; }
+.managed-plugin-count { font-weight: 400; text-transform: none; letter-spacing: 0; }
+.managed-plugin-state {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+}
+.tresor-managed-plugins .plugin-table-scroll { margin-top: 0.25rem; }
 
 .detail-row {
     display: flex;
@@ -4147,9 +4161,7 @@ td .ds-toggle.rule-toggle {
 
 /* Extra-headers mini editor inside the OAuth panel. */
 .oauth-headers-block {
-    margin-top: 0.5rem;
     padding-top: 0.5rem;
-    border-top: 1px solid var(--border-color);
 }
 .oauth-headers-head {
     display: flex;
@@ -4183,6 +4195,19 @@ td .ds-toggle.rule-toggle {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 .oauth-header-row input:focus { outline: none; border-color: var(--accent); }
+/* The value form selector sits between the header name and its value. It is
+   deliberately narrow so the two text fields keep the row's width. */
+.oauth-header-row select.oauth-header-form {
+    flex: 0 0 5.5rem;
+    padding: 0.35rem 0.3rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.75rem;
+}
+.oauth-header-row select.oauth-header-form:focus { outline: none; border-color: var(--accent); }
+
 .oauth-header-remove {
     background: var(--bg-tertiary);
     color: var(--danger-hover);
@@ -4201,3 +4226,106 @@ td .ds-toggle.rule-toggle {
 .oauth-status.ok { color: #2e9e5b; }
 .oauth-status.pending { color: var(--text-secondary); }
 .oauth-status.error { color: #d64545; }
+
+/* ---- Provider Catalog ---- */
+.btn-catalog {
+    margin-top: 0.5rem;
+}
+
+.provider-catalog-list {
+    max-height: 46vh;
+    overflow-y: auto;
+    border: 1px solid var(--border, #e2e2e2);
+    border-radius: 8px;
+}
+
+.catalog-row {
+    display: block;
+    width: 100%;
+    padding: 0.6rem 0.75rem;
+    border: 0;
+    border-bottom: 1px solid var(--border, #eee);
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+}
+
+.catalog-row:last-child { border-bottom: 0; }
+.catalog-row:hover:not([data-blocked]) { background: var(--bg-hover, #f6f6f6); }
+.catalog-row[data-blocked] { cursor: not-allowed; opacity: 0.65; }
+
+.catalog-row-main {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.catalog-row-name { font-weight: 600; }
+.catalog-row-version { color: var(--text-secondary, #777); font-size: 0.85rem; }
+
+.catalog-badge {
+    margin-left: auto;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    background: var(--bg-secondary, #eee);
+    color: var(--text-secondary, #666);
+}
+
+.catalog-badge.installed { background: #e3f4e6; color: #256b33; }
+.catalog-badge.unavailable { background: #fdecec; color: #a12b2b; }
+
+.catalog-row-reason {
+    margin-top: 0.25rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary, #777);
+}
+
+/* .hidden is only defined for specific components in this stylesheet, so the
+   catalog's own panels need their own rule. */
+.provider-catalog-install.hidden { display: none; }
+
+.provider-catalog-install {
+    margin-top: 0.9rem;
+    padding: 0.85rem;
+    border: 1px solid var(--border, #e2e2e2);
+    border-radius: 8px;
+}
+
+.catalog-field { margin-bottom: 0.6rem; }
+.catalog-field label { display: block; font-size: 0.8rem; margin-bottom: 0.2rem; }
+.catalog-field input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 6px;
+    background: var(--bg-input, var(--bg-secondary, #fff));
+    color: var(--text-primary, inherit);
+    font: inherit;
+}
+
+.catalog-consent {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+    font-size: 0.82rem;
+    margin-bottom: 0.75rem;
+}
+
+.catalog-install-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.provider-catalog-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 0.75rem;
+}

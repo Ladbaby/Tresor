@@ -26,6 +26,11 @@ type AppConfig struct {
 	// Empty defaults to tresor-plugins beside the database.
 	PluginCacheDir string `yaml:"plugin_cache_dir,omitempty"`
 
+	// ProviderCacheDir stores the cached provider catalog. Empty defaults to
+	// <db_dir>/tresor-providers. The catalog index is data, so it can be
+	// refreshed without extracting anything executable.
+	ProviderCacheDir string `yaml:"provider_cache_dir,omitempty"`
+
 	// ProxyMode controls how outbound requests to downstreams are proxied.
 	// Values: "auto" (default, Windows registry > env vars), "env" (env vars only),
 	// "windows" (Windows registry + env fallback), "none" (direct connection).
@@ -118,6 +123,16 @@ type DownstreamCfg struct {
 	// not /v1/responses).
 	FormatPaths map[string]string `yaml:"format_paths,omitempty"`
 
+	// Plugins are transformers that belong to this downstream rather than to a
+	// routing rule. They make a provider self-contained: a downstream that needs
+	// vendor-specific request shaping carries it here, so the same provider
+	// works wherever it is declared (YAML, the UI, or an installed provider
+	// profile) without the user authoring a rule. Applied after automatic
+	// format translation and before matched rules, so explicit user rules still
+	// take precedence. A binding that names a missing or incompatible plugin
+	// degrades to a reported diagnostic instead of failing every request.
+	Plugins []PipelineStep `yaml:"plugins,omitempty"`
+
 	// ApiFormat is a legacy field accepted for backward-compatible YAML loading.
 	// It gets converted to ApiFormats during the sanitize step.
 	ApiFormat string `yaml:"api_format,omitempty"`
@@ -162,18 +177,26 @@ type DownstreamAuthCfg struct {
 	DeviceExchangeRedirect string `yaml:"device_redirect_uri,omitempty" json:"device_redirect_uri,omitempty"` // optional redirect_uri sent when exchanging the device authorization code
 
 	// oauth — common
-	ClientID                   string            `yaml:"client_id,omitempty" json:"client_id,omitempty"`                           // optional for public clients
-	ClientSecret               string            `yaml:"client_secret,omitempty" json:"client_secret,omitempty"`                   // required for confidential clients (sent as Basic auth on token requests)
-	Scopes                     string            `yaml:"scopes,omitempty" json:"scopes,omitempty"`                                 // space-separated, optional
-	ExtraAuthParams            map[string]string `yaml:"extra_authorize_params,omitempty" json:"extra_authorize_params,omitempty"` // extra query params appended to the authorize URL
-	RefreshSkewSecs            int               `yaml:"refresh_skew_secs,omitempty" json:"refresh_skew_secs,omitempty"`           // refresh ahead of expiry, default 0 (refresh at expiry)
-	ExtraHeaders               map[string]string `yaml:"extra_headers,omitempty" json:"extra_headers,omitempty"`                   // static extra headers on LLM requests
-	RequestNonce               bool              `yaml:"request_nonce,omitempty" json:"request_nonce,omitempty"`
-	RequireRefreshToken        bool              `yaml:"require_refresh_token,omitempty" json:"require_refresh_token,omitempty"`
-	DefaultTokenLifetimeSecs   int               `yaml:"default_token_lifetime_secs,omitempty" json:"default_token_lifetime_secs,omitempty"`
-	RefreshOnUnknownExpiry     bool              `yaml:"refresh_on_unknown_expiry,omitempty" json:"refresh_on_unknown_expiry,omitempty"`
-	AllowedEndpointHosts       []string          `yaml:"allowed_endpoint_hosts,omitempty" json:"allowed_endpoint_hosts,omitempty"`
-	PersistDiscoveredEndpoints bool              `yaml:"persist_discovered_endpoints,omitempty" json:"persist_discovered_endpoints,omitempty"`
+	ClientID        string            `yaml:"client_id,omitempty" json:"client_id,omitempty"`                           // optional for public clients
+	ClientSecret    string            `yaml:"client_secret,omitempty" json:"client_secret,omitempty"`                   // required for confidential clients (sent as Basic auth on token requests)
+	Scopes          string            `yaml:"scopes,omitempty" json:"scopes,omitempty"`                                 // space-separated, optional
+	ExtraAuthParams map[string]string `yaml:"extra_authorize_params,omitempty" json:"extra_authorize_params,omitempty"` // extra query params appended to the authorize URL
+	RefreshSkewSecs int               `yaml:"refresh_skew_secs,omitempty" json:"refresh_skew_secs,omitempty"`           // refresh ahead of expiry, default 0 (refresh at expiry)
+	// ExtraHeaders are additional headers sent on LLM requests, for every auth
+	// type (api_key and oauth alike). A value may be a literal, a claim copied
+	// from the access token, or a template over host variables; see HeaderValue.
+	ExtraHeaders map[string]HeaderValue `yaml:"extra_headers,omitempty" json:"extra_headers,omitempty"`
+
+	// Wire names a built-in adapter that owns this provider's non-generic
+	// request dialect (body shaping, correlation headers, model discovery).
+	// Empty means generic behavior. Adapters are registered in internal/wire.
+	Wire                       string   `yaml:"wire,omitempty" json:"wire,omitempty"`
+	RequestNonce               bool     `yaml:"request_nonce,omitempty" json:"request_nonce,omitempty"`
+	RequireRefreshToken        bool     `yaml:"require_refresh_token,omitempty" json:"require_refresh_token,omitempty"`
+	DefaultTokenLifetimeSecs   int      `yaml:"default_token_lifetime_secs,omitempty" json:"default_token_lifetime_secs,omitempty"`
+	RefreshOnUnknownExpiry     bool     `yaml:"refresh_on_unknown_expiry,omitempty" json:"refresh_on_unknown_expiry,omitempty"`
+	AllowedEndpointHosts       []string `yaml:"allowed_endpoint_hosts,omitempty" json:"allowed_endpoint_hosts,omitempty"`
+	PersistDiscoveredEndpoints bool     `yaml:"persist_discovered_endpoints,omitempty" json:"persist_discovered_endpoints,omitempty"`
 
 	// OAuthProvider is a transient field used only during startup migration of
 	// old configs: it carries the name of the recipe in the old top-level
@@ -243,7 +266,7 @@ func (p OAuthProviderCfg) ToAuthCfg() *DownstreamAuthCfg {
 		ClientID:               p.ClientID,
 		Scopes:                 p.Scopes,
 		RefreshSkewSecs:        p.RefreshSkewSecs,
-		ExtraHeaders:           p.ExtraHeaders,
+		ExtraHeaders:           legacyHeaderValues(p.ExtraHeaders),
 	}
 }
 
@@ -481,6 +504,13 @@ func Load(configPath string) (*AppConfig, error) {
 		if ds.Auth.Type == "" {
 			ds.Auth.Type = "api_key"
 		}
+		// Declared headers are checked here so a typo fails at startup with the
+		// downstream's id rather than at request time. The wire adapter name is
+		// checked against the runtime registry by the caller that owns it: config
+		// deliberately does not import the adapter packages.
+		if err := ValidateHeaderValues(ds.Auth.ExtraHeaders); err != nil {
+			return nil, fmt.Errorf("downstream %s: %w", ds.ID, err)
+		}
 	}
 
 	// Sanitize legacy PatternModel -> PatternModels for backward compatibility.
@@ -546,4 +576,18 @@ func defaultDBPath() string {
 		return "./tresor.db"
 	}
 	return filepath.Join(home, ".tresor.db")
+}
+
+// legacyHeaderValues converts the pre-HeaderValue form of a legacy OAuth recipe
+// (plain strings) into literal header values. Used only by the one-shot
+// migration of the old top-level oauth_providers list.
+func legacyHeaderValues(in map[string]string) map[string]HeaderValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]HeaderValue, len(in))
+	for k, v := range in {
+		out[k] = HeaderValue{Literal: v}
+	}
+	return out
 }

@@ -56,7 +56,7 @@ type Provider struct {
 	DeviceExchangeRedirect string
 
 	RefreshSkewSecs            int
-	ExtraHeaders               map[string]string
+	ExtraHeaders               map[string]config.HeaderValue
 	DiscoveryURL               string
 	RequestNonce               bool
 	RequireRefreshToken        bool

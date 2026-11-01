@@ -152,12 +152,13 @@ function showDashboard() {
     document.getElementById('dashboard-view').classList.remove('hidden');
     // Load all tabs' data
     loadRules();
-    loadDownstreams();
+    // Adapters first: the downstream editor renders a selector from this list, and
+    // a downstream row can be opened as soon as the list is painted.
+    loadAbout().finally(loadDownstreams);
     loadPlugins();
     loadAliasGroups();
     loadSettings();
     initLogs();
-    loadAbout();
     initDashboard();
 }
 
@@ -289,12 +290,30 @@ function formatCacheCell(captureOn, cached, inTok) {
 async function fetchPlugins() {
     // ponytail: derived state per render call. cachedPlugins below mirrors so
     // the pipeline editor can re-find metadata without refetch.
+    //
+    // Provider-managed packages are excluded: they shape a provider's requests
+    // and are selected by the provider itself, so offering them as rule steps
+    // would let a rule apply one twice or apply it to the wrong provider.
     try {
-        cachedPlugins = await api('/plugins');
+        const all = await api('/plugins');
+        const managed = await managedPluginIDs();
+        cachedPlugins = managed.size ? all.filter(p => !managed.has(p.id)) : all;
     } catch {
         cachedPlugins = [];
     }
     return cachedPlugins;
+}
+
+// managedPluginIDs returns the set of plugin ids a provider recipe installed.
+// Fetched from the package list, which derives the answer from installed-provider
+// provenance, so it cannot drift from what the providers actually need.
+async function managedPluginIDs() {
+    try {
+        const packages = await api('/plugin-packages');
+        return new Set(packages.filter(isManagedPackage).map(p => p.id));
+    } catch {
+        return new Set();
+    }
 }
 
 let cachedDownstreams = null;
@@ -932,13 +951,34 @@ function oauthFieldRow(field, label, value, placeholder, type) {
 
 // Dynamic key→value block (extra headers / extra authorize params), styled
 // like the extra-headers block. role and prefix distinguish the two blocks.
+// A header value may be a bare string (literal) or an object naming a claim to
+// copy or a template over host variables. Render whichever form it is, so one
+// editor handles both a simple relay and a subscription client.
+function headerFormValue(v) {
+    if (v && typeof v === 'object') {
+        if (v.from_claim) return { form: 'from_claim', value: v.from_claim };
+        if (v.template) return { form: 'template', value: v.template };
+        if (v.literal != null) return { form: 'literal', value: String(v.literal) };
+    }
+    return { form: 'literal', value: v == null ? '' : String(v) };
+}
+
 function oauthKVBlock(role, prefix, title, addAction, keyPlaceholder, valuePlaceholder, entries) {
-    const rows = Object.entries(entries || {}).map(([k, v]) => `
+    const isHeader = role === 'oauth-headers';
+    const rows = Object.entries(entries || {}).map(([k, raw]) => {
+        const parsed = isHeader ? headerFormValue(raw) : { form: 'literal', value: raw == null ? '' : String(raw) };
+        const form = parsed.form;
+        const select = isHeader
+            ? `<select class="oauth-${prefix}-form" title="Value form"><option value="literal"${form === 'literal' ? ' selected' : ''}>Literal</option><option value="from_claim"${form === 'from_claim' ? ' selected' : ''}>Claim</option><option value="template"${form === 'template' ? ' selected' : ''}>Template</option></select>`
+            : '';
+        return `
         <div class="oauth-header-row">
             <input type="text" class="oauth-${prefix}-key" placeholder="${esc(keyPlaceholder)}" value="${esc(k)}" autocomplete="off">
-            <input type="text" class="oauth-${prefix}-value" placeholder="${esc(valuePlaceholder)}" value="${esc(v)}" autocomplete="off">
-            <button type="button" class="oauth-${prefix}-remove" title="Remove">×</button>
-        </div>`).join('');
+            ${select}
+            <input type="text" class="oauth-${prefix}-value" placeholder="${esc(valuePlaceholder)}" value="${esc(parsed.value)}" autocomplete="off">
+            <button type="button" class="oauth-${prefix}-remove" data-action="oauth-${prefix}-remove" title="Remove">×</button>
+        </div>`;
+    }).join('');
     return `
         <div class="oauth-headers-block">
             <div class="oauth-headers-head">
@@ -957,7 +997,14 @@ function collectOAuthKV(root, role, prefix) {
     root.querySelectorAll(`[data-oauth-role="${role}"] .oauth-header-row`).forEach(row => {
         const k = row.querySelector(`.oauth-${prefix}-key`).value.trim();
         const v = row.querySelector(`.oauth-${prefix}-value`).value.trim();
-        if (k) out[k] = v;
+        if (!k) return;
+        const formEl = row.querySelector(`.oauth-${prefix}-form`);
+        const form = formEl ? formEl.value : 'literal';
+        // A literal stays a bare string so hand-written YAML keeps its shape;
+        // the other forms are objects because the distinction is meaningful.
+        if (form === 'from_claim') out[k] = { from_claim: v };
+        else if (form === 'template') out[k] = { template: v };
+        else out[k] = v;
     });
     return out;
 }
@@ -1000,9 +1047,6 @@ function renderOAuthEditor(auth) {
         // codex_cli_simplified_flow=true).
         rows.push(oauthKVBlock('oauth-auth-params', 'auth-param', 'Extra Authorize Params', 'oauth-add-auth-param', 'Param name', 'Value', auth.extra_authorize_params));
     }
-
-    // Extra static headers injected onto every forwarded LLM request.
-    rows.push(oauthKVBlock('oauth-headers', 'header', 'Extra Headers', 'oauth-add-header', 'Header name', 'Value', auth.extra_headers));
 
     rows.push(`<div class="oauth-policy-fields">
         ${[['request_nonce', 'Request nonce'], ['require_refresh_token', 'Require refresh token'], ['refresh_on_unknown_expiry', 'Refresh on unknown expiry'], ['persist_discovered_endpoints', 'Persist discovered endpoints']].map(([key, label]) => `<label class="checkbox-label oauth-policy-checkbox"><input type="checkbox" data-oauth-policy="${key}"${auth[key] ? ' checked' : ''}> ${label}</label>`).join('')}
@@ -1114,8 +1158,11 @@ function renderDownstreamDetail(ds) {
             </div>
         </div>
         <details class="detail-advanced" data-role="advanced-settings"${advancedOpen ? ' open' : ''}>
-            <summary>Advanced Host Settings</summary>
+            <summary>Advanced Request Settings</summary>
             <div class="detail-advanced-content">
+                <div class="extra-headers-section">
+                    ${oauthKVBlock('oauth-headers', 'header', 'Extra Headers', 'oauth-add-header', 'Header name', 'Value', auth.extra_headers)}
+                </div>
                 <div class="detail-section">
                     <label>Per-format URLs<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Override the base URL for specific API formats. Some providers (e.g. DeepSeek) serve Anthropic requests at a sub-path of their base URL. Leave blank to fall back to the base URL above.">?</span></label>
                     <div class="detail-format-urls">
@@ -1408,8 +1455,19 @@ function refreshDownstreamDetail() {
                 if (eye) { eye.classList.remove('shown'); eye.textContent = '👁'; }
                 _keyRevealed = false;
             });
-        } else if (t.hasAttribute('data-oauth-policy') || t.classList.contains('oauth-field') || t.classList.contains('oauth-header-key') || t.classList.contains('oauth-header-value') || t.classList.contains('oauth-auth-param-key') || t.classList.contains('oauth-auth-param-value')) {
-            // Any OAuth recipe field: rebuild the whole auth block and save.
+        } else if (t.closest('.extra-headers-section')) {
+            // Declared headers apply to api_key and OAuth alike, so preserve the
+            // existing auth type instead of rewriting it to oauth.
+            const auth = Object.assign({}, (_currentDownstream && _currentDownstream.auth) || { type: 'api_key' });
+            const headers = collectOAuthKV(root, 'oauth-headers', 'header');
+            if (Object.keys(headers).length > 0) auth.extra_headers = headers;
+            else delete auth.extra_headers;
+            await autoSaveDownstreamField(_currentDownstream.id, { auth: auth }, (err) => {
+                if (err) return;
+                if (_currentDownstream.auth) Object.assign(_currentDownstream.auth, auth);
+            });
+        } else if (t.hasAttribute('data-oauth-policy') || t.classList.contains('oauth-field') || t.classList.contains('oauth-auth-param-key') || t.classList.contains('oauth-auth-param-value')) {
+            // Any other OAuth recipe field: rebuild the whole auth block and save.
             const auth = collectOAuthAuth(root);
             await autoSaveDownstreamField(_currentDownstream.id, { auth: auth }, (err) => {
                 if (err) return;
@@ -1525,7 +1583,10 @@ function refreshDownstreamDetail() {
                 if (empty) empty.remove();
                 const row = document.createElement('div');
                 row.className = 'oauth-header-row';
-                row.innerHTML = `<input type="text" class="oauth-${prefix}-key" placeholder="${esc(keyPh)}" autocomplete="off"><input type="text" class="oauth-${prefix}-value" placeholder="Value" autocomplete="off"><button type="button" class="oauth-${prefix}-remove" title="Remove">×</button>`;
+                const formSel = role === 'oauth-headers'
+                    ? `<select class="oauth-${prefix}-form" title="Value form"><option value="literal" selected>Literal</option><option value="from_claim">Claim</option><option value="template">Template</option></select>`
+                    : '';
+                row.innerHTML = `<input type="text" class="oauth-${prefix}-key" placeholder="${esc(keyPh)}" autocomplete="off">${formSel}<input type="text" class="oauth-${prefix}-value" placeholder="Value" autocomplete="off"><button type="button" class="oauth-${prefix}-remove" data-action="oauth-${prefix}-remove" title="Remove">×</button>`;
                 list.appendChild(row);
                 row.querySelector(`.oauth-${prefix}-key`).focus();
             }
@@ -1543,8 +1604,19 @@ function refreshDownstreamDetail() {
                     list.innerHTML = '<div class="oauth-headers-empty">None</div>';
                 }
             }
-            // Save after removal.
-            const auth = collectOAuthAuth(root);
+            // Save after removal — as which block depends on where the removed
+            // row lived. The declared-header block applies to both auth types, so
+            // rewriting it through the OAuth builder would flip an api_key relay
+            // to OAuth.
+            let auth;
+            if (action === 'oauth-header-remove') {
+                auth = Object.assign({}, (_currentDownstream && _currentDownstream.auth) || { type: 'api_key' });
+                const headers = collectOAuthKV(root, 'oauth-headers', 'header');
+                if (Object.keys(headers).length > 0) auth.extra_headers = headers;
+                else delete auth.extra_headers;
+            } else {
+                auth = collectOAuthAuth(root);
+            }
             await autoSaveDownstreamField(id, { auth: auth }, (err) => {
                 if (err) return;
                 if (_currentDownstream.auth) Object.assign(_currentDownstream.auth, auth);
@@ -1875,12 +1947,23 @@ async function loadPlugins() {
 function renderPackageManagement(packages) {
     const body = document.getElementById('package-management-body'); if (!body) return;
     body.replaceChildren();
-    if (!packages.length) {
+
+    // A package that a provider recipe installed belongs to that provider, not to
+    // a rule. Splitting it out keeps the rule plugin list to what the user can
+    // actually add to a pipeline.
+    const userPackages = packages.filter(p => !isManagedPackage(p));
+    const managedPackages = packages.filter(isManagedPackage);
+    renderManagedPackages(managedPackages);
+
+    if (!userPackages.length) {
         const row = document.createElement('tr'); const cell = document.createElement('td');
-        cell.colSpan = 4; cell.className = 'loading'; cell.textContent = 'No plugins installed.';
+        cell.colSpan = 4; cell.className = 'loading';
+        cell.textContent = managedPackages.length
+            ? 'No user-installed plugins. The provider-managed ones are listed below.'
+            : 'No plugins installed.';
         row.appendChild(cell); body.appendChild(row);
     }
-    for (const p of packages) {
+    for (const p of userPackages) {
         const row = document.createElement('tr');
         const identity = document.createElement('td');
         const name = document.createElement('strong'); name.textContent = `${p.id}@${p.version}`; identity.appendChild(name); row.appendChild(identity);
@@ -1911,6 +1994,49 @@ function renderPackageManagement(packages) {
             catch (error) { document.getElementById('package-management-status').textContent = 'Could not delete plugin.'; remove.disabled = false; }
         });
         actions.appendChild(remove); row.appendChild(actions); body.appendChild(row);
+    }
+}
+
+// isManagedPackage reports whether a provider recipe installed this package.
+function isManagedPackage(p) {
+    return !!(p && Array.isArray(p.managed_by) && p.managed_by.length > 0);
+}
+
+// renderManagedPackages fills the collapsible "Tresor managed plugins" block. The
+// block is hidden entirely when nothing is managed, so a user who never installed
+// a provider never sees an empty section.
+function renderManagedPackages(packages) {
+    const block = document.getElementById('tresor-managed-plugins');
+    const body = document.getElementById('managed-packages-body');
+    const count = document.getElementById('tresor-managed-count');
+    if (!block || !body) return;
+    block.hidden = packages.length === 0;
+    if (count) count.textContent = packages.length ? ` (${packages.length})` : '';
+    if (!packages.length) { body.replaceChildren(); return; }
+    body.replaceChildren();
+    for (const p of packages) {
+        const row = document.createElement('tr');
+        const identity = document.createElement('td');
+        const name = document.createElement('strong'); name.textContent = `${p.id}@${p.version}`;
+        identity.appendChild(name); row.appendChild(identity);
+        const description = document.createElement('td');
+        description.textContent = p.description || 'No description';
+        row.appendChild(description);
+        const provider = document.createElement('td');
+        // The provider's downstream id is what the package serves; it is the
+        // actionable half of "managed", so show it rather than a generic label.
+        provider.textContent = (p.managed_by || []).join(', ');
+        row.appendChild(provider);
+        const enabledCell = document.createElement('td');
+        const state = document.createElement('span');
+        state.className = 'managed-plugin-state';
+        state.textContent = p.active ? 'ON' : 'OFF';
+        // Enabled state is the provider's decision; changing it belongs with the
+        // provider, not with a plugin list.
+        state.title = 'Enabled by the provider that installed it.';
+        enabledCell.appendChild(state);
+        row.appendChild(enabledCell);
+        body.appendChild(row);
     }
 }
 
@@ -5776,3 +5902,162 @@ async function loadAbout() {
 
 // ---- Init ----
 checkAuth();
+
+// ---- Provider Catalog ----
+// Browse installable provider profiles. A profile is data: installing one
+// creates an ordinary downstream. Credentials are always user input here, and a
+// plugin binding needs an explicit opt-in because a plugin is code.
+let _catalogEntries = [];
+let _catalogSelected = null;
+
+async function openProviderCatalog() {
+    const modal = document.getElementById('provider-catalog-modal');
+    document.getElementById('provider-catalog-install').classList.add('hidden');
+    _catalogSelected = null;
+    modal.classList.remove('hidden');
+    await loadProviderCatalog();
+}
+
+async function loadProviderCatalog(refresh) {
+    const listEl = document.getElementById('provider-catalog-list');
+    const sourceEl = document.getElementById('provider-catalog-source');
+    listEl.innerHTML = '<div class="text-muted" style="padding:0.75rem;">Loading catalog…</div>';
+    try {
+        if (refresh) await api('/provider-catalog/refresh', { method: 'POST', body: '{}' });
+        const data = await api('/provider-catalog');
+        _catalogEntries = data.entries || [];
+        if (sourceEl) sourceEl.textContent = 'source: ' + (data.source || 'unknown');
+        renderProviderCatalog();
+    } catch (err) {
+        listEl.innerHTML = '<div class="text-muted" style="padding:0.75rem;">Could not load the catalog: ' + esc(err.message) + '</div>';
+    }
+}
+
+function renderProviderCatalog() {
+    const listEl = document.getElementById('provider-catalog-list');
+    if (_catalogEntries.length === 0) {
+        listEl.innerHTML = '<div class="text-muted" style="padding:0.75rem;">The catalog is empty.</div>';
+        return;
+    }
+    listEl.innerHTML = _catalogEntries.map(e => {
+        const installed = (e.installed || []).length > 0;
+        const badge = installed
+            ? `<span class="catalog-badge installed">Installed${e.installed.length > 1 ? ' ×' + e.installed.length : ''}</span>`
+            : e.available === false
+                ? '<span class="catalog-badge unavailable">Unavailable</span>'
+                : '<span class="catalog-badge">Installable</span>';
+        return `
+            <button type="button" class="catalog-row" data-id="${esc(e.id)}"${e.available === false ? ' data-blocked="1"' : ''}>
+                <div class="catalog-row-main">
+                    ${modelIconHTML(e.name)}
+                    <span class="catalog-row-name">${esc(e.name)}</span>
+                    <span class="catalog-row-version">v${esc(String(e.version))}</span>
+                    ${badge}
+                </div>
+                ${e.available === false && e.reason ? `<div class="catalog-row-reason">${esc(e.reason)}</div>` : ''}
+            </button>`;
+    }).join('');
+
+    listEl.querySelectorAll('button.catalog-row').forEach(row => {
+        row.onclick = () => {
+            const entry = _catalogEntries.find(e => e.id === row.dataset.id);
+            if (!entry || entry.available === false) return;
+            _catalogSelected = entry;
+            renderCatalogInstallForm(entry);
+        };
+    });
+}
+
+// The install form. Only the credential fields are required; everything else is
+// pre-filled from the profile and stays editable afterwards in the provider pane.
+function renderCatalogInstallForm(entry) {
+    const el = document.getElementById('provider-catalog-install');
+    el.classList.remove('hidden');
+    const installed = (entry.installed || []).length > 0;
+    el.innerHTML = `
+        <h4 style="margin:0.25rem 0 0.5rem;">${esc(entry.name)}</h4>
+        <p class="text-muted" style="margin-bottom:0.75rem;">
+            ${installed
+            ? 'Already installed as <strong>' + esc(entry.installed.join(', ')) + '</strong>. You can install another copy under a new id.'
+            : 'Enter the credentials for this provider. They are stored in your Tresor config and never sent to the catalog.'}
+        </p>
+        <div class="catalog-field">
+            <label for="catalog-api-key">API key</label>
+            <input type="password" id="catalog-api-key" placeholder="sk-…" autocomplete="off">
+        </div>
+        <div class="catalog-field">
+            <label for="catalog-client-secret">OAuth client secret <span class="text-muted">(only if the provider needs one)</span></label>
+            <input type="password" id="catalog-client-secret" autocomplete="off">
+        </div>
+        <div class="catalog-field">
+            <label for="catalog-downstream-id">Provider id <span class="text-muted">(optional)</span></label>
+            <input type="text" id="catalog-downstream-id" placeholder="${esc(entry.id)}" autocomplete="off">
+        </div>
+        ${entry.needs_plugins ? `
+        <label class="catalog-consent">
+            <input type="checkbox" id="catalog-allow-plugins">
+            <span>This provider binds a plugin. A plugin is executable code, so it is only
+            attached if you allow it here.</span>
+        </label>` : ''}
+        <div class="catalog-install-actions">
+            <button type="button" class="btn-small btn-primary" id="btn-catalog-install">Install</button>
+            <span id="catalog-install-status" class="text-muted"></span>
+        </div>`;
+
+    document.getElementById('btn-catalog-install').onclick = async () => {
+        const status = document.getElementById('catalog-install-status');
+        const apiKey = document.getElementById('catalog-api-key').value.trim();
+        const clientSecret = document.getElementById('catalog-client-secret').value.trim();
+        const downstreamID = document.getElementById('catalog-downstream-id').value.trim();
+        const allowPluginsEl = document.getElementById('catalog-allow-plugins');
+
+        if (!apiKey && !clientSecret) {
+            status.textContent = 'Enter an API key first.';
+            return;
+        }
+        const body = { profile_id: entry.id };
+        if (apiKey) body.api_key = apiKey;
+        if (clientSecret) body.client_secret = clientSecret;
+        if (downstreamID) body.downstream_id = downstreamID;
+        if (allowPluginsEl && allowPluginsEl.checked) body.allow_plugins = true;
+
+        status.textContent = 'Installing…';
+        try {
+            // api() passes options to fetch verbatim, so the body must be
+            // serialized here; buildAuthHeaders already sets Content-Type.
+            const res = await api('/providers/install', {
+                method: 'POST',
+                body: JSON.stringify(body),
+            });
+            await loadDownstreams();
+            if (res.downstream_id) {
+                _currentDownstreamId = res.downstream_id;
+                const ds = (cachedDownstreams || []).find(d => d.id === res.downstream_id);
+                if (ds) {
+                    selectSidebarItem(ds.id);
+                    renderDownstreamDetail(ds);
+                }
+            }
+            document.getElementById('provider-catalog-modal').classList.add('hidden');
+            // A recipe can bring its own plugin code. Say so, because installing
+            // code is the part the user should be aware of, not just the provider.
+            const pkgs = (res.installed_packages || []).filter(p => p && p.id);
+            const notes = (res.conflicts || []).filter(Boolean);
+            const lines = [];
+            if (pkgs.length) {
+                lines.push('Also installed: ' + pkgs.map(p => p.id + ' ' + p.version).join(', '));
+            }
+            if (notes.length) lines.push(...notes);
+            if (lines.length) alert('Provider installed.\n\n' + lines.join('\n'));
+        } catch (err) {
+            status.textContent = err.message;
+        }
+    };
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const browse = document.getElementById('btn-provider-catalog');
+    if (browse) browse.onclick = openProviderCatalog;
+    const refresh = document.getElementById('btn-provider-catalog-refresh');
+    if (refresh) refresh.onclick = () => loadProviderCatalog(true);
+});

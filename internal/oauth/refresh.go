@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"tresor/internal/store"
@@ -46,15 +45,13 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	}
 	p.Name = downstreamID
 
-	extra := map[string]string{}
-	for k, v := range p.ExtraHeaders {
-		extra[k] = v
-	}
-	// Token-level extra headers: values stored on the token row's extra map
-	// are passed through as headers keyed by their extra-map key.
+	// Token-level headers: values stored on the token row's extra map are passed
+	// through as headers keyed by their extra-map key. They form the operator
+	// override layer, so they win over a declarative value of the same name.
+	tokenHeaders := map[string]string{}
 	for k, v := range t.Extra {
-		if s, ok := v.(string); ok && k != "id_token" && k != oauthEndpointsKey && k != "tresor_xai_oauth" {
-			extra[k] = s
+		if s, ok := v.(string); ok && k != "id_token" && k != oauthEndpointsKey {
+			tokenHeaders[k] = s
 		}
 	}
 
@@ -64,7 +61,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 
 	// Fast path: still valid
 	if exp := tokenExpiry(t.AccessToken, t.ExpiresAt); (exp.IsZero() && !p.RefreshOnUnknownExpiry) || (!exp.IsZero() && time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp)) {
-		return t.AccessToken, finalizeOAuthHeaders(extra, t.AccessToken, p), nil
+		return t.AccessToken, finalizeOAuthHeaders(tokenHeaders, t.AccessToken, p), nil
 	}
 
 	// Needs a refresh
@@ -79,7 +76,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	}
 	if t2 != nil && !t2.NeedsLogin {
 		if exp := tokenExpiry(t2.AccessToken, t2.ExpiresAt); (exp.IsZero() && !p.RefreshOnUnknownExpiry) || (!exp.IsZero() && time.Now().Add(time.Duration(p.skew())*time.Second).Before(exp)) {
-			return t2.AccessToken, finalizeOAuthHeaders(extra, t2.AccessToken, p), nil
+			return t2.AccessToken, finalizeOAuthHeaders(tokenHeaders, t2.AccessToken, p), nil
 		}
 		t = t2
 	}
@@ -121,7 +118,7 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	// that the refresh response does not carry.
 	if t.Extra != nil {
 		for k, v := range t.Extra {
-			if k == "tresor_xai_oauth" || k == oauthEndpointsKey {
+			if k == oauthEndpointsKey {
 				continue
 			}
 			if _, exists := nt.Extra[k]; !exists {
@@ -132,39 +129,30 @@ func (m *Manager) ResolveValidToken(downstreamID string) (string, map[string]str
 	if err := m.store.SaveOAuthToken(nt); err != nil {
 		return "", nil, err
 	}
-	return nt.AccessToken, finalizeOAuthHeaders(extra, nt.AccessToken, p), nil
+	return nt.AccessToken, finalizeOAuthHeaders(tokenHeaders, nt.AccessToken, p), nil
 }
 
-// finalizeOAuthHeaders layers provider identity headers onto the base extra
-// headers, derived from the FINAL access token about to be sent. ChatGPT/Codex
-// credentials retain their existing reference-client identity headers:
+// finalizeOAuthHeaders resolves a provider's declarative extra headers against
+// the FINAL access token about to be sent, then layers the operator's own
+// token-row headers on top.
 //
-//   - ChatGPT/Codex: when the access token carries the chatgpt_account_id
-//     claim, send chatgpt-account-id, originator, and a pi User-Agent (matching
-//     the pi / litellm reference clients).
+// Resolution is declarative (see headers.go): a literal is sent as-is, a
+// from_claim value is copied out of the token's claims, and a template is filled
+// from the closed host variable set. Provider identity is therefore data, not a
+// branch in Go — a new provider's headers need no code here.
 //
-// Operator-supplied extra_headers (already merged into base) always take
-// precedence. It must run against the final token — not the pre-refresh one —
-// because a refresh can rotate in a token whose account claim differs.
-func finalizeOAuthHeaders(base map[string]string, accessToken string, p *Provider) map[string]string {
-	out := make(map[string]string, len(base)+3)
-	for k, v := range base {
-		out[k] = v
+// It must run against the final token, not the pre-refresh one, because a refresh
+// can rotate in a token whose claims differ (a different account id, say).
+func finalizeOAuthHeaders(operatorHeaders map[string]string, accessToken string, p *Provider) map[string]string {
+	resolved, err := ResolveHeaderValues(p.ExtraHeaders, accessToken, operatorHeaders)
+	if err != nil {
+		// A malformed declaration must not silently drop provider identity: fall
+		// back to the operator headers so the request still carries what the
+		// operator asked for, and report the problem.
+		log.Printf("oauth: %s: refusing declared extra_headers: %v", p.Name, err)
+		resolved = operatorHeaders
 	}
-	// ChatGPT/Codex identity.
-	if acct := jwtChatGPTAccountID(accessToken); acct != "" {
-		if _, ok := out["chatgpt-account-id"]; !ok {
-			out["chatgpt-account-id"] = acct
-		}
-		if _, ok := out["originator"]; !ok {
-			out["originator"] = "pi"
-		}
-		if _, ok := out["User-Agent"]; !ok {
-			out["User-Agent"] = codexUserAgent()
-		}
-	}
-
-	return out
+	return resolved
 }
 
 // refreshToken performs a grant_type=refresh_token exchange.
@@ -215,22 +203,6 @@ func isDefinitiveRefreshError(err error) bool {
 		}
 	}
 	return false
-}
-
-// codexUserAgent mirrors the reference client's User-Agent shape
-// "pi (<os> <release>; <arch>)", e.g. "pi (linux 6.8.0; amd64)". The OS release
-// is best-effort (it varies by platform and may be empty); the lookup is
-// memoized because the header is built on every request.
-var (
-	codexUAOnce sync.Once
-	codexUA     string
-)
-
-func codexUserAgent() string {
-	codexUAOnce.Do(func() {
-		codexUA = "pi (" + runtime.GOOS + " " + osRelease() + "; " + runtime.GOARCH + ")"
-	})
-	return codexUA
 }
 
 // osRelease returns the OS release string for the current platform, or "" if

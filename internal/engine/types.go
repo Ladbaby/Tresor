@@ -5,6 +5,7 @@ import (
 
 	"tresor/internal/config"
 	"tresor/internal/store"
+	"tresor/internal/wire"
 )
 
 // Downstream is a resolved target endpoint.
@@ -48,18 +49,17 @@ type PipelineContext struct {
 	ClientStreaming bool
 	// RequestPathOverride takes precedence over configured format paths.
 	RequestPathOverride string
-	// OAuthExtraHeaders are additional headers required by the OAuth
-	// provider (e.g. originator, user-agent). Applied in forwardRequest
-	// after the standard auth header is set.
-	OAuthExtraHeaders map[string]string
-	// CodexBackend is true when this downstream is the ChatGPT/Codex OAuth
-	// backend (detected from the chatgpt-account-id extra header). Such
-	// requests are fingerprinted to match the reference client — OpenAI-Beta
-	// header, zstd-compressed body, per-request session headers — and are
-	// never replayed by retry-on-empty (replaying a generation on a real
-	// account creates duplicate response objects).
-	CodexBackend bool
-	Variables    map[string]interface{}
+	// ExtraHeaders are additional headers declared on the downstream's auth
+	// block, resolved for this request (literal, token claim, or template).
+	// Applied in forwardRequest after the standard auth header is set.
+	ExtraHeaders map[string]string
+
+	// Wire is the built-in adapter for this downstream's non-generic request
+	// dialect, or nil for generic behavior. It replaces the old CodexBackend
+	// flag, which inferred identity from a header name and therefore leaked
+	// one provider's policy onto any provider that happened to send it.
+	Wire      wire.Adapter
+	Variables map[string]interface{}
 }
 
 // TokenResolver resolves a currently-valid OAuth access token for a
@@ -141,4 +141,11 @@ type modelResult struct {
 	retry         bool
 	sessionDone   func()
 	routeToken    *routePin
+}
+
+// noReplay reports whether retry-on-empty must be disabled for this request.
+// The policy belongs to the selected wire adapter: replaying a generation against
+// a real subscription creates duplicate response objects on the provider's side.
+func (ctx *PipelineContext) noReplay() bool {
+	return ctx != nil && ctx.Wire != nil && ctx.Wire.NoReplay()
 }

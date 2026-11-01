@@ -210,6 +210,22 @@ func (s *Store) migrate() error {
 			created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_aliases_input ON aliases(input_model_id)`,
+		// downstream_profiles records how a downstream was created when it came
+		// from a provider profile: which profile, at which version, with which
+		// digest, and the exact field values the profile last applied. The
+		// applied snapshot is what makes a later update non-destructive: a field
+		// the user has since edited no longer matches it and is left alone.
+		// Kept in its own table rather than columns on downstreams so provider
+		// provenance never leaks into the downstream JSON or its queries.
+		`CREATE TABLE IF NOT EXISTS downstream_profiles (
+			downstream_id TEXT PRIMARY KEY REFERENCES downstreams(id),
+			profile_id    TEXT NOT NULL,
+			version       INTEGER NOT NULL,
+			digest        TEXT NOT NULL,
+			source        TEXT NOT NULL,
+			applied       TEXT NOT NULL DEFAULT '{}',
+			updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
 		// output_model_ids table: tracks known model names per downstream
 		`CREATE TABLE IF NOT EXISTS output_model_ids (
 			downstream_id TEXT NOT NULL REFERENCES downstreams(id),
@@ -423,6 +439,15 @@ func (s *Store) migrate() error {
 	if !s.columnExists("downstreams", "is_enabled") {
 		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN is_enabled INTEGER DEFAULT 1`); err != nil {
 			return fmt.Errorf("migrate add is_enabled: %w", err)
+		}
+	}
+
+	// Add plugins column (downstream-scoped transformers). Default '[]' means
+	// the downstream contributes no transforms of its own, so existing rows and
+	// rule-based pipelines behave exactly as before this column existed.
+	if !s.columnExists("downstreams", "plugins") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN plugins TEXT DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("migrate add plugins: %w", err)
 		}
 	}
 
@@ -1128,6 +1153,18 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 			}
 		}
 
+		// Downstream-scoped plugin bindings. Marshaled with the same
+		// non-nil normalization as the other JSON columns so the engine
+		// always decodes an array.
+		pluginsJSON := "[]"
+		if len(d.Plugins) > 0 {
+			if b, err := json.Marshal(d.Plugins); err == nil {
+				pluginsJSON = string(b)
+			} else {
+				return fmt.Errorf("marshal plugins for %s: %w", d.ID, err)
+			}
+		}
+
 		// Check if this downstream already exists
 		var exists bool
 		if err := tx.QueryRow("SELECT COUNT(*) > 0 FROM downstreams WHERE id = ?", d.ID).Scan(&exists); err != nil {
@@ -1144,13 +1181,13 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 					enabled = 1
 				}
 				if _, err := tx.Exec(
-					"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ? WHERE id = ?",
-					d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, d.ID); err != nil {
+					"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ?, plugins = ? WHERE id = ?",
+					d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON, d.ID); err != nil {
 					return fmt.Errorf("update downstream %s: %w", d.ID, err)
 				}
 			} else if _, err := tx.Exec(
-				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, auth = ? WHERE id = ?",
-				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, d.ID); err != nil {
+				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, auth = ?, plugins = ? WHERE id = ?",
+				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, pluginsJSON, d.ID); err != nil {
 				return fmt.Errorf("update downstream %s: %w", d.ID, err)
 			}
 			// Replace output_model_ids from YAML
@@ -1176,8 +1213,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 				enabled = 0
 			}
 			if _, err := tx.Exec(
-				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON); err != nil {
+				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth, plugins) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON); err != nil {
 				return fmt.Errorf("insert downstream %s: %w", d.ID, err)
 			}
 			if len(d.OutputModelIDs) > 0 {

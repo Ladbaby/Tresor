@@ -11,6 +11,7 @@ import (
 	"tresor/internal/proxy"
 
 	"tresor/internal/jsplugins"
+	"sort"
 )
 
 // SetPluginManager wires trusted local-package management before serving.
@@ -77,10 +78,20 @@ func (r *Router) handlePluginPackages(w http.ResponseWriter, req *http.Request) 
 			Compatible  bool   `json:"compatible"`
 			Executable  bool   `json:"executable"`
 			Diagnostic  string `json:"diagnostic,omitempty"`
+			// ManagedBy names the provider-installed downstreams that depend on
+			// this package. Such a package is not a rule plugin: it belongs to a
+			// provider and the provider's recipe installed it, so it must not be
+			// offered as a pipeline step or deleted out from under the provider.
+			ManagedBy []string `json:"managed_by,omitempty"`
 		}
+		managed := r.managedPluginOwners()
 		views := make([]packageView, 0, len(items))
 		for _, p := range items {
-			views = append(views, packageView{p.ID, p.Version, p.Description, p.Active, p.Compatible, p.Executable, p.Diagnostic})
+			views = append(views, packageView{
+				ID: p.ID, Version: p.Version, Description: p.Description,
+				Active: p.Active, Compatible: p.Compatible, Executable: p.Executable,
+				Diagnostic: p.Diagnostic, ManagedBy: managed[p.ID],
+			})
 		}
 		writeJSON(w, http.StatusOK, views)
 	case "/install":
@@ -181,4 +192,53 @@ func (r *Router) handlePluginPackages(w http.ResponseWriter, req *http.Request) 
 	default:
 		http.NotFound(w, req)
 	}
+}
+
+// managedPluginOwners maps a plugin id to the downstreams that came from a
+// provider profile and list that plugin in their pipeline. Derived rather than
+// stored: the downstream's own recipe is the record of what it needs, so this
+// cannot drift from the truth, and uninstalling the provider frees the plugin.
+// A plugin the user added to the same downstream by hand is excluded, because
+// only packages recorded by the profile install are "managed".
+func (r *Router) managedPluginOwners() map[string][]string {
+	owners := map[string][]string{}
+	provenance, err := r.store.ListDownstreamProfiles()
+	if err != nil || len(provenance) == 0 {
+		return owners
+	}
+	downstreams, err := r.store.ListDownstreams()
+	if err != nil {
+		return owners
+	}
+	for _, d := range downstreams {
+		if _, fromProfile := provenance[d.ID]; !fromProfile {
+			continue
+		}
+		for _, step := range d.Plugins {
+			id := step.PluginID
+			if id == "" {
+				id = step.ID
+			}
+			if id == "" {
+				continue
+			}
+			if !contains(owners[id], d.ID) {
+				owners[id] = append(owners[id], d.ID)
+			}
+		}
+	}
+	for id := range owners {
+		sort.Strings(owners[id])
+	}
+	return owners
+}
+
+// contains reports whether list already holds want.
+func contains(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }

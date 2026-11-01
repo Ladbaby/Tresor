@@ -186,6 +186,19 @@ func (m *Manager) setEnabledLocked(id, version string, enabled bool) error {
 	if enabled {
 		next[id] = version
 	}
+	// Two enabled packages claiming one dialect name would make `auth.wire`
+	// ambiguous, and the loser would silently stop receiving requests. Refuse the
+	// second one instead, naming both so the conflict is obvious.
+	if name := dialectName(m.installed[id][version]); enabled && name != "" {
+		for otherID, otherVersion := range next {
+			if otherID == id {
+				continue
+			}
+			if otherName := dialectName(m.installed[otherID][otherVersion]); otherName == name {
+				return fmt.Errorf("dialect %q is already provided by %s@%s", name, otherID, otherVersion)
+			}
+		}
+	}
 	data, err := json.Marshal(next)
 	if err != nil {
 		return err
@@ -195,6 +208,14 @@ func (m *Manager) setEnabledLocked(id, version string, enabled bool) error {
 	}
 	m.active = next
 	return nil
+}
+
+// dialectName returns the provider dialect a package declares, or "".
+func dialectName(pkg *Package) string {
+	if pkg == nil || pkg.Manifest.Dialect == nil {
+		return ""
+	}
+	return pkg.Manifest.Dialect.Name
 }
 func (m *Manager) SetEnabled(id, version string, enabled bool) error {
 	m.mu.Lock()

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -203,7 +204,7 @@ func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, resu
 	// Determine max retries (3 when retryOnEmpty enabled, 0 otherwise).
 	// Codex requests are never replayed to avoid duplicate account-side generations.
 	maxRetries := 0
-	if e.retryOnEmpty && !ctx.CodexBackend {
+	if e.retryOnEmpty && !ctx.noReplay() {
 		maxRetries = retryMaxCount
 	}
 	downstreamFormat := ctx.DownstreamFormat
@@ -279,6 +280,17 @@ func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, resu
 		resp, cancel, err := e.forwardRequest(currentReq, currentBody, ctx)
 		if err != nil {
 			cancel()
+			// A dialect that could not shape the request is a local fault, not an
+			// upstream one. Falling back would send the same request to another
+			// provider and hide the misconfiguration, so report it directly.
+			var shapeErr *shapingError
+			if errors.As(err, &shapeErr) {
+				e.logAndReturnError(cw, entry, start, &gatewayError{
+					http.StatusInternalServerError, "request shaping error",
+					fmt.Sprintf("request shaping error: %v", shapeErr.err), "shaping error", shapeErr.err,
+				})
+				return
+			}
 			if isNetworkFailure(err) && e.tryFallback(r, result, 502, "", err) {
 				return
 			}
@@ -307,7 +319,7 @@ func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, resu
 		// transformer's JSON parser and 502 ("invalid character 'e'").
 		streamed := isEventStream(upstreamContentType) || (ctx.execution().Requested == "sse" && resp.StatusCode >= 200 && resp.StatusCode < 300)
 		ctx.observeResponse(resp, streamed)
-		if !streamed && ctx.CodexBackend && isStreamRequest(currentBody) {
+		if !streamed && ctx.noReplay() && isStreamRequest(currentBody) {
 			streamed = true
 			ctx.observeResponse(resp, true)
 			ctx.execution().Classification = "host"
@@ -326,7 +338,7 @@ func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, resu
 			// retried transparently by holding the terminal [DONE]
 			// marker until end-of-stream.
 			hw := newHeaderDelayWriter(cw)
-			outcome := e.handleStreamingResponse(hw, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), entry, e.retryOnEmpty && !ctx.CodexBackend, inputFormat, downstreamFormat)
+			outcome := e.handleStreamingResponse(hw, resp, ctx, &pipeline, cancel, r.Context(), rawReq, r.Header.Get("Content-Type"), resp.Header.Get("Content-Type"), entry, e.retryOnEmpty && !ctx.noReplay(), inputFormat, downstreamFormat)
 			// An explicit error event is a definitive answer, never an empty
 			// response — do not retry it.
 			if outcome.streamErr != nil {
@@ -444,7 +456,7 @@ func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, resu
 		// legitimately return 200 with bodies that look "empty" to the
 		// parser (e.g. {"input_tokens":7802}); retrying them produces a
 		// spurious 502.
-		if !ctx.CodexBackend && e.retryOnEmpty && e.shouldRetry(resp, respBody, downstreamFormat, r.URL.Path) && (!collectStream || !ctx.execution().RawContent) {
+		if !ctx.noReplay() && e.retryOnEmpty && e.shouldRetry(resp, respBody, downstreamFormat, r.URL.Path) && (!collectStream || !ctx.execution().RawContent) {
 			if attempt >= maxRetries {
 				entry.Status = resp.StatusCode
 				entry.Duration = DurationMs(time.Since(start))

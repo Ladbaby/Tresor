@@ -1096,7 +1096,9 @@ func TestResolveValidToken_ChatGPTHeadersAfterRefresh(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	bindOAuth(t, s, ds, authCodeAuth(ts.URL))
+	cfg := authCodeAuth(ts.URL)
+	cfg.ExtraHeaders = chatGPTDeclaredHeaders()
+	bindOAuth(t, s, ds, cfg)
 	// Stored token: expired and plain (no chatgpt claim).
 	if err := s.SaveOAuthToken(&store.OAuthToken{
 		DownstreamID: ds.ID,
@@ -1177,7 +1179,7 @@ func TestResolveValidToken_GrokHeadersOperatorOverride(t *testing.T) {
 		AuthorizationURL: "https://a.test/auth",
 		TokenURL:         "https://t.test/token",
 		Scopes:           "grok-cli:access",
-		ExtraHeaders:     map[string]string{"x-grok-client-identifier": "mytool"},
+		ExtraHeaders:     map[string]config.HeaderValue{"x-grok-client-identifier": {Literal: "mytool"}},
 	})
 
 	tok := makeChatGPTJWT(t, "", time.Now().Add(time.Hour))
@@ -1206,7 +1208,9 @@ func TestResolveValidToken_GrokHeadersOperatorOverride(t *testing.T) {
 func TestResolveValidToken_ChatGPTHeaders(t *testing.T) {
 	s, m := newTestStoreAndManager(t)
 	ds := mustDownstream(t, s)
-	bindOAuth(t, s, ds, authCodeAuth("https://t.test/token"))
+	cfg := authCodeAuth("https://t.test/token")
+	cfg.ExtraHeaders = chatGPTDeclaredHeaders()
+	bindOAuth(t, s, ds, cfg)
 
 	tok := makeChatGPTJWT(t, "acct-123", time.Now().Add(time.Hour))
 	if err := s.SaveOAuthToken(&store.OAuthToken{
@@ -1244,7 +1248,7 @@ func TestResolveValidToken_ChatGPTHeadersOperatorOverride(t *testing.T) {
 		Flow:             FlowAuthCode,
 		AuthorizationURL: "https://a.test/auth",
 		TokenURL:         "https://t.test/token",
-		ExtraHeaders:     map[string]string{"originator": "mytool"},
+		ExtraHeaders:     mmm(chatGPTDeclaredHeaders(), "originator", config.HeaderValue{Literal: "mytool"}),
 	})
 
 	tok := makeChatGPTJWT(t, "acct-999", time.Now().Add(time.Hour))
@@ -1276,7 +1280,14 @@ func TestResolveValidToken_ChatGPTHeadersOperatorOverride(t *testing.T) {
 func TestResolveValidToken_NonChatGPTNoHeaders(t *testing.T) {
 	s, m := newTestStoreAndManager(t)
 	ds := mustDownstream(t, s)
-	bindOAuth(t, s, ds, authCodeAuth("https://t.test/token"))
+	// Declared like a Codex provider: the claim-derived header must vanish when
+	// the token carries no such claim. originator/User-Agent are not declared
+	// here precisely so the assertion stays "no headers at all".
+	cfg := authCodeAuth("https://t.test/token")
+	cfg.ExtraHeaders = map[string]config.HeaderValue{
+		"chatgpt-account-id": {FromClaim: "chatgpt_account_id"},
+	}
+	bindOAuth(t, s, ds, cfg)
 
 	// A plain JWT with only an exp claim — no chatgpt claim.
 	tok := makeChatGPTJWT(t, "", time.Now().Add(time.Hour))
@@ -1297,4 +1308,28 @@ func TestResolveValidToken_NonChatGPTNoHeaders(t *testing.T) {
 	if len(extra) != 0 {
 		t.Fatalf("unexpected extra headers for non-chatgpt token: %v", extra)
 	}
+}
+
+// chatGPTDeclaredHeaders is what a ChatGPT/Codex provider declares today. It
+// replaces the identity headers the OAuth manager used to inject implicitly, and
+// is exactly what the startup migration writes into an existing config.
+func chatGPTDeclaredHeaders() map[string]config.HeaderValue {
+	return map[string]config.HeaderValue{
+		"chatgpt-account-id": {FromClaim: "chatgpt_account_id"},
+		"originator":         {Literal: "pi"},
+		"User-Agent":         {Template: "pi ({os} {os_release}; {arch})"},
+	}
+}
+
+// mmm copies a header map and applies overrides, for tests that start from the
+// standard declaration.
+func mmm(base map[string]config.HeaderValue, kv ...any) map[string]config.HeaderValue {
+	out := make(map[string]config.HeaderValue, len(base))
+	for k, v := range base {
+		out[k] = v
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		out[kv[i].(string)] = kv[i+1].(config.HeaderValue)
+	}
+	return out
 }

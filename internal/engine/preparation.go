@@ -2,11 +2,14 @@ package engine
 
 import (
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"slices"
 	"strings"
 
 	"tresor/internal/oauth"
+	"tresor/internal/wire"
 )
 
 // prepareDownstreamContext resolves request-specific credentials and format
@@ -45,10 +48,41 @@ func (e *Engine) prepareDownstreamContext(r *http.Request, result *modelResult, 
 			return nil, &gatewayError{http.StatusUnauthorized, msg, msg, "oauth not connected", err}
 		}
 		ctx.TargetDownstream.APIKey = token
-		ctx.OAuthExtraHeaders = extraHeaders
-		// Backend identity gates fingerprint and no-replay policy only;
-		// generic transport selection is independent of it.
-		_, ctx.CodexBackend = extraHeaders["chatgpt-account-id"]
+		ctx.ExtraHeaders = extraHeaders
+	}
+
+	// Declared extra headers apply to every auth type, so a provider relay can
+	// say what it needs without a rule or a plugin. For an api_key downstream
+	// the token argument is the key itself: literal and template values work,
+	// and a claim-derived one finds no claim and contributes nothing.
+	if !ds.IsOAuth() && ds.Auth != nil && len(ds.Auth.ExtraHeaders) > 0 {
+		resolved, err := oauth.ResolveHeaderValues(ds.Auth.ExtraHeaders, ds.EffectiveAPIKey(), nil)
+		if err != nil {
+			log.Printf("engine: downstream %s: refusing declared extra_headers: %v", ds.ID, err)
+		} else {
+			ctx.ExtraHeaders = resolved
+		}
+	}
+
+	// The wire adapter owns this provider's non-generic request dialect. It is
+	// selected by name from config, never inferred from a header, so a provider
+	// cannot accidentally inherit another provider's policy.
+	if ds.Auth != nil && ds.Auth.Wire != "" {
+		adapter, ok := wire.For(ds.Auth.Wire)
+		if !ok {
+			// A declared but unavailable dialect must not fall through to generic
+			// forwarding: that would send the provider a request stripped of the
+			// identity and policy the dialect exists to apply, and look like a
+			// success. Fail the request instead, and let the message say why.
+			available := "none installed"
+			if names := wire.Names(); len(names) > 0 {
+				available = strings.Join(names, ", ")
+			}
+			msg := fmt.Sprintf("provider %s needs the %q provider dialect, which is not installed "+
+				"(available: %s). Install it from Downstreams > Browse providers.", ds.ID, ds.Auth.Wire, available)
+			return ctx, &gatewayError{http.StatusInternalServerError, msg, msg, "provider dialect not installed", nil}
+		}
+		ctx.Wire = adapter
 	}
 
 	// A multi-format downstream echoes a supported input format; otherwise
