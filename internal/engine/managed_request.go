@@ -12,6 +12,10 @@ func validateManagedRequestTransform(before, after []byte, beforeReq, afterReq *
 	if beforeReq == nil || afterReq == nil || beforeReq.Method != afterReq.Method || beforeReq.URL == nil || afterReq.URL == nil || beforeReq.URL.Path != afterReq.URL.Path || beforeReq.URL.RawQuery != afterReq.URL.RawQuery || beforeReq.URL.Host != afterReq.URL.Host {
 		return contractError("managed_transform", "route")
 	}
+	// The managed loop builds every generation request in canonical Chat form,
+	// so a request transform must not move it to another route. Every client
+	// format is served through that canonical route, so this is not a check on
+	// the client's own path.
 	if beforeReq.Method != http.MethodPost || (beforeReq.URL.Path != "/v1/chat/completions" && beforeReq.URL.Path != "/chat/completions") {
 		return contractError("managed_transform", "route")
 	}
@@ -105,8 +109,8 @@ func managedTransformPipeline(p *Pipeline, owner *ExternalPlugin) (*Pipeline, er
 		if x, ok := s.(externalRequest); ok && x.p == owner {
 			continue
 		}
-		if !preservesManagedFormat(s) {
-			return nil, contractError("managed_transform", "format_converter")
+		if !managedStepCarriesOver(s) {
+			continue
 		}
 		out.RequestSteps = append(out.RequestSteps, s)
 	}
@@ -114,8 +118,8 @@ func managedTransformPipeline(p *Pipeline, owner *ExternalPlugin) (*Pipeline, er
 		if x, ok := s.(externalResponse); ok && x.p == owner {
 			continue
 		}
-		if !preservesManagedFormat(s) {
-			return nil, contractError("managed_transform", "format_converter")
+		if !managedStepCarriesOver(s) {
+			continue
 		}
 		out.ResponseSteps = append(out.ResponseSteps, s)
 	}
@@ -123,8 +127,8 @@ func managedTransformPipeline(p *Pipeline, owner *ExternalPlugin) (*Pipeline, er
 		if x, ok := s.(externalStream); ok && x.p == owner {
 			continue
 		}
-		if !preservesManagedFormat(s) {
-			return nil, contractError("managed_transform", "format_converter")
+		if !managedStepCarriesOver(s) {
+			continue
 		}
 		out.StreamResponseSteps = append(out.StreamResponseSteps, s)
 	}
@@ -134,13 +138,20 @@ func managedTransformPipeline(p *Pipeline, owner *ExternalPlugin) (*Pipeline, er
 	return out, nil
 }
 
-func preservesManagedFormat(step any) bool {
-	// External steps have immutable package/config identities in the snapshot.
+// managedStepCarriesOver reports whether a pipeline step can run inside the
+// managed loop, which speaks the canonical format on both sides of the
+// downstream leg. External steps preserve the format by contract; native format
+// converters do not, because they translate between client and downstream
+// formats — a job the loop performs itself when it builds each generation
+// request. Those converters are dropped rather than rejected: auto-translation
+// inserts them for any client whose format differs from the downstream, and that
+// is now the normal case for every non-Chat format. The loop never relies on
+// them, and keeping them would translate a body the loop just produced.
+func managedStepCarriesOver(step any) bool {
 	switch step.(type) {
 	case externalRequest, externalResponse, externalStream:
-	default:
-		return false
+		pipelineStep, ok := step.(FormatPreserver)
+		return ok && pipelineStep.PreservesFormat()
 	}
-	p, ok := step.(FormatPreserver)
-	return ok && p.PreservesFormat()
+	return false
 }

@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -50,7 +49,11 @@ type managedStreamer struct {
 	// streamed is closed the first time answer content is written, so the
 	// heartbeat goroutine stops signalling "working" once the reply is flowing.
 	streamed chan struct{}
-	once     sync.Once
+	// block records which content block the format currently has open, so a
+	// block is opened once and closed exactly when the kind changes or the
+	// stream ends.
+	block string
+	once  sync.Once
 	// atLineStart tracks whether the next progress delta begins on a fresh
 	// line, so a status never glues itself onto the trailing liveness dots.
 	atLineStart bool
@@ -58,9 +61,16 @@ type managedStreamer struct {
 	template string
 	// activity is the current human-readable status shown in progress frames.
 	activity string
+	// renderer supplies the wire frames for the client's format. It is shared
+	// by every frame the streamer writes, so a format's block bookkeeping (for
+	// example Anthropic's open/close of typed content blocks) stays consistent.
+	renderer StreamRenderer
 }
 
-func newManagedStreamer(w *statusCaptureWriter, decision jsplugins.Decision, live bool) *managedStreamer {
+func newManagedStreamer(w *statusCaptureWriter, decision jsplugins.Decision, live bool, renderer StreamRenderer) *managedStreamer {
+	if renderer == nil {
+		renderer = chatRenderer{}
+	}
 	return &managedStreamer{
 		w:           w,
 		heartbeat:   decision.WantsHeartbeat(),
@@ -69,6 +79,7 @@ func newManagedStreamer(w *statusCaptureWriter, decision jsplugins.Decision, liv
 		template:    decision.ActivityTemplate(),
 		activity:    "Thinking…",
 		atLineStart: true,
+		renderer:    renderer,
 	}
 }
 
@@ -151,22 +162,51 @@ func (s *managedStreamer) heartbeatFrame(text string) []byte {
 	return s.progressFrame(text + "\n")
 }
 
-// progressFrame renders one progress delta.
+// progressFrame renders one progress delta in the client's format. Once answer
+// content is streaming its block must stay open until the turn ends: closing it
+// for a status pulse would emit the answer item's done event early, and the
+// reopened item would carry deltas with no matching added event.
 func (s *managedStreamer) progressFrame(text string) []byte {
-	chunk, err := json.Marshal(map[string]any{
-		"id":      "chatcmpl-managed",
-		"object":  "chat.completion.chunk",
-		"created": time.Now().Unix(),
-		"choices": []any{map[string]any{
-			"index":         0,
-			"delta":         map[string]any{"reasoning_content": text},
-			"finish_reason": nil,
-		}},
-	})
-	if err != nil {
+	if s.block == "content" {
 		return nil
 	}
-	return []byte("data: " + string(chunk) + "\n\n")
+	return append(s.openBlock("progress"), s.renderer.FrameProgress(text)...)
+}
+
+// terminates reports whether the renderer writes an explicit closing turn.
+func terminates(renderer StreamRenderer) bool {
+	t, ok := renderer.(streamTerminator)
+	return ok && t.FrameAlwaysTerminates()
+}
+
+// closeBlock closes whichever block the format currently has open, if any.
+func (s *managedStreamer) closeBlock() error {
+	lifecycle, ok := s.renderer.(streamLifecycle)
+	if !ok || !lifecycle.FrameBlocks() || s.block == "" {
+		return nil
+	}
+	if _, err := s.w.Write(lifecycle.FrameCloseBlock()); err != nil {
+		return err
+	}
+	s.block = ""
+	return nil
+}
+
+// openBlock opens the block for the given kind when the format frames its
+// content in blocks, closing the previously open block if the kind changed. It
+// returns the wire bytes to write ahead of the delta, if any.
+func (s *managedStreamer) openBlock(kind string) []byte {
+	lifecycle, ok := s.renderer.(streamLifecycle)
+	if !ok || !lifecycle.FrameBlocks() || s.block == kind {
+		return nil
+	}
+	var frames []byte
+	if s.block != "" {
+		frames = append(frames, lifecycle.FrameCloseBlock()...)
+	}
+	frames = append(frames, lifecycle.FrameOpenBlock(kind)...)
+	s.block = kind
+	return frames
 }
 
 // commit sends the SSE headers before any generation work so the client sees
@@ -182,6 +222,11 @@ func (s *managedStreamer) commit() {
 	s.committed = true
 	s.w.Header().Set("Content-Type", "text/event-stream")
 	s.w.WriteHeader(http.StatusOK)
+	// Formats with named lifecycle events need their opening frame before any
+	// delta, otherwise the client rejects the deltas that follow.
+	if frame := s.renderer.FrameStart(); len(frame) > 0 {
+		_, _ = s.w.Write(frame)
+	}
 	if s.heartbeat {
 		if frame := s.heartbeatFrame(s.activity); frame != nil {
 			_, _ = s.w.Write(frame)
@@ -297,9 +342,15 @@ func (s *managedStreamer) onData(data string) error {
 	return s.writeContent(pending)
 }
 
-// relay forwards one upstream chunk verbatim, recording that the client saw
-// answer content.
+// relay forwards one upstream chunk, recording that the client saw answer
+// content. Chat clients receive the chunk verbatim, which is the historical
+// wire. Any other format must not see OpenAI Chat bytes, so the chunk is parsed
+// and re-rendered through that format's frames.
 func (s *managedStreamer) relay(data string) {
+	if _, isChat := s.renderer.(chatRenderer); !isChat && s.renderer != nil {
+		s.relayRendered(data)
+		return
+	}
 	s.mu.Lock()
 	if s.finished || !s.committed {
 		s.mu.Unlock()
@@ -314,6 +365,50 @@ func (s *managedStreamer) relay(data string) {
 	s.mu.Unlock()
 }
 
+// relayRendered translates one upstream Chat chunk into the client's format.
+// Status text keeps travelling as progress so clients still see the bot
+// working, and answer text as content.
+func (s *managedStreamer) relayRendered(data string) {
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"delta"`
+		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
+	}
+	if json.Unmarshal([]byte(data), &chunk) != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished || !s.committed {
+		return
+	}
+	if len(chunk.Usage) > 0 {
+		s.usage = chunk.Usage
+	}
+	for _, choice := range chunk.Choices {
+		if choice.Delta.ReasoningContent != "" {
+			if _, err := s.w.Write(s.progressFrame(choice.Delta.ReasoningContent)); err != nil {
+				return
+			}
+		}
+		if choice.Delta.Content != "" {
+			if _, err := s.w.Write(s.openBlock("content")); err != nil {
+				return
+			}
+			if _, err := s.w.Write(s.renderer.FrameContent(choice.Delta.Content)); err != nil {
+				return
+			}
+			s.output = true
+			s.markStreamed()
+		}
+	}
+	s.w.Flush()
+}
+
 // writeContent emits a synthesized content chunk and flushes it.
 func (s *managedStreamer) writeContent(text []byte) error {
 	s.mu.Lock()
@@ -321,20 +416,70 @@ func (s *managedStreamer) writeContent(text []byte) error {
 	if s.finished {
 		return nil
 	}
-	chunk, err := json.Marshal(map[string]any{
-		"id":      "chatcmpl-managed",
-		"object":  "chat.completion.chunk",
-		"created": time.Now().Unix(),
-		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": string(text)}, "finish_reason": nil}},
-	})
-	if err != nil {
+	if _, err := s.w.Write(s.openBlock("content")); err != nil {
 		return err
 	}
-	if _, err = fmt.Fprintf(s.w, "data: %s\n\n", chunk); err != nil {
+	if _, err := s.w.Write(s.renderer.FrameContent(string(text))); err != nil {
 		return err
 	}
 	s.w.Flush()
 	s.markStreamed()
+	return nil
+}
+
+// publishStored answers a client whose stream is already open but which saw no
+// live answer: the stored turn is rendered through the same block lifecycle the
+// live path uses, so the client receives well-formed frames rather than a
+// response spliced into an open stream.
+func (s *managedStreamer) publishStored(canonical []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished {
+		return nil
+	}
+	s.finished = true
+	root, err := ValidateOneChoiceResponse(canonical)
+	if err != nil {
+		return err
+	}
+	message, err := managedResponseMessage(root)
+	if err != nil {
+		return err
+	}
+	var text string
+	if raw, ok := message["content"]; ok {
+		_ = json.Unmarshal(raw, &text)
+	}
+	usage := root["usage"]
+	if text != "" {
+		if _, err := s.w.Write(s.openBlock("content")); err != nil {
+			return err
+		}
+		if _, err := s.w.Write(s.renderer.FrameContent(text)); err != nil {
+			return err
+		}
+		s.output = true
+	}
+	if caller, ok := s.renderer.(streamToolCaller); ok {
+		if calls, err := storedToolCalls(message); err == nil && len(calls) > 0 {
+			if _, err := s.w.Write(caller.FrameToolCalls(calls)); err != nil {
+				return err
+			}
+			s.output = true
+		}
+	}
+	if terminates(s.renderer) {
+		if err := s.closeBlock(); err != nil {
+			return err
+		}
+		if _, err := s.w.Write(s.renderer.FrameFinish(usage)); err != nil {
+			return err
+		}
+	}
+	if _, err := s.w.Write(s.renderer.FrameEnd()); err != nil {
+		return err
+	}
+	s.w.Flush()
 	return nil
 }
 
@@ -356,38 +501,34 @@ func (s *managedStreamer) finishTurn() error {
 		return nil
 	}
 	s.finished = true
-	if !s.live && !s.turnLive && s.hold.Len() > 0 {
-		chunk, err := json.Marshal(map[string]any{
-			"id":      "chatcmpl-managed",
-			"object":  "chat.completion.chunk",
-			"created": time.Now().Unix(),
-			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": s.hold.String()}, "finish_reason": nil}},
-		})
-		if err != nil {
+	// A held turn that never proved large enough is published here.
+	held := !s.live && !s.turnLive && s.hold.Len() > 0
+	if held {
+		if _, err := s.w.Write(s.openBlock("content")); err != nil {
 			return err
 		}
-		if _, err = fmt.Fprintf(s.w, "data: %s\n\n", chunk); err != nil {
-			return err
-		}
-		stop := map[string]any{
-			"id":      "chatcmpl-managed",
-			"object":  "chat.completion.chunk",
-			"created": time.Now().Unix(),
-			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
-		}
-		if len(s.usage) > 0 {
-			stop["usage"] = s.usage
-		}
-		if chunk, err = json.Marshal(stop); err != nil {
-			return err
-		}
-		if _, err = fmt.Fprintf(s.w, "data: %s\n\n", chunk); err != nil {
+		if _, err := s.w.Write(s.renderer.FrameContent(s.hold.String())); err != nil {
 			return err
 		}
 		s.output = true
 	}
 	s.hold.Reset()
-	if _, err := fmt.Fprint(s.w, "data: [DONE]\n\n"); err != nil {
+	// A format with an explicit turn end needs its closing frames whether the
+	// answer streamed live or was just flushed above; omitting them leaves the
+	// client without a stop reason.
+	if terminates(s.renderer) && (held || s.live || s.turnLive) {
+		if err := s.closeBlock(); err != nil {
+			return err
+		}
+		if _, err := s.w.Write(s.renderer.FrameFinish(s.usage)); err != nil {
+			return err
+		}
+	} else if held {
+		if _, err := s.w.Write(s.renderer.FrameFinish(s.usage)); err != nil {
+			return err
+		}
+	}
+	if _, err := s.w.Write(s.renderer.FrameEnd()); err != nil {
 		return err
 	}
 	s.w.Flush()
@@ -404,8 +545,7 @@ func (s *managedStreamer) writeError(code string) {
 		return
 	}
 	s.finished = true
-	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"code": code, "message": code}})
-	_, _ = fmt.Fprintf(s.w, "data: %s\n\n", payload)
+	_, _ = s.w.Write(s.renderer.FrameError(code))
 	s.w.Flush()
 }
 

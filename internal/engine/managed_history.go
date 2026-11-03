@@ -138,12 +138,16 @@ func managedAnchorEqual(actual, expected []byte) bool {
 			return false
 		}
 		want = message
-	} else {
-		// Legacy anchors included provider-private fields rather than a final projection.
-		delete(got, "reasoning")
-		delete(got, "reasoning_content")
-		delete(want, "reasoning")
-		delete(want, "reasoning_content")
+	}
+	// Reasoning is never part of the turn's contract: a client is not required to
+	// echo it, and most cannot (a chat client drops it, an Anthropic client has no
+	// block for it). The stored anchor carries whatever the downstream emitted, so
+	// comparing it would fail every continuation started by a thinking model —
+	// which is the common case. It is dropped from both sides.
+	for _, message := range []ChatMessage{got, want} {
+		delete(message, "reasoning")
+		delete(message, "reasoning_content")
+		delete(message, "thinking")
 	}
 	// Tool-only turns use null, omitted, or empty content across OpenAI clients.
 	// Never normalize nonempty assistant text or tool identity.

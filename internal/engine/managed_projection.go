@@ -204,15 +204,41 @@ func writeManagedEvent(w io.Writer, e SSEChunk) error {
 	return nil
 }
 
+// storedCanonical returns the canonical Chat JSON held by a stored projection,
+// unwrapping the versioned envelope when present. It lets a live stream render
+// the durable turn instead of replaying bytes recorded for a different format.
+func storedCanonical(stored []byte) []byte {
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(stored, &probe) != nil {
+		return stored
+	}
+	if len(probe["managed_projection_version"]) == 0 {
+		return stored
+	}
+	var env managedProjectionEnvelope
+	if json.Unmarshal(stored, &env) != nil || env.Version != 1 || len(env.JSON) == 0 {
+		return stored
+	}
+	return env.JSON
+}
+
 // writeStoredManagedProjection replays a versioned exact wire image; legacy Chat
 // JSON is delegated to the historical writer. It never executes plugin hooks.
-func writeStoredManagedProjection(w http.ResponseWriter, stored []byte, streaming bool) error {
+//
+// The stored wire is the canonical Chat rendering, so it is replayed verbatim
+// only for a Chat client. Any other format renders the stored canonical turn
+// through its own codec, which keeps the durable turn authoritative while the
+// wire matches what the client asked for.
+func writeStoredManagedProjection(w http.ResponseWriter, stored []byte, streaming bool, renderer StreamRenderer, started bool) error {
 	var probe map[string]json.RawMessage
 	if json.Unmarshal(stored, &probe) != nil {
 		return errManagedProjection
 	}
 	if len(probe["managed_projection_version"]) == 0 {
-		return writeManagedProjection(w, stored, streaming)
+		if _, isChat := renderer.(chatRenderer); isChat || renderer == nil {
+			return writeManagedProjection(w, stored, streaming)
+		}
+		return renderManagedProjection(w, stored, streaming, renderer, started)
 	}
 	var env managedProjectionEnvelope
 	if json.Unmarshal(stored, &env) != nil || env.Version != 1 || len(env.JSON) == 0 || len(env.Wire) == 0 {
@@ -225,10 +251,108 @@ func writeStoredManagedProjection(w http.ResponseWriter, stored []byte, streamin
 	if json.Compact(&compact, env.JSON) != nil {
 		return errManagedProjection
 	}
-	w.Header().Set("Content-Type", map[bool]string{true: "text/event-stream", false: "application/json"}[streaming])
-	for k, vs := range env.Headers {
-		w.Header()[k] = append([]string(nil), vs...)
+	if _, isChat := renderer.(chatRenderer); isChat || renderer == nil {
+		w.Header().Set("Content-Type", map[bool]string{true: "text/event-stream", false: "application/json"}[streaming])
+		for k, vs := range env.Headers {
+			w.Header()[k] = append([]string(nil), vs...)
+		}
+		_, err := w.Write(env.Wire)
+		return err
 	}
-	_, err := w.Write(env.Wire)
+	return renderManagedProjection(w, env.JSON, streaming, renderer, started)
+}
+
+// renderManagedProjection writes a stored canonical Chat response through the
+// client's codec, so a replayed turn is delivered in the format it was
+// requested in.
+func renderManagedProjection(w http.ResponseWriter, canonical []byte, streaming bool, renderer StreamRenderer, started bool) error {
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(canonical, &probe) != nil {
+		return errManagedProjection
+	}
+	// The stored projection may itself be an envelope from an older write.
+	if envJSON, ok := probe["json"]; ok && len(probe["managed_projection_version"]) > 0 {
+		return renderManagedProjection(w, envJSON, streaming, renderer, started)
+	}
+	root, err := ValidateOneChoiceResponse(canonical)
+	if err != nil {
+		return errManagedProjection
+	}
+	message, err := managedResponseMessage(root)
+	if err != nil {
+		return errManagedProjection
+	}
+	var text string
+	if raw, ok := message["content"]; ok {
+		_ = json.Unmarshal(raw, &text)
+	}
+	usage := root["usage"]
+	if streaming {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// A stream already opened by the streamer keeps its single message_start;
+		// only a replay that opens its own response writes one.
+		if start := renderer.FrameStart(); len(start) > 0 && !started {
+			if _, err := w.Write(start); err != nil {
+				return err
+			}
+		}
+		if text != "" {
+			if _, err := w.Write(renderer.FrameContent(text)); err != nil {
+				return err
+			}
+		}
+		// A turn may end by asking the client to run tools. Dropping the calls
+		// would leave the client unable to continue the loop.
+		if caller, ok := renderer.(streamToolCaller); ok {
+			if calls, err := storedToolCalls(message); err == nil && len(calls) > 0 {
+				if _, err := w.Write(caller.FrameToolCalls(calls)); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := w.Write(renderer.FrameFinish(usage)); err != nil {
+			return err
+		}
+		if _, err := w.Write(renderer.FrameEnd()); err != nil {
+			return err
+		}
+		return nil
+	}
+	jsonRenderer, ok := renderer.(jsonResponseRenderer)
+	if !ok {
+		// A renderer that cannot render JSON must fail loudly rather than
+		// hand a client another format's bytes.
+		return errManagedProjection
+	}
+	body, err := jsonRenderer.RenderJSON(canonical)
+	if err != nil {
+		return errManagedProjection
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, err = w.Write(body)
 	return err
+}
+
+// storedToolCalls reads the tool calls a stored canonical turn requested.
+func storedToolCalls(message ChatMessage) ([]ToolCall, error) {
+	if len(message["tool_calls"]) == 0 {
+		return nil, nil
+	}
+	var calls []struct {
+		ID       string `json:"id"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(message["tool_calls"], &calls); err != nil {
+		return nil, err
+	}
+	out := make([]ToolCall, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, ToolCall{
+			ID: call.ID, Name: call.Function.Name, Arguments: json.RawMessage(call.Function.Arguments),
+		})
+	}
+	return out, nil
 }

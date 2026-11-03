@@ -18,6 +18,11 @@ type RoutingContext struct {
 	Alias          *RoutingAlias     `json:"alias"`
 	ResolvedModel  string            `json:"resolvedModel"`
 	Downstream     RoutingDownstream `json:"downstream"`
+	// ClientFormat is the format the client spoke, which differs from the
+	// downstream format whenever the gateway translates. A service that answers
+	// in the client's own protocol needs it to read the request and shape its
+	// decision for the format actually on the wire.
+	ClientFormat string `json:"clientFormat"`
 }
 type RoutingAlias struct {
 	ID         string `json:"id"`
@@ -29,8 +34,8 @@ type RoutingDownstream struct {
 	Format string `json:"format"`
 }
 
-func routingContext(result *modelResult, format string) RoutingContext {
-	c := RoutingContext{RequestedModel: result.model, ResolvedModel: result.resolvedModel, Downstream: RoutingDownstream{result.ds.ID, format}}
+func routingContext(result *modelResult, format, clientFormat string) RoutingContext {
+	c := RoutingContext{RequestedModel: result.model, ResolvedModel: result.resolvedModel, Downstream: RoutingDownstream{result.ds.ID, format}, ClientFormat: clientFormat}
 	if a := result.alias; a != nil {
 		c.Alias = &RoutingAlias{a.ID, a.InputModelID, a.IsRegex}
 	}
@@ -216,7 +221,7 @@ func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, res
 	}
 	var owner *ExternalPlugin
 	var decision jsplugins.Decision
-	input := map[string]any{"context": ctx.invocationContext(), "routing": jsonObject(routingContext(result, downstreamFormat)), "execution": nil, "request": map[string]any{"method": r.Method, "path": r.URL.Path, "query": r.URL.RawQuery, "headers": headerSnapshot(r.Header, declaredHeaderSet(ctx))}, "body": payload(result.originalBody)}
+	input := map[string]any{"context": ctx.invocationContext(), "routing": jsonObject(routingContext(result, downstreamFormat, format)), "execution": nil, "request": map[string]any{"method": r.Method, "path": r.URL.Path, "query": r.URL.RawQuery, "headers": headerSnapshot(r.Header, declaredHeaderSet(ctx))}, "body": payload(result.originalBody)}
 	if ex := executionFromRequest(r); ex != nil {
 		input["execution"] = map[string]any{"id": ex.ExecutionID, "subject": ex.Subject, "assignment": ex.AssignmentID, "epoch": ex.Epoch}
 	}
@@ -330,11 +335,17 @@ func (e *Engine) prepareIntegration(w *statusCaptureWriter, r *http.Request, res
 		}
 		return false
 	}
-	if r.Method != http.MethodPost || (r.URL.Path != "/v1/chat/completions" && r.URL.Path != "/chat/completions") {
+	if r.Method != http.MethodPost {
+		return fail("unsupported_managed_route")
+	}
+	// The route decides which client wire format this turn speaks. A path with
+	// no codec cannot be served by the managed loop.
+	codec, hasCodec := codecForPath(r.URL.Path)
+	if !hasCodec {
 		return fail("unsupported_managed_route")
 	}
 	if decision.Kind == "managedTools" {
-		handled := e.executeManagedTools(w, r, result, pipeline, owner, decision, entry, start)
+		handled := e.executeManagedTools(w, r, result, pipeline, owner, decision, codec, entry, start)
 		if w.status < 400 {
 			outcome = "success"
 		}

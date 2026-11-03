@@ -63,6 +63,20 @@ func isStreamRequest(body []byte) bool {
 	return json.Unmarshal(body, &probe) == nil && probe.Stream
 }
 
+// clientWantsStream reports whether the client asked for a streamed response.
+// Gemini has no stream flag: the transport is the path action, so
+// streamGenerateContent streams and generateContent does not. Every other
+// format expresses it in the body.
+func clientWantsStream(body []byte, path string) bool {
+	if strings.HasSuffix(path, ":streamGenerateContent") {
+		return true
+	}
+	if strings.HasSuffix(path, ":generateContent") {
+		return false
+	}
+	return isStreamRequest(body)
+}
+
 // extractModel parses the request body JSON to find the "model" field.
 // For Gemini paths (/v1beta/models/{model}:action), the model is embedded
 // in the URL path instead of the body, so we extract it from pathFallback
@@ -150,7 +164,9 @@ func rewriteModelInBody(body []byte, outputModel string) []byte {
 // for /v1/responses, or "gemini" for /v1beta/models/* action paths.
 func detectInputFormat(path string) string {
 	switch path {
-	case "/v1/chat/completions":
+	// The unversioned chat route is served too, so a client using it must be
+	// recognized rather than reported as an unknown format.
+	case "/v1/chat/completions", "/chat/completions":
 		return "openai"
 	case "/v1/messages":
 		return "anthropic"

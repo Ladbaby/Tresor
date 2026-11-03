@@ -26,7 +26,7 @@ type managedExecutionLock struct {
 
 // executeManagedTools runs managed Chat generations directly against the pinned
 // downstream. It never re-enters HandleProxy, retries, or transforms the transcript.
-func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, result *modelResult, pipeline *Pipeline, owner *ExternalPlugin, decision jsplugins.Decision, entry *RequestLogEntry, start time.Time) bool {
+func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, result *modelResult, pipeline *Pipeline, owner *ExternalPlugin, decision jsplugins.Decision, codec Codec, entry *RequestLogEntry, start time.Time) bool {
 	s := e.requestIntegrationState(r)
 	// Display labels let progress frames name the step a service understands
 	// ("TresorBotSendMessage") instead of the raw operation name.
@@ -104,7 +104,9 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	case <-r.Context().Done():
 		return fail(409, "operation_uncertain")
 	}
-	if r.Method != http.MethodPost || (r.URL.Path != "/v1/chat/completions" && r.URL.Path != "/chat/completions") || decision.Codec != "openai-chat.v1" {
+	// The announced codec must be the one this route serves, or the client would
+	// receive a response in a format it never asked for.
+	if r.Method != http.MethodPost || codec == nil || decision.Codec != codec.Name() {
 		entry.Diagnostic = "route:unsupported_method_path_or_codec"
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
@@ -122,11 +124,15 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		entry.Diagnostic = "request:empty_body"
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
-	clientStreaming := isStreamRequest(result.originalBody)
-	// A streaming client gets a live SSE response: headers commit before any
+	// The stream flag is read from the raw body before the streamer exists, so
+	// commit timing and every later validation failure behave exactly as they
+	// did before the codec indirection (codecs never decide transport; the
+	// chat codec derives the same value from these same bytes).
+	clientStreaming := clientWantsStream(result.originalBody, r.URL.Path)
+	// A streaming client gets a live response: headers commit before any
 	// generation work and the policy only shapes content (heartbeats,
 	// intermediate turns). The durable projection stays the replay authority.
-	streamer = newManagedStreamer(w, decision, decision.ShowsIntermediate())
+	streamer = newManagedStreamer(w, decision, decision.ShowsIntermediate(), codec.Renderer())
 	heartbeatStop := make(chan struct{})
 	defer close(heartbeatStop)
 	if clientStreaming {
@@ -137,11 +143,14 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 	if priorErr != nil {
 		return fail(502, "operation_uncertain")
 	}
-	request, err := ParseManagedChatRequest(result.originalBody)
+	// Decode through the route's codec so every format enters the loop as the
+	// canonical transcript.
+	decoded, err := decodeClientRequest(codec, result.originalBody, r.URL.Path)
 	if err != nil {
 		entry.Diagnostic = "request_validation:" + string(managedReason(err))
 		return fail(http.StatusBadRequest, "unsupported_managed_route")
 	}
+	request := ChatRequest{Raw: decoded.Raw, Messages: decoded.Messages, Model: decoded.Model}
 	clientNames := make([]string, 0)
 	var toolDefs []struct {
 		Function struct {
@@ -238,7 +247,9 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			// marker and is written without the streamer's lock.
 			streamer.stop()
 		}
-		if err := writeStoredManagedProjection(w, stored.Response, clientStreaming); err != nil {
+		// A committed stream already wrote its opening frame; the replay must
+		// not emit a second one.
+		if err := writeStoredManagedProjection(w, stored.Response, clientStreaming, codec.Renderer(), streamer.isCommitted()); err != nil {
 			entry.Error = "integration_unavailable"
 		}
 		entry.Status = http.StatusOK
@@ -369,13 +380,23 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 				if err = streamer.finishTurn(); err != nil {
 					entry.Error = "integration_unavailable"
 				}
-			} else {
+			} else if _, isChat := codec.Renderer().(chatRenderer); isChat {
+				// A Chat client's stored wire is already in its own format;
+				// replay it verbatim so the finish reason, usage and any client
+				// tool calls reach the stream the streamer already opened.
 				streamer.stop()
-				if err = writeStoredManagedProjection(w, stored, clientStreaming); err != nil {
+				if err = writeStoredManagedProjection(w, stored, clientStreaming, codec.Renderer(), streamer.isCommitted()); err != nil {
+					entry.Error = "integration_unavailable"
+				}
+			} else {
+				// The stream is already open, so its closing frames and the
+				// stored turn must go through the streamer rather than being
+				// spliced into the middle of it.
+				if err = streamer.publishStored(storedCanonical(stored)); err != nil {
 					entry.Error = "integration_unavailable"
 				}
 			}
-		} else if err = writeStoredManagedProjection(w, stored, clientStreaming); err != nil {
+		} else if err = writeStoredManagedProjection(w, stored, clientStreaming, codec.Renderer(), streamer.isCommitted()); err != nil {
 			entry.Error = "integration_unavailable"
 		}
 		entry.Status = responseStatus
@@ -422,7 +443,12 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 			}
 		}
 		body, _ := json.Marshal(bodyMap)
+		// The loop hands the downstream a canonical Chat request, whatever
+		// format the client used, so the inner request must carry that route
+		// rather than the client's own.
 		innerReq := r.Clone(r.Context())
+		innerReq.URL.Path = "/v1/chat/completions"
+		innerReq.URL.RawQuery = ""
 		innerReq.Header = r.Header.Clone()
 		innerReq.Header.Del("Authorization")
 		innerReq.Header.Del("X-API-Key")
@@ -531,6 +557,23 @@ func (e *Engine) executeManagedTools(w *statusCaptureWriter, r *http.Request, re
 		calls, err := ParseToolCalls(message, hostNames)
 		if err != nil {
 			return reject("tool_calls", managedReason(err))
+		}
+		// The id recorded for a call must be one the client's format can
+		// reproduce, otherwise the request that answers the call cannot be
+		// matched to it. Gemini names the function instead of echoing an id, so
+		// its id is derived from the call itself; every other format keeps the
+		// downstream's id.
+		occurrences := map[string]int{}
+		for i := range calls {
+			key := calls[i].Name + "\x00" + string(calls[i].Arguments)
+			occurrence := occurrences[key]
+			occurrences[key]++
+			clientID := codec.ClientCallID(calls[i], occurrence)
+			if clientID == calls[i].ID {
+				continue
+			}
+			remapToolCallID(message, calls[i].Name, calls[i].Arguments, calls[i].ID, clientID)
+			calls[i].ID = clientID
 		}
 		if len(calls) > 0 {
 			streamer.abortTurn()

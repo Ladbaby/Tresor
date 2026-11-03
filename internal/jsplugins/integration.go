@@ -87,6 +87,24 @@ func ValidatePreparation(value map[string]any) (Preparation, error) {
 	}
 	return p, nil
 }
+
+// validCodecName accepts a bounded label identifying a wire contract, for
+// example "openai-chat.v1". It deliberately does not enumerate known formats:
+// the engine owns that registry.
+func validCodecName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func ValidateDecision(value map[string]any) (Decision, error) {
 	var d Decision
 	b, _ := json.Marshal(value)
@@ -122,7 +140,11 @@ func ValidateDecision(value map[string]any) (Decision, error) {
 			return d, fmt.Errorf("invalid intercept decision")
 		}
 	case "managedTools":
-		if d.Service == "" || d.Codec != "openai-chat.v1" || len(d.Tools) == 0 {
+		// The codec names a wire contract the engine resolves against its own
+		// registry. Validate only that it is a well formed token here, so this
+		// package stays format-agnostic and an unknown codec fails where it can
+		// be reported precisely.
+		if d.Service == "" || !validCodecName(d.Codec) || len(d.Tools) == 0 {
 			return d, fmt.Errorf("invalid managed tools decision")
 		}
 		if v, ok := value["stream"]; ok {
