@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -488,4 +489,74 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestFetcher_ConcatenatedSlugVendor: Xiaomi MiMo's CDN slug is "xiaomimimo" —
+// concatenated, with no -color twin and no delimiter — so the first-segment
+// fallback ("mimo" from "MiMo-VL-7B", "xiaomi" from "Xiaomi MiMo") can never
+// reach it. Before the vendor got an explicit pattern entry, every candidate
+// was filtered out by the index and the endpoint served the generic dummy
+// icon; only the provider catalog worked, because it passes the literal slug.
+func TestFetcher_ConcatenatedSlugVendor(t *testing.T) {
+	var fetched []string
+	var mu sync.Mutex
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		fetched = append(fetched, r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path == "/icons/xiaomimimo.svg" {
+			w.Header().Set("Content-Type", "image/svg+xml")
+			w.Write(makeSVG(32))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer cdn.Close()
+
+	dir := t.TempDir()
+	// Seed a CDN index holding only the real slug, mirroring production: the
+	// index filter is what silently dropped the wrong candidates.
+	idx := `{"version":"test","slugs":["xiaomimimo","xiaomimimo-text","openai"]}`
+	if err := os.WriteFile(filepath.Join(dir, "index.json"), []byte(idx), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+
+	f, err := New(dir, cdn.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	f.SetCDNURL(func(slug string) string {
+		return fmt.Sprintf("%s/icons/%s.svg", cdn.URL, slug)
+	})
+	if !f.index.Ready() {
+		t.Fatal("index should be ready after Load")
+	}
+
+	// Every name a client sends: model ids and the provider display name.
+	for _, modelID := range []string{
+		"MiMo-VL-7B",
+		"mimo-v2.6-pro",
+		"Xiaomi MiMo",
+		"xiaomi-mimo",
+	} {
+		data, ct, err := f.Icon(modelID)
+		if err != nil {
+			t.Fatalf("Icon(%q): %v", modelID, err)
+		}
+		if len(data) == 0 || ct != "image/svg+xml" {
+			t.Fatalf("Icon(%q): empty/invalid response (ct=%q, %d bytes)",
+				modelID, ct, len(data))
+		}
+	}
+
+	// The candidates that reached the CDN must all be the real slug — proof the
+	// resolution produced the right name rather than merely some fallback hit.
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range fetched {
+		if path != "/icons/xiaomimimo.svg" {
+			t.Errorf("fetched %q, expected only /icons/xiaomimimo.svg (all=%v)",
+				path, fetched)
+		}
+	}
 }

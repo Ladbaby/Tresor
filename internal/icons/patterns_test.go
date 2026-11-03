@@ -195,6 +195,11 @@ func TestCandidateSlugs(t *testing.T) {
 		// pattern match and the first-segment fallback, so only one slug.
 		{"OpenAI API", []string{"openai"}, "primary=openai equals fb=openai"},
 		{"Minimax API", []string{"minimax-color"}, "primary=minimax-color is color twin of fb=minimax"},
+		// MiMo: fb ("mimo") differs from the primary ("xiaomimimo"), so the
+		// fallback slugs are appended as extra candidates. The index filter
+		// drops them, leaving the correct primary.
+		{"MiMo-VL-7B", []string{"xiaomimimo", "mimo-color", "mimo"}, "primary=xiaomimimo, fb=mimo"},
+		{"Xiaomi MiMo", []string{"xiaomimimo", "xiaomi-color", "xiaomi"}, "primary=xiaomimimo, fb=xiaomi"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {

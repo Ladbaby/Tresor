@@ -36,6 +36,11 @@ var modelPatterns = []Pattern{
 	{regexp.MustCompile(`(?i)deepseek`), "deepseek-color"},
 	// MiniMax (Chinese lab) — CDN ships a color variant, prefer it
 	{regexp.MustCompile(`(?i)minimax`), "minimax-color"},
+	// Xiaomi MiMo. The CDN slug is concatenated ("xiaomimimo") with no -color
+	// twin, while every name we see splits at the delimiter — "MiMo-VL-7B" gives
+	// "mimo", "Xiaomi MiMo" gives "xiaomi". Neither reaches the slug through
+	// firstSegmentFallback, so the vendor needs an explicit entry.
+	{regexp.MustCompile(`(?i)mimo|xiaomi`), "xiaomimimo"},
 	// Meta — Llama has no dedicated slug, fall back to the meta provider icon
 	{regexp.MustCompile(`(?i)llama`), "meta-color"},
 	// Mistral family (incl. mixtral, pixtral, codestral, ministral, magistral)
