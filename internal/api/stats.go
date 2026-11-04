@@ -10,6 +10,22 @@ import (
 // statsBucketHour is the bucket-key format used by the store layer.
 const statsBucketHour = "2006-01-02T15:00:00Z"
 
+// statsBuckets are the granularities the series can be grouped at, finest
+// first. The client picks one, because only it knows how wide the chart is: a
+// week at hourly resolution and a year at daily resolution are both unreadable
+// as a bar chart, and which one a given range needs depends on the window.
+var statsBuckets = []string{"hour", "day", "week", "month"}
+
+// validStatsBucket reports whether name is a granularity the store can group by.
+func validStatsBucket(name string) bool {
+	for _, b := range statsBuckets {
+		if b == name {
+			return true
+		}
+	}
+	return false
+}
+
 // statsRangeParam maps a user-facing range preset to a (from, to, bucketSize) tuple.
 // Returns false when the preset name is unknown.
 func statsRangeParam(name string, now time.Time) (from, to time.Time, bucketSize string, ok bool) {
@@ -51,9 +67,20 @@ func statsRangeParam(name string, now time.Time) (from, to time.Time, bucketSize
 
 // parseStatsRange handles GET /api/stats query string parsing.
 // Defaults to last_7_days when no range is provided.
+//
+// An explicit `bucket` overrides the granularity the preset would have picked.
+// The chart's readability depends on how many bars fit the window, which only
+// the client knows, so the client asks for the granularity it wants rather than
+// being handed one and having to re-bucket.
 func parseStatsRange(r *http.Request) (from, to time.Time, bucketSize string, err error) {
 	now := time.Now().UTC()
 	preset := r.URL.Query().Get("range")
+	requested := r.URL.Query().Get("bucket")
+	if requested != "" && !validStatsBucket(requested) {
+		return time.Time{}, time.Time{}, "", &rangeError{
+			msg: "unknown bucket: " + requested + " (use hour, day, week or month)",
+		}
+	}
 
 	if preset == "custom" {
 		fromStr := r.URL.Query().Get("from")
@@ -71,6 +98,9 @@ func parseStatsRange(r *http.Request) (from, to time.Time, bucketSize string, er
 			return time.Time{}, time.Time{}, "", &rangeError{msg: "invalid to date (use YYYY-MM-DD)"}
 		}
 		to = to.UTC().Add(24 * time.Hour).Add(-time.Nanosecond)
+		if requested != "" {
+			return from, to, requested, nil
+		}
 		// hour buckets for short ranges, day buckets for everything else
 		days := to.Sub(from).Hours() / 24
 		if days <= 3 {
@@ -83,6 +113,9 @@ func parseStatsRange(r *http.Request) (from, to time.Time, bucketSize string, er
 		preset = "last_7_days"
 	}
 	if f, t, bs, ok := statsRangeParam(preset, now); ok {
+		if requested != "" {
+			bs = requested
+		}
 		return f, t, bs, nil
 	}
 	return time.Time{}, time.Time{}, "", &rangeError{msg: "unknown range preset: " + preset}

@@ -360,3 +360,69 @@ func TestStatsQueryBuilder_Today(t *testing.T) {
 		t.Errorf("from must precede to: %s >= %s", from, to)
 	}
 }
+
+func TestStats_BucketOverride(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	// A week at day resolution gives eight wide bars; the chart asks for hour
+	// buckets instead so it can draw a readable number of them.
+	for _, tc := range []struct {
+		bucket string
+		want   string
+	}{
+		{"hour", "hour"},
+		{"day", "day"},
+		{"week", "week"},
+		{"month", "month"},
+	} {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/stats?range=last_7_days&bucket="+tc.bucket, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("bucket=%s: expected 200, got %d: %s", tc.bucket, w.Code, w.Body.String())
+		}
+		var resp struct {
+			BucketSize string `json:"bucket_size"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("bucket=%s: unmarshal: %v", tc.bucket, err)
+		}
+		if resp.BucketSize != tc.want {
+			t.Errorf("bucket=%s: got %q, want %q", tc.bucket, resp.BucketSize, tc.want)
+		}
+	}
+}
+
+func TestStats_UnknownBucketRejected(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?range=last_7_days&bucket=fortnight", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an unknown bucket, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestStats_NoBucketKeepsPresetDefault(t *testing.T) {
+	router := newTestRouter(t)
+	handler := router.Handler()
+
+	// Without the param the preset still decides, so existing clients and the
+	// daemon's own web UI keep the buckets they already get.
+	req := httptest.NewRequest(http.MethodGet, "/api/stats?range=last_7_days", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	var resp struct {
+		BucketSize string `json:"bucket_size"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.BucketSize != "day" {
+		t.Errorf("default bucket: got %q, want day", resp.BucketSize)
+	}
+}

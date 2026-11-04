@@ -445,8 +445,11 @@ func (s *Store) AggregateByIP(q StatsQuery) ([]IPStatsRow, error) {
 }
 
 // TimeSeries returns bucketed totals for the given range.
-// bucketSize is "hour" or "day". For "day", the bucket label is "YYYY-MM-DD".
-// For "hour", the bucket label is the canonical ISO8601 hour key.
+//
+// bucketSize is one of "hour", "day", "week" or "month". The label format
+// matches: the canonical ISO8601 hour key, "YYYY-MM-DD" for a day, and the
+// Monday and first-of-month dates for the coarser groupings. Weeks start on
+// Monday, matching ISO-8601 and the calendar the heatmap draws.
 func (s *Store) TimeSeries(q StatsQuery, bucketSize string) ([]TimeSeriesPoint, error) {
 	fromKey := bucketKey(q.From)
 	toKey := bucketKey(q.To)
@@ -455,6 +458,12 @@ func (s *Store) TimeSeries(q StatsQuery, bucketSize string) ([]TimeSeriesPoint, 
 	switch bucketSize {
 	case "day":
 		groupExpr = `DATE(bucket)`
+	case "week":
+		// SQLite's %W starts the week on Monday, so subtracting the weekday
+		// offset from the day gives that week's Monday.
+		groupExpr = `DATE(bucket, '-' || ((CAST(STRFTIME('%w', bucket) AS INTEGER) + 6) % 7) || ' days')`
+	case "month":
+		groupExpr = `DATE(bucket, 'start of month')`
 	default:
 		groupExpr = `bucket`
 	}
