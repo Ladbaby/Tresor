@@ -237,7 +237,38 @@ func (f *Fetcher) StartPeriodicRefresh(ctx context.Context) func() {
 // before the first sync completes), candidates are tried unfiltered; a
 // one-shot warning is logged.
 func (f *Fetcher) Icon(modelID string) ([]byte, string, error) {
-	candidates := CandidateSlugs(modelID)
+	return f.icon(CandidateSlugs(modelID))
+}
+
+// IconSlug resolves a literal CDN slug — the value a provider recipe declares in
+// its icon field — with no pattern inference.
+//
+// Icon exists to guess a brand from a model name ("MiniMax-M2.5" -> minimax),
+// and that guessing is destructive when the caller already knows the answer: the
+// pattern table rewrites "ai302-color" to "ai-color", so a recipe naming the
+// right icon still rendered the generic glyph. A recipe's icon is data, not a
+// hint, so it is tried verbatim before anything is inferred from it.
+func (f *Fetcher) IconSlug(slug string) ([]byte, string, error) {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return nil, "", nil
+	}
+	// A declared slug may still be wrong, so fall back to the normal resolution
+	// rather than giving up: a recipe that names "qwen" instead of "qwen-color"
+	// should still get Qwen's icon.
+	seen := map[string]bool{slug: true}
+	candidates := []string{slug}
+	for _, c := range CandidateSlugs(slug) {
+		if !seen[c] {
+			seen[c] = true
+			candidates = append(candidates, c)
+		}
+	}
+	return f.icon(candidates)
+}
+
+// icon resolves the first candidate slug that yields bytes.
+func (f *Fetcher) icon(candidates []string) ([]byte, string, error) {
 	if len(candidates) == 0 {
 		return nil, "", nil
 	}

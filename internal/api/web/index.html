@@ -202,6 +202,12 @@
                         <div class="modal-content" style="max-width:640px;">
                             <span class="close">&times;</span>
                             <h3>Provider Catalog</h3>
+                            <!-- The catalog is long enough that scrolling to find a
+                                 name is the common case, so the filter sits above the
+                                 list rather than behind a menu. -->
+                            <input type="search" id="provider-catalog-search" class="catalog-search"
+                                   placeholder="Search providers…" autocomplete="off" spellcheck="false"
+                                   aria-label="Search providers">
                             <div id="provider-catalog-list" class="provider-catalog-list"></div>
                         </div>
                     </div>

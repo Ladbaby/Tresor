@@ -39,6 +39,15 @@ const (
 	// DefaultCatalogURL is where the official index lives.
 	DefaultCatalogURL = "https://raw.githubusercontent.com/Ladbaby/Tresor-providers/main/index.json"
 
+	// DefaultCatalogURLBase is DefaultCatalogURL without the file name: the prefix
+	// a recipe's own URL is built from. Publishing and reading the index have to
+	// agree on it, so both derive from the one constant above.
+	DefaultCatalogURLBase = "https://raw.githubusercontent.com/Ladbaby/Tresor-providers/main/"
+
+	// CatalogSchema names the index format. It is exported so the tool that
+	// generates the index cannot disagree with the daemon that reads it.
+	CatalogSchema = catalogSchema
+
 	// CatalogEnv overrides DefaultCatalogURL. "off" disables the catalog
 	// entirely, which is what an air-gapped or audited deployment wants.
 	CatalogEnv = "TRESOR_PROVIDER_CATALOG"
@@ -61,18 +70,6 @@ type CatalogEntry struct {
 	Summary map[string]string `json:"summary,omitempty"`
 	// URL is the HTTPS location of the full profile.
 	URL string `json:"url"`
-	// Digest is accepted for compatibility with indexes that still publish one,
-	// and is otherwise unused.
-	//
-	// It was checked after download, to stop an edited recipe from passing as the
-	// reviewed one. That defended only against the index and the recipe being
-	// updated at different moments — a mistake made by whoever publishes them —
-	// while the failure landed on the user as a refused install. A stale index is
-	// better served by installing the recipe that is actually there.
-	//
-	// Code is a different matter: a plugin package still carries a sha256, because
-	// that pin stops a release asset from being swapped for different code.
-	Digest string `json:"digest,omitempty"`
 	// Features are the host features the profile needs, mirrored from the
 	// profile so the UI can mark an entry unavailable without downloading it.
 	Features   []string `json:"features,omitempty"`
@@ -80,6 +77,17 @@ type CatalogEntry struct {
 	// NeedsPlugins mirrors whether the profile binds plugins, so the UI can ask
 	// for consent before downloading anything.
 	NeedsPlugins bool `json:"needs_plugins,omitempty"`
+	// Regions mirrors the profile's endpoint choices, so a picker can be offered
+	// before the profile is downloaded. It is presentational only: an install
+	// reads the profile and validates the id against it there, so a stale index
+	// costs a wrong label rather than a wrong endpoint.
+	Regions []CatalogRegion `json:"regions,omitempty"`
+}
+
+// CatalogRegion is one entry of an index's region list: enough to label a choice.
+type CatalogRegion struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 }
 
 // catalogFile is the on-disk and wire shape of the index.
@@ -431,19 +439,21 @@ func (c *Catalog) writeCache(f catalogFile) {
 	}
 }
 
-// FetchProfile downloads and validates one entry's profile, verifying the
-// digest the index published for it.
-func (c *Catalog) FetchProfile(ctx context.Context, id string) (*Profile, string, error) {
+// FetchProfile downloads and validates one entry's profile. The entry is a
+// pointer to the recipe, so what it can promise is limited to the checks here:
+// the URL must be public HTTPS, and the recipe that arrives must declare the id
+// the entry named. Its contents are not otherwise vouched for by the index.
+func (c *Catalog) FetchProfile(ctx context.Context, id string) (*Profile, error) {
 	entry, ok := c.Entry(id)
 	if !ok {
-		return nil, "", fmt.Errorf("provider %q is not in the catalog", id)
+		return nil, fmt.Errorf("provider %q is not in the catalog", id)
 	}
 	if avail := c.Availability(entry); !avail.Available {
-		return nil, "", fmt.Errorf("provider %q cannot be installed: %s", id, avail.Reason)
+		return nil, fmt.Errorf("provider %q cannot be installed: %s", id, avail.Reason)
 	}
 	u, err := url.Parse(entry.URL)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
-		return nil, "", fmt.Errorf("provider %q has an unsafe profile URL", id)
+		return nil, fmt.Errorf("provider %q has an unsafe profile URL", id)
 	}
 
 	c.mu.RLock()
@@ -452,38 +462,33 @@ func (c *Catalog) FetchProfile(ctx context.Context, id string) (*Profile, string
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, entry.URL, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("fetch provider %q: %w", id, err)
+		return nil, fmt.Errorf("fetch provider %q: %w", id, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("fetch provider %q: unexpected status %d", id, resp.StatusCode)
+		return nil, fmt.Errorf("fetch provider %q: unexpected status %d", id, resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, catalogMaxBytes+1))
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if len(body) > catalogMaxBytes {
-		return nil, "", fmt.Errorf("provider profile exceeds %d bytes", catalogMaxBytes)
+		return nil, fmt.Errorf("provider profile exceeds %d bytes", catalogMaxBytes)
 	}
 
 	profile, err := Parse(body)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if profile.ID != entry.ID {
-		return nil, "", fmt.Errorf("catalog entry %q served a profile for %q", entry.ID, profile.ID)
+		return nil, fmt.Errorf("catalog entry %q served a profile for %q", entry.ID, profile.ID)
 	}
-	digest, err := profile.Digest()
-	if err != nil {
-		return nil, "", err
-	}
-	// The index's digest is deliberately not enforced here. See CatalogEntry.Digest.
-	return profile, digest, nil
+	return profile, nil
 }
 
 func containsFold(list []string, want string) bool {

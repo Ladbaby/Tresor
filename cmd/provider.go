@@ -145,6 +145,9 @@ func newProviderCmd() *cobra.Command {
 			if id, _ := cmd.Flags().GetString("downstream-id"); id != "" {
 				payload["downstream_id"] = id
 			}
+			if region, _ := cmd.Flags().GetString("region"); region != "" {
+				payload["region"] = region
+			}
 
 			_, err := providerAPI(http.MethodPost, "/api/providers/install", payload)
 			if err != nil {
@@ -158,6 +161,7 @@ func newProviderCmd() *cobra.Command {
 	install.Flags().String("client-secret", "", "OAuth client secret, when the provider needs one")
 	install.Flags().Bool("allow-plugins", false, "Allow the profile to bind plugins")
 	install.Flags().String("downstream-id", "", "Use a specific downstream id instead of deriving one")
+	install.Flags().String("region", "", "Install at one of the profile's regions (see `provider list`)")
 	providers.AddCommand(install)
 
 	providers.AddCommand(&cobra.Command{
@@ -228,6 +232,10 @@ func printCatalog(data []byte) error {
 			Available bool     `json:"available"`
 			Reason    string   `json:"reason"`
 			Installed []string `json:"installed"`
+			Regions   []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"regions"`
 		} `json:"entries"`
 		Source string `json:"source"`
 	}
@@ -249,6 +257,19 @@ func printCatalog(data []byte) error {
 		fmt.Printf("  %-20s %-28s v%-4d %s\n", e.ID, e.Name, e.Version, status)
 		if !e.Available && e.Reason != "" {
 			fmt.Printf("  %-20s %s\n", "", e.Reason)
+		}
+		// Regions are listed under the entry so a user can pick one with
+		// `provider install --region`, instead of reading the recipe.
+		if len(e.Regions) > 0 {
+			labels := make([]string, 0, len(e.Regions))
+			for _, r := range e.Regions {
+				label := r.ID
+				if r.Name != "" && r.Name != r.ID {
+					label = r.ID + " (" + r.Name + ")"
+				}
+				labels = append(labels, label)
+			}
+			fmt.Printf("  %-20s regions: %s\n", "", strings.Join(labels, ", "))
 		}
 	}
 	fmt.Printf("\nsource: %s\n", body.Source)

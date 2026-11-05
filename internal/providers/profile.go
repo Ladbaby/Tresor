@@ -14,10 +14,11 @@ package providers
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
+	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -51,6 +52,183 @@ type ProviderSpec struct {
 	FormatPaths map[string]string `json:"format_paths,omitempty"`
 	Auth        *AuthSpec         `json:"auth,omitempty"`
 	Models      []string          `json:"models,omitempty"`
+	// Regions are the endpoint choices a vendor sells the same provider at —
+	// a cloud's regions, a vendor's plans, a relay's national endpoints. One
+	// recipe serves all of them, because the differences are only where the
+	// requests go, and splitting them into separate recipes would duplicate the
+	// auth shape, the model list and the plugin bindings per region while making
+	// a drift between them invisible.
+	//
+	// A region inherits every field it omits from the provider, so a vendor whose
+	// regions differ only in host writes one base_url per region and nothing else.
+	// The provider's own base_url stays the default, which is what an install
+	// without a region choice uses.
+	Regions []Region `json:"regions,omitempty"`
+}
+
+// Region is one endpoint choice of a provider that offers several. Installing
+// with a region writes that region's endpoints into the downstream, so a region
+// is ordinary downstream data by the time it reaches the engine — the engine
+// never learns that "regions" exist.
+type Region struct {
+	// ID names the region; it is what an install passes back to select it, so it
+	// is a slug rather than a display string.
+	ID string `json:"id"`
+	// Name is the region as a user reads it ("US East (N. Virginia)"). Empty
+	// means the ID doubles as the name.
+	Name string `json:"name,omitempty"`
+	// BaseURL replaces the provider's. Empty inherits it.
+	BaseURL string `json:"base_url,omitempty"`
+	// ApiFormats replaces the provider's format list when non-empty. A vendor's
+	// plans do not always serve the same APIs — Volcengine Ark's pay as you go
+	// answers no Anthropic endpoint although its Coding and Agent Plans do — and a
+	// format declared but unroutable fails at request time instead of refusing the
+	// request up front.
+	ApiFormats []string `json:"api_formats,omitempty"`
+	// FormatURLs are merged over the provider's: a format this region names wins
+	// here, and one it maps to "" drops the provider's override so that format
+	// falls back to this region's base_url.
+	FormatURLs map[string]string `json:"format_urls,omitempty"`
+	// FormatPaths are merged over the provider's, the same way.
+	FormatPaths map[string]string `json:"format_paths,omitempty"`
+	// Models replaces the provider's model list when non-empty. A cloud region or
+	// a vendor's plan often serves a different set, and Python-style inheritance
+	// of "the same models" would advertise ids the endpoint does not have.
+	Models []string `json:"models,omitempty"`
+	// UnknownModels declares that this region's model list is not known, so the
+	// provider's list must not be inherited. Without it a region could only say
+	// "different models" by listing some, so a host whose list is genuinely unknown
+	// would either inherit a wrong list or force a stub id into the recipe. An
+	// empty list after resolution means unknown, which is what Fetch Models is for.
+	UnknownModels bool `json:"unknown_models,omitempty"`
+}
+
+// DisplayName is the region's label for a user: its name, or its id when it has
+// none.
+func (r Region) DisplayName() string {
+	if r.Name != "" {
+		return r.Name
+	}
+	return r.ID
+}
+
+// resolved returns the provider as it is at region r: every field the region
+// omits inherited from the provider.
+func (p *ProviderSpec) resolved(r Region) ProviderSpec {
+	out := ProviderSpec{
+		BaseURL:     cmp.Or(r.BaseURL, p.BaseURL),
+		ApiFormats:  append([]string{}, p.ApiFormats...),
+		FormatURLs:  mergeFormatMap(p.FormatURLs, r.FormatURLs),
+		FormatPaths: mergeFormatMap(p.FormatPaths, r.FormatPaths),
+		Auth:        p.Auth,
+		Models:      append([]string{}, p.Models...),
+	}
+	if len(r.Models) > 0 {
+		out.Models = append([]string{}, r.Models...)
+	}
+	if r.UnknownModels {
+		// A region that cannot state a model list must not inherit one, or it would
+		// advertise ids its endpoint does not serve. An empty list here means
+		// "unknown", which the UI resolves with Fetch Models against that region.
+		out.Models = []string{}
+	}
+	if len(r.ApiFormats) > 0 {
+		out.ApiFormats = append([]string{}, r.ApiFormats...)
+	}
+	// A region that drops a format also drops that format's overrides. Leaving
+	// them would show a URL in the UI for an API the provider no longer declares,
+	// which reads as "this works" when the engine can never select it.
+	pruneFormats(out.FormatURLs, out.ApiFormats)
+	pruneFormats(out.FormatPaths, out.ApiFormats)
+	out.Regions = nil
+	if out.ApiFormats == nil {
+		out.ApiFormats = []string{}
+	}
+	if out.Models == nil {
+		out.Models = []string{}
+	}
+	return out
+}
+
+// mergeFormatMap lays over on base. An empty overlay value removes the base's
+// entry rather than setting an empty URL, because "" would otherwise be read as
+// "no override" everywhere downstream and the base's URL would silently win —
+// the opposite of what a region that clears it asked for.
+func mergeFormatMap(base, over map[string]string) map[string]string {
+	if len(base) == 0 && len(over) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(over))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range over {
+		if v == "" {
+			delete(out, k)
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// pruneFormats removes entries for formats the provider does not declare, so a
+// map never names an API the engine cannot select.
+func pruneFormats(m map[string]string, formats []string) {
+	for k := range m {
+		if !slices.Contains(formats, k) {
+			delete(m, k)
+		}
+	}
+}
+
+// Region returns the region with that id.
+func (p *ProviderSpec) Region(id string) (Region, bool) {
+	for _, r := range p.Regions {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return Region{}, false
+}
+
+// DefaultRegion is the region an install that names none gets: the provider's
+// own endpoints when it has a base_url, otherwise its first region.
+func (p *ProviderSpec) DefaultRegion() string {
+	if p.BaseURL != "" || len(p.Regions) == 0 {
+		return ""
+	}
+	return p.Regions[0].ID
+}
+
+// AtRegion returns the provider as it is at regionID. An empty id means the
+// provider's own endpoints. An unknown id is an error, not a silent fallback: a
+// recipe that renamed its regions would otherwise install somewhere the user did
+// not pick.
+func (p *ProviderSpec) AtRegion(regionID string) (ProviderSpec, error) {
+	if regionID == "" {
+		if p.BaseURL != "" || len(p.Regions) == 0 {
+			return p.resolved(Region{}), nil
+		}
+		return p.resolved(p.Regions[0]), nil
+	}
+	r, ok := p.Region(regionID)
+	if !ok {
+		return ProviderSpec{}, fmt.Errorf("no region %q (available: %s)", regionID, strings.Join(p.RegionIDs(), ", "))
+	}
+	return p.resolved(r), nil
+}
+
+// RegionIDs lists the region ids in the order the recipe declares them.
+func (p *ProviderSpec) RegionIDs() []string {
+	ids := make([]string, 0, len(p.Regions))
+	for _, r := range p.Regions {
+		ids = append(ids, r.ID)
+	}
+	return ids
 }
 
 // AuthSpec is the publishable part of a downstream's auth: the method and, for
@@ -215,6 +393,40 @@ func findForbiddenKey(v any) (string, bool) {
 	return "", false
 }
 
+// validateRegions checks the region list: ids are slugs and unique, and every
+// region ends up with an endpoint of its own. A region that inherits an empty
+// base_url would install a downstream pointing nowhere, which fails at request
+// time rather than at install — the whole reason profiles are validated.
+func (p *ProviderSpec) validateRegions() error {
+	seen := map[string]bool{}
+	for i, r := range p.Regions {
+		if strings.TrimSpace(r.ID) == "" {
+			return fmt.Errorf("regions[%d].id is required", i)
+		}
+		for _, c := range r.ID {
+			ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'
+			if !ok {
+				return fmt.Errorf("regions[%d].id %q must be a slug (letters, digits, '-', '_', '.')", i, r.ID)
+			}
+		}
+		if seen[r.ID] {
+			return fmt.Errorf("region %q is listed twice", r.ID)
+		}
+		seen[r.ID] = true
+		if strings.TrimSpace(r.BaseURL) == "" && strings.TrimSpace(p.BaseURL) == "" {
+			return errors.New("region " + r.ID + " needs a base_url: the provider declares none to inherit")
+		}
+		// Listing models and calling the list unknown contradict each other, and
+		// either reading would be a guess about which one the author meant. Refusing
+		// it costs an error while writing the recipe; guessing costs a published
+		// recipe that installs the wrong model ids.
+		if r.UnknownModels && len(r.Models) > 0 {
+			return fmt.Errorf("region %q declares both models and unknown_models; keep one", r.ID)
+		}
+	}
+	return nil
+}
+
 // Validate checks the profile's structure and defaults.
 func (p *Profile) Validate() error {
 	if p.Schema != SchemaName {
@@ -232,8 +444,14 @@ func (p *Profile) Validate() error {
 	if strings.TrimSpace(p.Name) == "" {
 		return fmt.Errorf("provider profile %s: name is required", p.ID)
 	}
-	if strings.TrimSpace(p.Provider.BaseURL) == "" {
-		return fmt.Errorf("provider profile %s: provider.base_url is required", p.ID)
+	// A provider must land on some endpoint: either its own base_url, or regions
+	// to pick between. Requiring base_url alone would make a region-only recipe
+	// impossible, and requiring regions alone would break every existing profile.
+	if strings.TrimSpace(p.Provider.BaseURL) == "" && len(p.Provider.Regions) == 0 {
+		return fmt.Errorf("provider profile %s: provider.base_url or at least one provider.regions entry is required", p.ID)
+	}
+	if err := p.Provider.validateRegions(); err != nil {
+		return fmt.Errorf("provider profile %s: %w", p.ID, err)
 	}
 	// Normalize/default the auth block so the stored value is always shaped.
 	if p.Provider.Auth == nil {
@@ -308,19 +526,6 @@ func (p *Profile) Validate() error {
 		seenAliases[a.InputModelID] = true
 	}
 	return nil
-}
-
-// Digest is the canonical digest of the profile. It covers the parsed, validated
-// form rather than the original bytes, so formatting and key order in the
-// published file do not change it. Credentials cannot be involved: Validate
-// rejects them before a digest is ever computed.
-func (p *Profile) Digest() (string, error) {
-	canonical, err := json.Marshal(p)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize provider profile %s: %w", p.ID, err)
-	}
-	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:]), nil
 }
 
 // AuthConfig converts the publishable auth spec into the store's auth config.

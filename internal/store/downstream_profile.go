@@ -15,7 +15,6 @@ type DownstreamProfile struct {
 	DownstreamID string `json:"downstream_id"`
 	ProfileID    string `json:"profile_id"`
 	Version      int    `json:"version"`
-	Digest       string `json:"digest"`
 	Source       string `json:"source"`
 	Applied      string `json:"applied"`
 }
@@ -25,9 +24,9 @@ type DownstreamProfile struct {
 func (s *Store) GetDownstreamProfile(downstreamID string) (*DownstreamProfile, error) {
 	var p DownstreamProfile
 	err := s.db.QueryRow(
-		`SELECT downstream_id, profile_id, version, digest, source, applied
+		`SELECT downstream_id, profile_id, version, source, applied
 		 FROM downstream_profiles WHERE downstream_id = ?`, downstreamID).
-		Scan(&p.DownstreamID, &p.ProfileID, &p.Version, &p.Digest, &p.Source, &p.Applied)
+		Scan(&p.DownstreamID, &p.ProfileID, &p.Version, &p.Source, &p.Applied)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -47,16 +46,15 @@ func (s *Store) SetDownstreamProfile(p *DownstreamProfile) error {
 		applied = "{}"
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO downstream_profiles (downstream_id, profile_id, version, digest, source, applied, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`INSERT INTO downstream_profiles (downstream_id, profile_id, version, source, applied, updated_at)
+		 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		 ON CONFLICT(downstream_id) DO UPDATE SET
 		   profile_id = excluded.profile_id,
 		   version    = excluded.version,
-		   digest     = excluded.digest,
 		   source     = excluded.source,
 		   applied    = excluded.applied,
 		   updated_at = CURRENT_TIMESTAMP`,
-		p.DownstreamID, p.ProfileID, p.Version, p.Digest, p.Source, applied)
+		p.DownstreamID, p.ProfileID, p.Version, p.Source, applied)
 	if err != nil {
 		return fmt.Errorf("set downstream profile %s: %w", p.DownstreamID, err)
 	}
@@ -67,7 +65,7 @@ func (s *Store) SetDownstreamProfile(p *DownstreamProfile) error {
 // a caller listing downstreams can annotate them without a query per row.
 func (s *Store) ListDownstreamProfiles() (map[string]DownstreamProfile, error) {
 	rows, err := s.db.Query(
-		`SELECT downstream_id, profile_id, version, digest, source, applied FROM downstream_profiles`)
+		`SELECT downstream_id, profile_id, version, source, applied FROM downstream_profiles`)
 	if err != nil {
 		return nil, fmt.Errorf("list downstream profiles: %w", err)
 	}
@@ -76,7 +74,7 @@ func (s *Store) ListDownstreamProfiles() (map[string]DownstreamProfile, error) {
 	out := map[string]DownstreamProfile{}
 	for rows.Next() {
 		var p DownstreamProfile
-		if err := rows.Scan(&p.DownstreamID, &p.ProfileID, &p.Version, &p.Digest, &p.Source, &p.Applied); err != nil {
+		if err := rows.Scan(&p.DownstreamID, &p.ProfileID, &p.Version, &p.Source, &p.Applied); err != nil {
 			return nil, err
 		}
 		out[p.DownstreamID] = p

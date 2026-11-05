@@ -261,16 +261,20 @@ function modelIconHTML(modelID) {
     return `<img class="model-icon" src="/api/icons/${encodeURIComponent(modelID)}" alt="" loading="lazy" onerror="this.style.display='none'">`;
 }
 
-// Provider icon helper. Same as modelIconHTML — kept as a separate name so
-// the call site ("this is a downstream, not a model") reads clearly. The
-// icon endpoint serves the same icon pool either way.
+// iconHTMLFor renders the icon for a downstream (or a provider profile entry).
+// A declared icon is the answer, not a hint: it is a CDN slug the recipe chose, so
+// it is requested verbatim and never inferred. Falling back to the name is only
+// for downstreams that were not installed from a profile, where no slug exists.
 //
-// IMPORTANT: pass the human-friendly Name (e.g. "Minimax", "Anthropic") here,
-// not the downstream_id. Auto-generated UUID ids like "23695a12" don't
-// pattern-match in the icon table, but their display names do via the
-// first-segment fallback. The Downstreams tab follows this same convention.
-function providerIconHTML(name) {
-    return modelIconHTML(name);
+// This is the single place the rule lives. Every provider glyph in the UI goes
+// through it — the sidebar row, the detail header, the model tags, the alias
+// cards and the catalog — so adding a provider never needs a code change.
+function iconHTMLFor(item) {
+    if (item && item.icon) {
+        return `<img class="model-icon" src="/api/icons/${encodeURIComponent(item.icon)}?slug=1" alt="" loading="lazy" onerror="this.style.display='none'">`;
+    }
+    const name = item && (item.name || item.id);
+    return name ? modelIconHTML(name) : '';
 }
 
 // Cache hit rate formatted string for a single row. `captureOn` controls the
@@ -645,7 +649,7 @@ function populateRuleMatchDownstreams(containerEl, selectedIds) {
         // edge case, not the normal "no match" path.
         const iconWrap = document.createElement('span');
         iconWrap.className = 'model-tag-model-icon';
-        iconWrap.innerHTML = modelIconHTML(d.name);
+        iconWrap.innerHTML = iconHTMLFor(d);
         tag.appendChild(iconWrap);
 
         const icon = document.createElement('span');
@@ -859,7 +863,7 @@ function renderDownstreamSidebar(list) {
     }
     ul.innerHTML = filtered.map(d => `
         <li data-id="${esc(d.id)}" class="${d.id === _currentDownstreamId ? 'selected' : ''}">
-            ${modelIconHTML(d.name)}
+            ${iconHTMLFor(d)}
             <span class="ds-name">${esc(d.name)}</span>
             <span class="ds-on-pill${d.is_enabled === false ? ' off' : ''}">${d.is_enabled === false ? 'OFF' : 'ON'}</span>
         </li>`).join('');
@@ -1109,7 +1113,7 @@ function renderDownstreamDetail(ds) {
 
     document.getElementById('downstreams-detail').innerHTML = `
         <div class="detail-header">
-            ${modelIconHTML(ds.name)}
+            ${iconHTMLFor(ds)}
             <input type="text" class="detail-edit-name" value="${esc(ds.name)}" placeholder="(unnamed provider)" autocomplete="off">
             <div class="header-actions">
                 <label class="ds-toggle" title="${enabled ? 'Provider is ON — click to disable' : 'Provider is OFF — click to enable'}">
@@ -2373,6 +2377,122 @@ function populateDownstreamSelect(selectEl) {
 let closeAliasRouteMenu = null;
 let aliasRouteMenuId = 0;
 
+/**
+ * Build a lightweight select — a button plus a listbox — styled like the alias
+ * routing picker. Used wherever a plain <select> would look out of place next to
+ * the rest of the UI: the alias routing mode and the catalog's Type field.
+ *
+ * A native <select> is deliberately not used: its popup is drawn by the OS and
+ * cannot be themed, so beside a styled trigger it reads as a different widget.
+ *
+ * options  [{value, label}]
+ * onPick   called with the chosen value. The trigger is not updated here, because
+ *          callers re-render from their own state, and a component that guessed
+ *          would show a value the server never accepted.
+ */
+function createDropdown(options, current, onPick, ariaLabel) {
+    const picker = document.createElement('div');
+    picker.className = 'alias-route-picker';
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'alias-route-trigger';
+    const currentLabel = (options.find(o => o.value === current) || options[0] || {}).label || '';
+    trigger.textContent = currentLabel;
+    trigger.setAttribute('aria-label', ariaLabel ? `${ariaLabel}: ${currentLabel}` : currentLabel);
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+
+    const menu = document.createElement('div');
+    menu.className = 'alias-route-menu';
+    menu.id = `dropdown-menu-${++aliasRouteMenuId}`;
+    menu.hidden = true;
+    menu.setAttribute('role', 'listbox');
+    if (ariaLabel) menu.setAttribute('aria-label', ariaLabel);
+    trigger.setAttribute('aria-controls', menu.id);
+
+    const items = options.map(({ value, label }) => {
+        const option = document.createElement('div');
+        option.className = 'alias-route-option';
+        option.tabIndex = -1;
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', String(value === current));
+        option.textContent = label;
+        option.onclick = () => pick(value);
+        menu.appendChild(option);
+        return option;
+    });
+
+    const dismiss = (restoreFocus = false) => {
+        menu.hidden = true;
+        trigger.setAttribute('aria-expanded', 'false');
+        document.removeEventListener('pointerdown', outside);
+        window.removeEventListener('resize', dismissOnResize);
+        window.removeEventListener('scroll', dismissOnScroll, true);
+        if (closeAliasRouteMenu === dismiss) closeAliasRouteMenu = null;
+        if (restoreFocus && trigger.isConnected) trigger.focus();
+    };
+    const outside = event => { if (!picker.contains(event.target)) dismiss(); };
+    const dismissOnResize = () => dismiss();
+    const dismissOnScroll = event => { if (!menu.contains(event.target)) dismiss(); };
+    const open = () => {
+        if (closeAliasRouteMenu) closeAliasRouteMenu();
+        menu.hidden = false;
+        trigger.setAttribute('aria-expanded', 'true');
+        const rect = trigger.getBoundingClientRect();
+        menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`;
+        menu.style.top = `${rect.bottom + menu.offsetHeight + 12 > window.innerHeight ? Math.max(8, rect.top - menu.offsetHeight - 6) : rect.bottom + 6}px`;
+        closeAliasRouteMenu = dismiss;
+        document.addEventListener('pointerdown', outside);
+        window.addEventListener('resize', dismissOnResize);
+        window.addEventListener('scroll', dismissOnScroll, true);
+        const index = options.findIndex(o => o.value === current);
+        (items[index] || items[0])?.focus();
+    };
+    // Show the choice immediately, then let onPick persist it. A dropdown that
+    // keeps displaying the old value until some later re-render is indistinguishable
+    // from one that ignored the click. If onPick fails the label reverts, so the
+    // control never claims a value the server rejected.
+    const setLabel = value => {
+        const option = options.find(o => o.value === value);
+        trigger.textContent = option ? option.label : '';
+        trigger.setAttribute('aria-label', ariaLabel ? `${ariaLabel}: ${trigger.textContent}` : trigger.textContent);
+        items.forEach((item, i) => item.setAttribute('aria-selected', String(options[i].value === value)));
+    };
+    const pick = async value => {
+        dismiss(true);
+        if (value === current) return;
+        const previous = current;
+        current = value;
+        setLabel(value);
+        try {
+            await onPick(value);
+        } catch {
+            current = previous;
+            setLabel(previous);
+        }
+    };
+
+    trigger.onclick = () => { if (menu.hidden) open(); else dismiss(true); };
+    picker.onkeydown = event => {
+        if (event.key === 'Escape') { if (!menu.hidden) { event.preventDefault(); dismiss(true); } return; }
+        if (event.key === 'Tab') { dismiss(true); return; }
+        if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+            event.preventDefault();
+            if (menu.hidden) { open(); if (!['Home', 'End'].includes(event.key)) return; }
+            const index = items.indexOf(document.activeElement);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+                : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+            items[next].focus();
+        } else if (!menu.hidden && ['Enter', ' '].includes(event.key)) {
+            const index = items.indexOf(document.activeElement);
+            if (index >= 0) { event.preventDefault(); pick(options[index].value); }
+        }
+    };
+    picker.onfocusout = event => { if (!picker.contains(event.relatedTarget)) dismiss(); };
+    picker.append(trigger, menu);
+    return picker;
+}
+
 async function loadAliasGroups() {
     if (closeAliasRouteMenu) closeAliasRouteMenu();
     const container = document.getElementById('alias-groups-container');
@@ -2439,80 +2559,31 @@ function renderAliasGroup(container, group) {
     modeLabel.textContent = 'Routing';
     const routeMode = group.route_mode || 'default';
     const modes = [['default', 'Default'], ['load_balance', 'Load Balance'], ['fallback', 'Fallback']];
-    const picker = document.createElement('div');
-    picker.className = 'alias-route-picker';
-    const trigger = document.createElement('button');
-    trigger.type = 'button';
-    trigger.className = 'alias-route-trigger';
-    trigger.textContent = modes.find(([value]) => value === routeMode)[1];
-    trigger.setAttribute('aria-label', `Routing mode for ${group.input_model_id}: ${trigger.textContent}`);
-    trigger.setAttribute('aria-haspopup', 'listbox');
-    trigger.setAttribute('aria-expanded', 'false');
-    const menu = document.createElement('div');
-    menu.className = 'alias-route-menu';
-    menu.id = `alias-route-menu-${++aliasRouteMenuId}`;
-    menu.hidden = true;
-    menu.setAttribute('role', 'listbox');
-    menu.setAttribute('aria-label', `Routing mode for ${group.input_model_id}`);
-    trigger.setAttribute('aria-controls', menu.id);
     const modeError = document.createElement('span');
     modeError.className = 'alias-route-mode-error';
     modeError.setAttribute('role', 'alert');
     modeError.setAttribute('aria-live', 'polite');
     let saving = false;
-    const options = modes.map(([value, label]) => {
-        const option = document.createElement('div');
-        option.className = 'alias-route-option';
-        option.tabIndex = -1;
-        option.setAttribute('role', 'option');
-        option.setAttribute('aria-selected', String(value === routeMode));
-        option.textContent = label;
-        option.onclick = () => saveMode(value);
-        menu.appendChild(option);
-        return option;
-    });
-    const dismiss = (restoreFocus = false) => {
-        menu.hidden = true;
-        trigger.setAttribute('aria-expanded', 'false');
-        document.removeEventListener('pointerdown', outside);
-        window.removeEventListener('resize', dismissOnResize);
-        window.removeEventListener('scroll', dismissOnScroll, true);
-        if (closeAliasRouteMenu === dismiss) closeAliasRouteMenu = null;
-        if (restoreFocus && trigger.isConnected) trigger.focus();
-    };
-    const outside = event => { if (!picker.contains(event.target)) dismiss(); };
-    const dismissOnResize = () => dismiss();
-    const dismissOnScroll = event => { if (!menu.contains(event.target)) dismiss(); };
-    const open = () => {
-        if (saving) return;
-        if (closeAliasRouteMenu) closeAliasRouteMenu();
-        menu.hidden = false;
-        trigger.setAttribute('aria-expanded', 'true');
-        const rect = trigger.getBoundingClientRect();
-        menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`;
-        menu.style.top = `${rect.bottom + menu.offsetHeight + 12 > window.innerHeight ? Math.max(8, rect.top - menu.offsetHeight - 6) : rect.bottom + 6}px`;
-        closeAliasRouteMenu = dismiss;
-        document.addEventListener('pointerdown', outside);
-        window.addEventListener('resize', dismissOnResize);
-        window.addEventListener('scroll', dismissOnScroll, true);
-        options[modes.findIndex(([value]) => value === routeMode)].focus();
-    };
+    const picker = createDropdown(
+        modes.map(([value, label]) => ({ value, label })),
+        routeMode,
+        value => saveMode(value),
+        `Routing mode for ${group.input_model_id}`);
+    picker.setAttribute('aria-disabled', String(saving));
     const saveMode = async value => {
         if (saving) return;
-        if (value === routeMode) { dismiss(true); return; }
-        dismiss(true);
+        if (value === routeMode) return;
         saving = true;
-        // Keep the trigger focusable while blocking further interaction.
-        trigger.setAttribute('aria-disabled', 'true');
-        trigger.setAttribute('aria-busy', 'true');
+        picker.setAttribute('aria-disabled', 'true');
+        picker.setAttribute('aria-busy', 'true');
         modeError.textContent = '';
         try {
             await api('/aliases/group/' + encodeURIComponent(group.input_model_id), {
                 method: 'PUT', body: JSON.stringify({ route_mode: value }),
             });
-            const hadFocus = document.activeElement === trigger;
+            const hadFocus = document.activeElement === picker.querySelector('.alias-route-trigger');
             await loadAliasGroups();
-            if (hadFocus && (document.activeElement === document.body || document.activeElement === trigger)) {
+            if (hadFocus && (document.activeElement === document.body || document.activeElement === picker)) {
                 const replacement = Array.from(container.querySelectorAll('.alias-group-card'))
                     .find(item => item.dataset.inputModel === group.input_model_id);
                 replacement?.querySelector('.alias-route-trigger')?.focus();
@@ -2522,29 +2593,10 @@ function renderAliasGroup(container, group) {
             showToast('Could not save routing mode: ' + modeError.textContent);
         } finally {
             saving = false;
-            trigger.removeAttribute('aria-disabled');
-            trigger.removeAttribute('aria-busy');
+            picker.removeAttribute('aria-disabled');
+            picker.removeAttribute('aria-busy');
         }
     };
-    trigger.onclick = () => { if (!saving) { if (menu.hidden) open(); else dismiss(true); } };
-    picker.onkeydown = event => {
-        if (saving) return;
-        if (event.key === 'Escape') { if (!menu.hidden) { event.preventDefault(); dismiss(true); } return; }
-        if (event.key === 'Tab') { dismiss(true); return; }
-        if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-            event.preventDefault();
-            if (menu.hidden) { open(); if (!['Home', 'End'].includes(event.key)) return; }
-            const current = options.indexOf(document.activeElement);
-            const index = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
-                : (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
-            options[index].focus();
-        } else if (!menu.hidden && ['Enter', ' '].includes(event.key)) {
-            const index = options.indexOf(document.activeElement);
-            if (index >= 0) { event.preventDefault(); saveMode(modes[index][0]); }
-        }
-    };
-    picker.onfocusout = event => { if (!picker.contains(event.relatedTarget)) dismiss(); };
-    picker.append(trigger, menu);
     modeWrap.append(modeLabel, picker);
     actions.appendChild(modeWrap);
     actions.appendChild(modeError);
@@ -2744,7 +2796,7 @@ function renderAliasGroup(container, group) {
         const dsLabel = document.createElement('div');
         dsLabel.className = 'option-downstream';
         const dsName = opt.downstream_name || opt.downstream_id;
-        dsLabel.innerHTML = modelIconHTML(dsName) + esc(dsName);
+        dsLabel.innerHTML = iconHTMLFor({ icon: opt.downstream_icon, name: dsName }) + esc(dsName);
         btn.appendChild(dsLabel);
 
         // Remove button (top-right corner)
@@ -5626,7 +5678,7 @@ function renderDashboardSummary(total, captureOn, models, providers, ips) {
     if (providers && providers.length > 0) {
         const top = providers[0];
         const provLabel = top.name || top.downstream_id || '—';
-        topProvEl.innerHTML = providerIconHTML(provLabel) +
+        topProvEl.innerHTML = iconHTMLFor({ icon: top.icon, name: provLabel }) +
             '<span class="summary-icon-name">' + esc(provLabel) + '</span>';
         const topTotal = (top.input_tokens || 0) + (top.output_tokens || 0);
         topProvDetailEl.textContent = fmtNum(topTotal) + ' tokens · ' +
@@ -5645,7 +5697,7 @@ function renderDashboardSummary(total, captureOn, models, providers, ips) {
     if (models && models.length > 0) {
         const top = models[0];
         const topName = top.model || top.downstream_id || '—';
-        topEl.innerHTML = providerIconHTML(topName) +
+        topEl.innerHTML = modelIconHTML(topName) +
             '<span class="summary-icon-name">' + esc(topName) + '</span>';
         const topTotal = (top.input_tokens || 0) + (top.output_tokens || 0);
         topDetailEl.textContent = fmtNum(topTotal) + ' tokens · ' +
@@ -5744,7 +5796,7 @@ function renderDashboardModels(models, captureOn) {
         const modelName = m.model || m.downstream_id || '—';
 
         html += '<tr>' +
-            '<td><div class="model-cell">' + providerIconHTML(modelName) +
+            '<td><div class="model-cell">' + modelIconHTML(modelName) +
                 esc(modelName) + 
             '</div></td>' +
             '<td class="num">' + esc(fmtNum(mTotal)) + '</td>' +
@@ -5789,7 +5841,7 @@ function renderDashboardProviders(providers, captureOn) {
         const provLabel = p.name || p.downstream_id || '—';
 
         html += '<tr>' +
-            '<td><div class="model-cell">' + providerIconHTML(provLabel) +
+            '<td><div class="model-cell">' + iconHTMLFor({ icon: p.icon, name: provLabel }) +
                 esc(provLabel) +
             '</div></td>' +
             '<td class="num">' + esc(fmtNum(pTotal)) + '</td>' +
@@ -5919,6 +5971,13 @@ checkAuth();
 // is executable code, so that part is asked about first.
 let _catalogEntries = [];
 let _catalogError = '';
+// The region each entry was last set to, kept so re-rendering the list — after an
+// install, a refresh, or another entry's install — does not quietly reset a choice
+// already made. Keyed by profile id.
+let _catalogRegions = {};
+// The catalog filter. Kept outside the render so reopening the popup or
+// installing something does not silently drop what the user typed.
+let _catalogSearch = '';
 
 async function openProviderCatalog() {
     const modal = document.getElementById('provider-catalog-modal');
@@ -5928,6 +5987,13 @@ async function openProviderCatalog() {
 
 async function loadProviderCatalog() {
     const listEl = document.getElementById('provider-catalog-list');
+    const search = document.getElementById('provider-catalog-search');
+    if (search) {
+        search.value = _catalogSearch;
+        // Filtering is local: the catalog is a few dozen entries already in memory,
+        // so a request per keystroke would only add latency.
+        search.oninput = () => { _catalogSearch = search.value; renderProviderCatalog(); };
+    }
     listEl.innerHTML = '<div class="text-muted" style="padding:0.75rem;">Loading catalog…</div>';
     try {
         const data = await api('/provider-catalog');
@@ -5948,28 +6014,71 @@ function renderProviderCatalog() {
             (_catalogError ? 'Could not load the catalog: ' + esc(_catalogError) : 'The catalog is empty.') + '</div>';
         return;
     }
-    listEl.innerHTML = _catalogEntries.map(e => {
-        const installed = (e.installed || []).length > 0;
-        const badge = installed
-            ? `<span class="catalog-badge installed">Installed${e.installed.length > 1 ? ' ×' + e.installed.length : ''}</span>`
-            : e.available === false
-                ? '<span class="catalog-badge unavailable">Unavailable</span>'
-                : '<span class="catalog-badge">Installable</span>';
+    const query = (_catalogSearch || '').trim().toLowerCase();
+    const shown = query
+        ? _catalogEntries.filter(e => (e.name || '').toLowerCase().includes(query) ||
+                                      (e.id || '').toLowerCase().includes(query))
+        : _catalogEntries;
+    if (shown.length === 0) {
+        listEl.innerHTML = '<div class="text-muted" style="padding:0.75rem;">No provider matches “' +
+            esc(_catalogSearch.trim()) + '”.</div>';
+        return;
+    }
+    // One row per recipe. The row is not a control: a whole-row button made a
+    // mis-click install a provider, and installing is a side effect worth aiming
+    // at. Only the Install button installs, and the row no longer distinguishes
+    // installed from installable — the same recipe can be added many times (two
+    // accounts, two endpoints), so "already installed" is not a state.
+    listEl.innerHTML = shown.map(e => {
+        const regions = e.regions || [];
+        // A vendor selling the same API at several endpoints gets a picker rather
+        // than near-identical rows; one endpoint has nothing to choose.
+        const pickerSlot = regions.length > 1
+            ? `<span class="catalog-region-picker" data-region-slot="${esc(e.id)}"></span>`
+            : '';
         return `
-            <button type="button" class="catalog-row" data-id="${esc(e.id)}"${e.available === false ? ' data-blocked="1"' : ''}>
-                <div class="catalog-row-main">
-                    ${modelIconHTML(e.name)}
+            <div class="catalog-entry">
+                <div class="catalog-row">
+                    ${iconHTMLFor(e)}
                     <span class="catalog-row-name">${esc(e.name)}</span>
-                    <span class="catalog-row-version">v${esc(String(e.version))}</span>
-                    ${badge}
+                    ${pickerSlot}
+                    <button type="button" class="btn-primary btn-small catalog-install" data-install="${esc(e.id)}">Install</button>
                 </div>
                 ${e.available === false && e.reason ? `<div class="catalog-row-reason">${esc(e.reason)}</div>` : ''}
-            </button>`;
+            </div>`;
     }).join('');
 
-    listEl.querySelectorAll('button.catalog-row').forEach(row => {
-        row.onclick = () => catalogOpenOrInstall(row.dataset.id);
+    listEl.querySelectorAll('[data-install]').forEach(btn => {
+        btn.onclick = () => catalogOpenOrInstall(btn.dataset.install);
     });
+    // The Type control is the same component as the alias routing picker, so it is
+    // mounted rather than emitted as markup; the remembered choice seeds it.
+    listEl.querySelectorAll('[data-region-slot]').forEach(slot => {
+        const entry = shown.find(e => e.id === slot.dataset.regionSlot);
+        const regions = entry.regions || [];
+        const chosen = _catalogRegions[entry.id] || regions[0].id;
+        const picker = createDropdown(
+            regions.map(r => ({ value: r.id, label: r.name || r.id })),
+            chosen,
+            value => { _catalogRegions[entry.id] = value; },
+            `Endpoint for ${entry.name}`);
+        if (entry.available === false) {
+            picker.querySelector('.alias-route-trigger').setAttribute('aria-disabled', 'true');
+        }
+        // Mounted inside the slot rather than replacing it: the slot is the element
+        // that stretches the picker to the row's width, and dropping it left the
+        // control at its default size.
+        slot.appendChild(picker);
+    });
+}
+
+// catalogIconHTML renders an entry's icon. The recipe names the exact CDN slug, so
+// it is requested verbatim (?slug=1) instead of being passed as a model name:
+// the pattern table would rewrite e.g. "ai302-color" to "ai-color" and the row
+// would fall back to the generic glyph even though the recipe was right.
+function catalogIconHTML(entry) {
+    if (!entry.icon) return modelIconHTML(entry.name);
+    return `<img class="model-icon" src="/api/icons/${encodeURIComponent(entry.icon)}?slug=1" alt="" loading="lazy" onerror="this.style.display='none'">`;
 }
 
 // Clicking an entry installs it. Installing the same provider more than once is
@@ -5986,12 +6095,20 @@ async function catalogOpenOrInstall(profileID) {
         if (!ok) return;
     }
 
+    // An entry with a picker installs at the chosen endpoint; one without sends no
+    // region, which means the provider's own endpoints.
+    const region = (entry.regions || []).length > 1 ? (_catalogRegions[entry.id] || entry.regions[0].id) : '';
+
     try {
         const res = await api('/providers/install', {
             method: 'POST',
             // Credentials are not part of installing a provider: the provider page
             // has the same fields, plus everything else about the provider.
-            body: JSON.stringify({ profile_id: entry.id, allow_plugins: !!entry.needs_plugins }),
+            body: JSON.stringify({
+                profile_id: entry.id,
+                allow_plugins: !!entry.needs_plugins,
+                ...(region ? { region } : {}),
+            }),
         });
         await loadDownstreams();
         document.getElementById('provider-catalog-modal').classList.add('hidden');

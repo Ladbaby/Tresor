@@ -58,8 +58,12 @@ type TimeSeriesPoint struct {
 // under normal operation the FK-on-delete cascade keeps these in sync.
 type ProviderStatsRow struct {
 	DecodeStats
-	DownstreamID  string `json:"downstream_id"`
-	Name          string `json:"name"`
+	DownstreamID string `json:"downstream_id"`
+	Name         string `json:"name"`
+	// Icon is the declared CDN slug for this downstream, empty when it was not
+	// installed from a provider profile. Carried here so the dashboard draws the
+	// same glyph as the provider's own page instead of inferring one from the name.
+	Icon          string `json:"icon,omitempty"`
 	InputTokens   int64  `json:"input_tokens"`
 	OutputTokens  int64  `json:"output_tokens"`
 	CacheCreation int64  `json:"cache_creation_tokens"`
@@ -370,6 +374,7 @@ func (s *Store) AggregateByProvider(q StatsQuery) ([]ProviderStatsRow, error) {
 	rows, err := s.db.Query(`
 		SELECT u.downstream_id,
 		       COALESCE(d.name, u.downstream_id) AS display_name,
+		       COALESCE(d.icon, ''),
 		       COALESCE(SUM(u.input_tokens), 0),    COALESCE(SUM(u.output_tokens), 0),
 		       COALESCE(SUM(u.cache_creation), 0),
 		       COALESCE(SUM(u.cache_read), 0),
@@ -389,7 +394,7 @@ func (s *Store) AggregateByProvider(q StatsQuery) ([]ProviderStatsRow, error) {
 	result := []ProviderStatsRow{}
 	for rows.Next() {
 		var r ProviderStatsRow
-		if err := rows.Scan(&r.DownstreamID, &r.Name,
+		if err := rows.Scan(&r.DownstreamID, &r.Name, &r.Icon,
 			&r.InputTokens, &r.OutputTokens,
 			&r.CacheCreation, &r.CacheRead,
 			&r.RequestCount, &r.CacheHitCount, &r.DecodeTokens, &r.DecodeDurationNS, &r.DecodeRequestCount); err != nil {

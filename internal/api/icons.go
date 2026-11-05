@@ -19,6 +19,16 @@ import (
 //                        or the generic dummy icon when no slug matches /
 //                        the CDN is unreachable. The slot is never blank; the
 //                        browser never has to substitute its own fallback.
+// isDeclaredSlug reports whether the request asks for a literal slug rather than
+// a name to infer one from.
+func isDeclaredSlug(query url.Values) bool {
+	switch query.Get("slug") {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
 func (r *Router) handleIcon(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -46,7 +56,17 @@ func (r *Router) handleIcon(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	data, ct, err := r.iconFetcher.Icon(modelID)
+	// ?slug=1 means the caller already knows the CDN slug — it came from a
+	// provider recipe's icon field — so resolve it literally instead of letting
+	// the pattern table rewrite it. Inference is for model ids, where the brand
+	// has to be guessed from the name.
+	var data []byte
+	var ct string
+	if isDeclaredSlug(req.URL.Query()) {
+		data, ct, err = r.iconFetcher.IconSlug(modelID)
+	} else {
+		data, ct, err = r.iconFetcher.Icon(modelID)
+	}
 	if len(data) == 0 || err != nil {
 		// Either no pattern matched (every candidate slug was absent from
 		// the CDN index) or the fetch failed (network error, 5xx). Both

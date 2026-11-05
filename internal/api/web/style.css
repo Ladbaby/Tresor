@@ -1820,8 +1820,12 @@ html[data-theme="light"] form select {
 .alias-route-menu {
     position: fixed;
     z-index: 1100;
-    width: 10rem;
-    max-width: calc(100vw - 16px);
+    /* Sized to content instead of pinned to 10rem: option labels are not fixed
+       length ("Default" beside "Model Studio · Singapore"), and a hard width
+       either clipped the long ones or wasted space on the short ones. */
+    width: max-content;
+    min-width: 10rem;
+    max-width: min(24rem, calc(100vw - 16px));
     padding: 0.3rem;
     border: 1px solid var(--border-color);
     border-radius: 9px;
@@ -1841,6 +1845,9 @@ html[data-theme="light"] form select {
     font-weight: 500;
     line-height: 1.35;
     cursor: pointer;
+    /* One option per line: a label that wraps makes the rows uneven heights and
+       the selected check mark land on the first of two lines. */
+    white-space: nowrap;
 }
 .alias-route-option[aria-selected="true"] { color: var(--accent); background: var(--accent-bg); }
 .alias-route-option[aria-selected="true"]::after { content: '\2713'; font-size: 0.85rem; }
@@ -4247,45 +4254,100 @@ td .ds-toggle.rule-toggle {
     border-radius: 8px;
 }
 
-.catalog-row {
+/* One catalog entry: the row that installs it, plus the region picker when the
+   provider is sold at more than one endpoint. The divider sits on the entry so a
+   picker does not look like a separate provider. */
+.catalog-entry { border-bottom: 1px solid var(--border, #eee); }
+.catalog-entry:last-child { border-bottom: 0; }
+.catalog-entry .catalog-row { border-bottom: 0; }
+
+.catalog-region-picker {
+    display: flex;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 45%;
+    /* The menu is wider than the trigger for two-column-long labels like
+       "Model Studio · Singapore"; render it right-aligned so a long option does
+       not run off the left edge of the popup. */
+    justify-content: flex-end;
+}
+
+.catalog-region-picker .alias-route-picker {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+}
+
+.catalog-region-picker .alias-route-trigger {
+    flex: 1;
+    min-width: 0;
+    /* A long endpoint name must not stretch the row or clip the chevron. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.catalog-region-picker .alias-route-trigger[aria-disabled="true"] {
+    cursor: not-allowed;
+}
+
+/* Filter above the list. Sits flush with the entries' horizontal padding so the
+   popup still reads as one column. */
+.catalog-search {
     display: block;
     width: 100%;
-    padding: 0.6rem 0.75rem;
-    border: 0;
-    border-bottom: 1px solid var(--border, #eee);
+    box-sizing: border-box;
+    margin: 0 0 0.6rem;
+    padding: 0.45rem 0.7rem;
+    background: var(--input-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.85rem;
+}
+
+.catalog-search::placeholder { color: var(--text-secondary); }
+
+.catalog-search:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.catalog-row {
+    /* One line per provider: icon, name, optional Type picker, Install button.
+       Not interactive as a whole — the button is the only control, so a stray
+       click on the row cannot install anything. */
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.55rem 0.75rem;
     background: transparent;
-    text-align: left;
-    cursor: pointer;
     font: inherit;
     color: inherit;
 }
 
-.catalog-row:last-child { border-bottom: 0; }
 .catalog-row:hover:not([data-blocked]) { background: var(--bg-hover, #f6f6f6); }
 .catalog-row[data-blocked] { cursor: not-allowed; opacity: 0.65; }
 
-.catalog-row-main {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
+.catalog-row-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.catalog-install {
+    flex: 0 0 auto;
 }
 
 .catalog-row-name { font-weight: 600; }
 .catalog-row-version { color: var(--text-secondary, #777); font-size: 0.85rem; }
 
-.catalog-badge {
-    margin-left: auto;
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 0.1rem 0.4rem;
-    border-radius: 999px;
-    background: var(--bg-secondary, #eee);
-    color: var(--text-secondary, #666);
-}
 
-.catalog-badge.installed { background: #e3f4e6; color: #256b33; }
-.catalog-badge.unavailable { background: #fdecec; color: #a12b2b; }
 
 .catalog-row-reason {
     margin-top: 0.25rem;

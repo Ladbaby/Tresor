@@ -102,6 +102,11 @@ type DownstreamCfg struct {
 	// an api_key auth from the legacy top-level api_key field.
 	Auth *DownstreamAuthCfg `yaml:"auth,omitempty"`
 
+	// Icon is the CDN slug the provider profile declared. Written back on save so
+	// an installed provider keeps its icon across a config round-trip; empty for a
+	// hand-made downstream, which resolves one from its name instead.
+	Icon string `yaml:"icon,omitempty"`
+
 	// legacyAPIKey reads the old top-level api_key field for one-shot back-
 	// compat. Private so it is never written back; folded into Auth in Load.
 	legacyAPIKey string `yaml:"api_key,omitempty"`

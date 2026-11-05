@@ -23,7 +23,7 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	// --- Downstreams with output_model_ids ---
 	var downstreams []config.DownstreamCfg
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, COALESCE(icon,'') FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return fmt.Errorf("query downstreams: %w", err)
 	}
@@ -31,7 +31,7 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 		var d config.DownstreamCfg
 		var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
 		var enabled int
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan downstream: %w", err)
 		}

@@ -26,6 +26,10 @@ type Alias struct {
 	InputModelID   string    `json:"input_model_id"`
 	DownstreamID   string    `json:"downstream_id"`
 	DownstreamName string    `json:"downstream_name,omitempty"`
+	// DownstreamIcon is the CDN slug the downstream's provider declared, so an
+	// alias option can draw the same glyph as the provider's own page. Empty for a
+	// hand-made downstream, whose icon is resolved from the name instead.
+	DownstreamIcon string    `json:"downstream_icon,omitempty"`
 	OutputModelID  string    `json:"output_model_id"`
 	APIFormats     []string  `json:"api_formats,omitempty"`
 	IsActive       bool      `json:"is_active"`

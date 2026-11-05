@@ -165,6 +165,10 @@ type installRequest struct {
 	ClientSecret string `json:"client_secret,omitempty"`
 	// AllowPlugins is the user's consent to install the profile's plugin code.
 	AllowPlugins bool `json:"allow_plugins,omitempty"`
+	// Region selects which of the profile's endpoint choices to install at. Empty
+	// takes the profile's default. The id is validated against the profile, so an
+	// unknown one fails the install rather than quietly picking another region.
+	Region string `json:"region,omitempty"`
 }
 
 func (r *Router) installProvider(w http.ResponseWriter, req *http.Request) {
@@ -193,7 +197,7 @@ func (r *Router) installProvider(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "the provider catalog is not available; post an inline profile instead")
 			return
 		}
-		p, _, err := r.catalog.FetchProfile(req.Context(), input.ProfileID)
+		p, err := r.catalog.FetchProfile(req.Context(), input.ProfileID)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -216,6 +220,7 @@ func (r *Router) installProvider(w http.ResponseWriter, req *http.Request) {
 		AllowPlugins: input.AllowPlugins,
 		HostFeatures: jsplugins.SupportedFeatures(),
 		HostVersion:  r.version,
+		Region:       input.Region,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -255,6 +260,7 @@ func (r *Router) updateProvider(w http.ResponseWriter, req *http.Request, downst
 		AllowPlugins: input.AllowPlugins,
 		HostFeatures: jsplugins.SupportedFeatures(),
 		HostVersion:  r.version,
+		Region:       input.Region,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -318,12 +324,12 @@ func (r *Router) handleProviderCatalog(w http.ResponseWriter, req *http.Request)
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		profile, digest, err := r.catalog.FetchProfile(req.Context(), path)
+		profile, err := r.catalog.FetchProfile(req.Context(), path)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"profile": profile, "digest": digest})
+		writeJSON(w, http.StatusOK, map[string]any{"profile": profile})
 	}
 }
 

@@ -211,17 +211,16 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_aliases_input ON aliases(input_model_id)`,
 		// downstream_profiles records how a downstream was created when it came
-		// from a provider profile: which profile, at which version, with which
-		// digest, and the exact field values the profile last applied. The
-		// applied snapshot is what makes a later update non-destructive: a field
-		// the user has since edited no longer matches it and is left alone.
+		// from a provider profile: which profile, at which version, and the exact
+		// field values the profile last applied. The applied snapshot is what makes
+		// a later update non-destructive: a field the user has since edited no
+		// longer matches it and is left alone.
 		// Kept in its own table rather than columns on downstreams so provider
 		// provenance never leaks into the downstream JSON or its queries.
 		`CREATE TABLE IF NOT EXISTS downstream_profiles (
 			downstream_id TEXT PRIMARY KEY REFERENCES downstreams(id),
 			profile_id    TEXT NOT NULL,
 			version       INTEGER NOT NULL,
-			digest        TEXT NOT NULL,
 			source        TEXT NOT NULL,
 			applied       TEXT NOT NULL DEFAULT '{}',
 			updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -418,6 +417,17 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Drop downstream_profiles.digest. It held a hash of the provider profile a
+	// downstream came from, was never read back, and gated nothing: an update
+	// decides what it may overwrite from the applied snapshot, never from a digest.
+	// One-way, so a database from an older daemon keeps working, while an older
+	// binary opening the result fails loudly instead of reading a missing column.
+	if s.columnExists("downstream_profiles", "digest") {
+		if _, err := s.db.Exec(`ALTER TABLE downstream_profiles DROP COLUMN digest`); err != nil {
+			return fmt.Errorf("migrate drop downstream_profiles.digest: %w", err)
+		}
+	}
+
 	// Add format_urls column (per-API-format base URL overrides). Default '{}'
 	// means every existing row falls back to BaseURL for all formats.
 	if !s.columnExists("downstreams", "format_urls") {
@@ -439,6 +449,15 @@ func (s *Store) migrate() error {
 	if !s.columnExists("downstreams", "is_enabled") {
 		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN is_enabled INTEGER DEFAULT 1`); err != nil {
 			return fmt.Errorf("migrate add is_enabled: %w", err)
+		}
+	}
+
+	// Add the icon column: the CDN slug a provider profile declared. Empty for a
+	// downstream that was not installed from a profile, which falls back to
+	// resolving an icon from the name.
+	if !s.columnExists("downstreams", "icon") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN icon TEXT DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate add icon: %w", err)
 		}
 	}
 
@@ -1181,13 +1200,13 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 					enabled = 1
 				}
 				if _, err := tx.Exec(
-					"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ?, plugins = ? WHERE id = ?",
-					d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON, d.ID); err != nil {
+					"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ?, plugins = ?, icon = ? WHERE id = ?",
+					d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON, d.Icon, d.ID); err != nil {
 					return fmt.Errorf("update downstream %s: %w", d.ID, err)
 				}
 			} else if _, err := tx.Exec(
-				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, auth = ?, plugins = ? WHERE id = ?",
-				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, pluginsJSON, d.ID); err != nil {
+				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, auth = ?, plugins = ?, icon = ? WHERE id = ?",
+				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, pluginsJSON, d.Icon, d.ID); err != nil {
 				return fmt.Errorf("update downstream %s: %w", d.ID, err)
 			}
 			// Replace output_model_ids from YAML
@@ -1213,8 +1232,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 				enabled = 0
 			}
 			if _, err := tx.Exec(
-				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth, plugins) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON); err != nil {
+				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON, d.Icon); err != nil {
 				return fmt.Errorf("insert downstream %s: %w", d.ID, err)
 			}
 			if len(d.OutputModelIDs) > 0 {

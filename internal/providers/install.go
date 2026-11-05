@@ -21,7 +21,6 @@ type Result struct {
 	DownstreamID string   `json:"downstream_id"`
 	ProfileID    string   `json:"profile_id"`
 	Version      int      `json:"version"`
-	Digest       string   `json:"digest"`
 	Applied      []string `json:"applied"`
 	Kept         []string `json:"kept"`
 	Conflicts    []string `json:"conflicts,omitempty"`
@@ -57,6 +56,11 @@ type InstallOptions struct {
 	// inside the plugin runtime.
 	HostFeatures []string
 	HostVersion  string
+	// Region selects which of the profile's endpoints to install at. Empty takes
+	// the profile's default: its own base_url when it has one, otherwise its first
+	// region. The choice is recorded with the provenance, so a later update knows
+	// which region this install is at instead of resetting it to the default.
+	Region string
 }
 
 // PackageInstaller installs a plugin package from a URL. The plugin runtime
@@ -160,17 +164,31 @@ type appliedSnapshot struct {
 	// Auth is the profile's full auth declaration, kept in memory only (never
 	// serialized): it is what an update copies when the shape changed.
 	Auth *config.DownstreamAuthCfg `json:"-"`
+	// Region is which of the profile's endpoint choices this install is at. It is
+	// recorded so an update compares the downstream against the endpoints the user
+	// actually installed, rather than against the profile's default — an update
+	// that reset a deliberately chosen region would look like drift, report a
+	// conflict, and leave the provider pointing somewhere the user did not pick.
+	Region string `json:"region,omitempty"`
 }
 
-// snapshotOf builds the snapshot for the downstream a profile describes.
-func (p *Profile) snapshotOf(plugins []config.PipelineStep) appliedSnapshot {
+// snapshotOf builds the snapshot for the downstream a profile describes, at the
+// region it was installed at ("" for the profile's own endpoints).
+func (p *Profile) snapshotOf(plugins []config.PipelineStep, regionID string) appliedSnapshot {
+	region, err := p.Provider.AtRegion(regionID)
+	if err != nil {
+		// An unknown region cannot be resolved; fall back to the default so a
+		// snapshot is still produced. Update reports the real problem.
+		region, _ = p.Provider.AtRegion("")
+	}
 	s := appliedSnapshot{
-		BaseURL:     p.Provider.BaseURL,
-		ApiFormats:  append([]string{}, p.Provider.ApiFormats...),
-		FormatURLs:  cloneMap(p.Provider.FormatURLs),
-		FormatPaths: cloneMap(p.Provider.FormatPaths),
-		Models:      append([]string{}, p.Provider.Models...),
+		BaseURL:     region.BaseURL,
+		ApiFormats:  append([]string{}, region.ApiFormats...),
+		FormatURLs:  cloneMap(region.FormatURLs),
+		FormatPaths: cloneMap(region.FormatPaths),
+		Models:      append([]string{}, region.Models...),
 		Plugins:     plugins,
+		Region:      regionID,
 	}
 	if p.Provider.Auth != nil {
 		s.AuthType = p.Provider.Auth.Type
@@ -219,23 +237,11 @@ func (in *Installer) Install(p *Profile, opts InstallOptions) (*Result, error) {
 	if err := p.Requires.Check(opts.HostFeatures, opts.HostVersion); err != nil {
 		return nil, fmt.Errorf("provider profile %s: %w", p.ID, err)
 	}
-	digest, err := p.Digest()
-	if err != nil {
-		return nil, err
-	}
-
 	id := strings.TrimSpace(opts.DownstreamID)
 	if id == "" {
 		id = p.ID
 	}
-	id, err = in.freeDownstreamID(id)
-	if err != nil {
-		return nil, err
-	}
-	// The name follows the id. Installing the same provider more than once is
-	// ordinary (two accounts on one provider), and without a distinct label the
-	// list shows identical rows that cannot be told apart.
-	name, err := in.freeDownstreamName(p.Name)
+	id, err := in.freeDownstreamID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -251,16 +257,41 @@ func (in *Installer) Install(p *Profile, opts InstallOptions) (*Result, error) {
 		auth.ClientSecret = opts.ClientSecret
 	}
 
+	// Resolve the region before anything is written: an unknown region id must
+	// fail the install, not silently produce a provider at the default endpoints.
+	region, err := p.Provider.AtRegion(opts.Region)
+	if err != nil {
+		return nil, fmt.Errorf("provider profile %s: %w", p.ID, err)
+	}
+
+	// The name follows the id. Installing the same provider more than once is
+	// ordinary (two accounts on one provider), and without a distinct label the
+	// list shows identical rows that cannot be told apart. A region install names
+	// its region for the same reason: two regions of one vendor are otherwise
+	// indistinguishable rows.
+	installName := p.Name
+	if r, ok := p.Provider.Region(opts.Region); ok && len(p.Provider.Regions) > 1 {
+		installName = p.Name + " (" + r.DisplayName() + ")"
+	}
+	name, err := in.freeDownstreamName(installName)
+	if err != nil {
+		return nil, err
+	}
+
 	ds := &store.Downstream{
 		ID:             id,
 		Name:           name,
-		BaseURL:        p.Provider.BaseURL,
-		ApiFormats:     append([]string{}, p.Provider.ApiFormats...),
-		FormatURLs:     cloneMap(p.Provider.FormatURLs),
-		FormatPaths:    cloneMap(p.Provider.FormatPaths),
+		BaseURL:        region.BaseURL,
+		ApiFormats:     append([]string{}, region.ApiFormats...),
+		FormatURLs:     cloneMap(region.FormatURLs),
+		FormatPaths:    cloneMap(region.FormatPaths),
 		IsEnabled:      true,
 		Auth:           auth,
-		OutputModelIDs: append([]string{}, p.Provider.Models...),
+		// Carried so the provider keeps the icon the recipe declared. Without it
+		// the daemon can only guess from the display name, and a guess cannot
+		// reach a slug like "ai302-color".
+		Icon:           p.Icon,
+		OutputModelIDs: append([]string{}, region.Models...),
 	}
 	if opts.AllowPlugins {
 		ds.Plugins = bindingsToSteps(p.Plugins)
@@ -272,7 +303,7 @@ func (in *Installer) Install(p *Profile, opts InstallOptions) (*Result, error) {
 		return nil, err
 	}
 
-	res := &Result{DownstreamID: id, ProfileID: p.ID, Version: p.Version, Digest: digest}
+	res := &Result{DownstreamID: id, ProfileID: p.ID, Version: p.Version}
 	if opts.AllowPlugins {
 		in.installPackages(p, res)
 	}
@@ -290,7 +321,7 @@ func (in *Installer) Install(p *Profile, opts InstallOptions) (*Result, error) {
 		res.Conflicts = append(res.Conflicts, "plugin bindings were not installed because plugin consent was not given")
 	}
 
-	snapshot, err := store.MarshalApplied(p.snapshotOf(ds.Plugins))
+	snapshot, err := store.MarshalApplied(p.snapshotOf(ds.Plugins, opts.Region))
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +329,6 @@ func (in *Installer) Install(p *Profile, opts InstallOptions) (*Result, error) {
 		DownstreamID: id,
 		ProfileID:    p.ID,
 		Version:      p.Version,
-		Digest:       digest,
 		Source:       "local",
 		Applied:      snapshot,
 	}); err != nil {
@@ -391,13 +421,17 @@ func (in *Installer) Update(downstreamID string, p *Profile, opts InstallOptions
 		}
 	}
 
-	digest, err := p.Digest()
-	if err != nil {
-		return nil, err
-	}
-	res := &Result{DownstreamID: downstreamID, ProfileID: p.ID, Version: p.Version, Digest: digest}
+	res := &Result{DownstreamID: downstreamID, ProfileID: p.ID, Version: p.Version}
 
-	want := p.snapshotOf(prev.Plugins)
+	// An update stays at the region the user installed at, unless it asks for a
+	// different one. Reading the region from the snapshot rather than re-deriving
+	// it is what keeps "update the recipe" from quietly moving a provider to the
+	// profile's default region.
+	regionID := opts.Region
+	if regionID == "" {
+		regionID = prev.Region
+	}
+	want := p.snapshotOf(prev.Plugins, regionID)
 	next := *ds
 
 	// A newer profile may add or change the code it needs. Installing it here keeps
@@ -463,6 +497,13 @@ func (in *Installer) Update(downstreamID string, p *Profile, opts InstallOptions
 		res.Conflicts = append(res.Conflicts, "plugin bindings were not updated because plugin consent was not given")
 	}
 
+	// The declared icon follows the recipe on update. It is metadata, not a field a
+	// user edits, so there is no local edit to preserve: an update that renamed the
+	// brand's slug should move the icon with it.
+	if p.Icon != "" {
+		next.Icon = p.Icon
+	}
+
 	// Credentials the user supplied replace what is stored; absent ones stay.
 	if opts.APIKey != "" && next.Auth != nil {
 		next.Auth.APIKey = opts.APIKey
@@ -505,7 +546,6 @@ func (in *Installer) Update(downstreamID string, p *Profile, opts InstallOptions
 		DownstreamID: downstreamID,
 		ProfileID:    p.ID,
 		Version:      p.Version,
-		Digest:       digest,
 		Source:       prov.Source,
 		Applied:      applied,
 	}); err != nil {

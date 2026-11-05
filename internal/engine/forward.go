@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
@@ -9,50 +10,24 @@ import (
 	"strings"
 	"time"
 
+	"tresor/internal/providers"
 	"tresor/internal/wire"
 )
 
 // SSRF validation is not applied here — downstreams are admin-configured via auth-protected API.
 // Returns the response and a cancel function; caller must call cancel after consuming resp.Body.
 func (e *Engine) forwardRequest(original *http.Request, body []byte, ctx *PipelineContext) (*http.Response, context.CancelFunc, error) {
-	// Pick the base URL: prefer a per-format override (e.g. DeepSeek serves
-	// Anthropic at /anthropic but OpenAI at the root URL), fall back to
-	// BaseURL when no override is configured for the downstream format.
-	baseURL := ""
-	if ctx.DownstreamFormat != "" && ctx.TargetDownstream.FormatURLs != nil {
-		baseURL = ctx.TargetDownstream.FormatURLs[ctx.DownstreamFormat]
-	}
-	if baseURL == "" {
-		baseURL = ctx.TargetDownstream.BaseURL
-	}
-	baseURL = strings.TrimRight(baseURL, "/")
-
-	// Determine the path to send. Two modes:
-	//  1. Per-format path override (FormatPaths): when the downstream declares
-	//     a request path for its active format (e.g. openai_responses ->
-	//     "/responses"), use it directly and ignore the client's own path. The
-	//     final path is base_url + format_path, which is what the provider
-	//     expects regardless of what the client called.
-	//  2. Default: append the client's path, stripping a duplicated API
-	//     version prefix (e.g. "https://host/v1" + "/v1/chat/completions").
-	// An empty DownstreamFormat or missing map key simply yields "" and falls
-	// through to the default, so the lookup is safe without an explicit guard.
-	requestPath := ctx.RequestPathOverride
-	if requestPath == "" && ctx.TargetDownstream != nil && ctx.TargetDownstream.FormatPaths != nil {
-		requestPath = ctx.TargetDownstream.FormatPaths[ctx.DownstreamFormat]
-	}
-	if requestPath == "" {
-		requestPath = original.URL.Path
-		parsedBase, parseErr := url.Parse(baseURL)
-		if parseErr == nil && parsedBase.Path != "" {
-			basePrefix := strings.TrimSuffix(parsedBase.Path, "/")
-			if strings.HasPrefix(requestPath, basePrefix) {
-				requestPath = strings.TrimPrefix(requestPath, basePrefix)
-			}
-		}
-	}
-
-	targetURL := baseURL + requestPath
+	// The URL a request lands on is decided in one place, providers.TargetURL, so
+	// that the rule a published recipe is checked against is the rule the gateway
+	// applies. A plugin-supplied RequestPathOverride wins over the recipe's
+	// per-format path, which in turn wins over the client's own path.
+	targetURL := providers.TargetURL(
+		ctx.TargetDownstream.BaseURL,
+		ctx.TargetDownstream.FormatURLs,
+		ctx.TargetDownstream.FormatPaths,
+		ctx.DownstreamFormat,
+		cmp.Or(ctx.RequestPathOverride, original.URL.Path),
+	)
 	if original.URL.RawQuery != "" {
 		targetURL += "?" + original.URL.RawQuery
 	}

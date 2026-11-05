@@ -283,17 +283,19 @@ func enrichAliasGroups(s *store.Store, groups []store.AliasGroup) {
 	}
 	type dsInfo struct {
 		Name    string
+		Icon    string
 		Formats []string
 	}
 	dsMap := make(map[string]dsInfo)
 	for _, d := range downstreams {
-		dsMap[d.ID] = dsInfo{Name: d.Name, Formats: d.ApiFormats}
+		dsMap[d.ID] = dsInfo{Name: d.Name, Icon: d.Icon, Formats: d.ApiFormats}
 	}
 
 	for i := range groups {
 		for j := range groups[i].Options {
 			if info, ok := dsMap[groups[i].Options[j].DownstreamID]; ok {
 				groups[i].Options[j].DownstreamName = info.Name
+				groups[i].Options[j].DownstreamIcon = info.Icon
 				groups[i].Options[j].APIFormats = info.Formats
 			}
 		}
