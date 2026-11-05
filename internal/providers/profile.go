@@ -36,6 +36,11 @@ type Profile struct {
 	Version  int               `json:"version"`
 	Name     string            `json:"name"`
 	Icon     string            `json:"icon,omitempty"`
+	// Category groups the recipe in the catalog: who operates the endpoint. It is
+	// written in the recipe rather than inferred here, because the daemon cannot
+	// tell a first-party API from a relay by looking at a URL, and guessing from
+	// the name would be wrong for exactly the vendors that resell.
+	Category string            `json:"category,omitempty"`
 	Summary  map[string]string `json:"summary,omitempty"`
 	Provider ProviderSpec      `json:"provider"`
 	Plugins  []PluginBinding   `json:"plugins,omitempty"`
@@ -425,6 +430,35 @@ func (p *ProviderSpec) validateRegions() error {
 		}
 	}
 	return nil
+}
+
+// Provider categories. A recipe states which one it belongs to; an absent or
+// unrecognised value is treated as CategoryOther so the field is never a barrier
+// to installing a recipe written before it existed.
+const (
+	// CategoryOfficial is the company that authors the models and serves them
+	// itself: Anthropic, OpenAI, DeepSeek, Z.ai.
+	CategoryOfficial = "official"
+	// CategorySelfHosted is a server the user runs, or drives, on their own
+	// machine: Ollama, LM Studio, MLX-Serve, oMLX.
+	CategorySelfHosted = "self-hosted"
+	// CategoryOther is everything else — third-party hosts and relays that serve
+	// models another company made (Together AI, OpenRouter, 302.AI).
+	CategoryOther = "other"
+)
+
+// NormalizeCategory maps a declared category to one of the three known values.
+// An empty or unknown value becomes CategoryOther: the catalog groups by operator,
+// and "everything else" is the honest group for a recipe that does not say.
+func NormalizeCategory(c string) string {
+	switch strings.ToLower(strings.TrimSpace(c)) {
+	case CategoryOfficial:
+		return CategoryOfficial
+	case CategorySelfHosted, "selfhosted", "self_hosted", "local":
+		return CategorySelfHosted
+	default:
+		return CategoryOther
+	}
 }
 
 // Validate checks the profile's structure and defaults.

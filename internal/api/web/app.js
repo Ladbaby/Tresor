@@ -269,6 +269,16 @@ function modelIconHTML(modelID) {
 // This is the single place the rule lives. Every provider glyph in the UI goes
 // through it — the sidebar row, the detail header, the model tags, the alias
 // cards and the catalog — so adding a provider never needs a code change.
+// normalizeCategory keeps the UI total: a category the daemon does not recognise
+// still has to be listed somewhere, and dropping the entry would hide a provider
+// the user could otherwise install.
+function normalizeCategory(value) {
+    const v = String(value || '').trim().toLowerCase();
+    if (v === 'official') return 'official';
+    if (v === 'self-hosted' || v === 'selfhosted' || v === 'self_hosted' || v === 'local') return 'self-hosted';
+    return 'other';
+}
+
 function iconHTMLFor(item) {
     if (item && item.icon) {
         return `<img class="model-icon" src="/api/icons/${encodeURIComponent(item.icon)}?slug=1" alt="" loading="lazy" onerror="this.style.display='none'">`;
@@ -6024,12 +6034,23 @@ function renderProviderCatalog() {
             esc(_catalogSearch.trim()) + '”.</div>';
         return;
     }
+    // Sectioned by who operates the endpoint. The category comes from each recipe,
+    // so a new provider lands in the right group without touching this file; a
+    // recipe that declares none arrives as "other".
+    //
+    // Sections are rendered in a fixed order and only when they have matches, so a
+    // search narrows the list without leaving empty headings behind.
+    const sections = [
+        ['official', 'Official'],
+        ['self-hosted', 'Self-hosted'],
+        ['other', 'Others'],
+    ];
     // One row per recipe. The row is not a control: a whole-row button made a
     // mis-click install a provider, and installing is a side effect worth aiming
-    // at. Only the Install button installs, and the row no longer distinguishes
+    // at. Only the Install button installs, and the row does not distinguish
     // installed from installable — the same recipe can be added many times (two
     // accounts, two endpoints), so "already installed" is not a state.
-    listEl.innerHTML = shown.map(e => {
+    const rowHTML = e => {
         const regions = e.regions || [];
         // A vendor selling the same API at several endpoints gets a picker rather
         // than near-identical rows; one endpoint has nothing to choose.
@@ -6046,6 +6067,15 @@ function renderProviderCatalog() {
                 </div>
                 ${e.available === false && e.reason ? `<div class="catalog-row-reason">${esc(e.reason)}</div>` : ''}
             </div>`;
+    };
+    listEl.innerHTML = sections.map(([key, title]) => {
+        const inSection = shown.filter(e => normalizeCategory(e.category) === key);
+        if (inSection.length === 0) return '';
+        return `
+            <section class="catalog-section" data-category="${esc(key)}">
+                <h4 class="catalog-section-title">${esc(title)}<span class="catalog-section-count">${inSection.length}</span></h4>
+                ${inSection.map(rowHTML).join('')}
+            </section>`;
     }).join('');
 
     listEl.querySelectorAll('[data-install]').forEach(btn => {

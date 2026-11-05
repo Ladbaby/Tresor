@@ -67,7 +67,10 @@ type CatalogEntry struct {
 	Name    string            `json:"name"`
 	Icon    string            `json:"icon,omitempty"`
 	Version int               `json:"version"`
-	Summary map[string]string `json:"summary,omitempty"`
+	// Category mirrors the profile's category, so the list can be grouped without
+	// downloading each recipe. Always one of the known values, never empty.
+	Category string            `json:"category"`
+	Summary  map[string]string `json:"summary,omitempty"`
 	// URL is the HTTPS location of the full profile.
 	URL string `json:"url"`
 	// Features are the host features the profile needs, mirrored from the
