@@ -34,7 +34,7 @@
 
             <nav class="sidebar-nav">
                 <button class="tab" data-tab="dashboard">📊 Dashboard</button>
-                <button class="tab" data-tab="downstreams">⚡ Downstreams</button>
+                <button class="tab" data-tab="downstreams">⚡ Providers</button>
                 <button class="tab" data-tab="aliases">🔀 Aliases</button>
                 <button class="tab" data-tab="rules">📋 Rules</button>
                 <button class="tab" data-tab="settings">⚙️ Settings</button>
@@ -178,10 +178,10 @@
                 </div>
             </section>
 
-            <!-- Downstreams Tab -->
+            <!-- Providers Tab -->
             <section id="tab-downstreams" class="tab-content">
                     <div class="header-actions">
-                        <h2>Downstream Providers<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Manage the LLM providers and your API keys here (e.g., OpenAI, Claude, Deepseek.).">?</span></h2>
+                        <h2>Providers<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Manage the LLM providers and your API keys here (e.g., OpenAI, Claude, Deepseek.).">?</span></h2>
                     </div>
                     <div class="downstreams-layout">
                         <aside class="downstreams-sidebar">
@@ -239,7 +239,7 @@
                 <!-- Aliases Tab -->
                 <section id="tab-aliases" class="tab-content">
                     <div class="header-actions">
-                        <h2>Model Aliases<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Change the actual model in use for client apps. e.g., In order to let Claude Code (the client app) use Deepseek V4 Flash (the downstream provider's model), create a new alias group named 'claude.*', enable regex pattern such that it matches 'claude-opus', 'claude-sonnent', and 'claude-haiku', then add 'deepseek-v4-flash' in output model IDs.">?</span></h2>
+                        <h2>Model Aliases<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Change the actual model in use for client apps. e.g., In order to let Claude Code (the client app) use Deepseek V4 Flash (the provider's model), create a new alias group named 'claude.*', enable regex pattern such that it matches 'claude-opus', 'claude-sonnent', and 'claude-haiku', then add 'deepseek-v4-flash' in output model IDs.">?</span></h2>
                         <button id="btn-new-alias-group" class="btn-primary">+ New Alias Group</button>
                     </div>
                     <div id="alias-groups-container"></div>
@@ -251,11 +251,11 @@
                             <h3>Add Alias Option</h3>
                             <form id="alias-form">
                                 <input type="hidden" id="alias-input-model">
-                                <label>Input Model ID:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model name used in client apps (e.g, Claude Code, Codex, Gemini CLI). Tresor changes the actual model in use for these apps, by routing requests to the selected downstream model instead.">?</span> <strong id="alias-group-label"></strong></label>
-                                <label>Downstream:
+                                <label>Input Model ID:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model name used in client apps (e.g, Claude Code, Codex, Gemini CLI). Tresor changes the actual model in use for these apps, by routing requests to the selected provider model instead.">?</span> <strong id="alias-group-label"></strong></label>
+                                <label>Provider:
                                     <select id="alias-downstream"></select>
                                 </label>
-                                <label>Output Model IDs:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model(s) you actually want to use, from the downstream provider. Tresor will route requests to the selected downstream model instead.">?</span>
+                                <label>Output Model IDs:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model(s) you actually want to use, from the provider. Tresor will route requests to the selected model instead.">?</span>
                                     <div id="alias-output-models" class="model-multi-select"></div>
                                     <input type="text" id="alias-output-model-custom" class="custom-model-input" placeholder="or type a model ID..." style="display:none; margin-top:0.3rem;">
                                 </label>
@@ -270,16 +270,16 @@
                             <span class="close">&times;</span>
                             <h3>Create New Alias Group</h3>
                             <form id="new-group-form">
-                                <label>Input Model ID:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model name used in client apps (e.g, Claude Code, Codex, Gemini CLI). Tresor changes the actual model in use for these apps, by routing requests to the selected downstream model instead.">?</span>
+                                <label>Input Model ID:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model name used in client apps (e.g, Claude Code, Codex, Gemini CLI). Tresor changes the actual model in use for these apps, by routing requests to the selected provider model instead.">?</span>
                                     <input type="text" id="new-group-input-model" placeholder="e.g. gpt-4o" required>
                                 </label>
                                 <label style="display:inline-flex;align-items:center;gap:0.3rem;margin:0.5rem 0.5rem 0.5rem 0;cursor:pointer;">
                                     <input type="checkbox" id="new-group-is-regex"> <span style="font-size:0.85rem;color:var(--text-muted);">Regex Pattern<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Treat Input Model ID as a regex to match multiple model names (e.g., claude-opus.* matches both claude-opus-4-7 and claude-opus-4-8).">?</span></span>
                                 </label>
-                                <label>Downstream:
+                                <label>Provider:
                                     <select id="new-group-downstream"></select>
                                 </label>
-                                <label>Output Model IDs:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model(s) you actually want to use, from the downstream provider. Tresor will route requests to the selected downstream model instead.">?</span>
+                                <label>Output Model IDs:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Model(s) you actually want to use, from the provider. Tresor will route requests to the selected model instead.">?</span>
                                     <div id="new-group-output-models" class="model-multi-select"></div>
                                     <input type="text" id="new-group-output-model-custom" class="custom-model-input" placeholder="or type a model ID..." style="display:none; margin-top:0.3rem;">
                                 </label>
@@ -340,7 +340,7 @@
                     </div>
 
                     <!-- Plugins a provider recipe installed. They belong to a
-                         downstream, not to a rule, so they are kept out of the
+                         provider, not to a rule, so they are kept out of the
                          table above and out of the rule pipeline picker. -->
                     <details class="detail-advanced tresor-managed-plugins" id="tresor-managed-plugins" hidden>
                         <summary>Tresor managed plugins<span class="managed-plugin-count" id="tresor-managed-count"></span></summary>
@@ -361,7 +361,7 @@
                                 <input type="hidden" id="rule-id">
                                 <label>Name: <input type="text" id="rule-name" required></label>
                                 <label>Pattern Path:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="URL path that must match (e.g., /v1/chat/completions). Use * to match all paths.">?</span> <input type="text" id="rule-path" placeholder="/v1/chat/completions or *"></label>
-                                <label>Pattern Models:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Leave empty to match any model. Select one or more known model names that can trigger this rule (OR logic — any match fires the rule). Suggestions are drawn from downstream output model IDs, active alias input model IDs, regex alias patterns, and announced names.">?</span>
+                                <label>Pattern Models:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Leave empty to match any model. Select one or more known model names that can trigger this rule (OR logic — any match fires the rule). Suggestions are drawn from provider output model IDs, active alias input model IDs, regex alias patterns, and announced names.">?</span>
                                     <div id="rule-match-models" class="model-multi-select rule-model-multi-select"></div>
                                 </label>
 
@@ -374,8 +374,8 @@
                                     <label class="format-checkbox"><input type="checkbox" name="match_input_format" value="gemini"><img class="format-icon icon-gemini" src="icons/gemini.svg" alt="" aria-hidden="true"> Gemini</label>
                                 </div>
 
-                                <!-- Match Downstream Format -->
-                                <label>Match Downstream Format:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Only apply when the target downstream speaks this format. Leave empty to match any.">?</span></label>
+                                <!-- Match Provider Format -->
+                                <label>Match Provider Format:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Only apply when the target provider speaks this format. Leave empty to match any.">?</span></label>
                                 <div class="format-checkboxes" id="rule-match-downstream-formats">
                                     <label class="format-checkbox"><input type="checkbox" name="match_downstream_format" value="openai"><img class="format-icon icon-openai" src="icons/openai-completions.svg" alt="" aria-hidden="true"> OpenAI</label>
                                     <label class="format-checkbox"><input type="checkbox" name="match_downstream_format" value="openai_responses"><img class="format-icon icon-openai_responses" src="icons/openai-responses.svg" alt="" aria-hidden="true"> OpenAI Responses</label>
@@ -383,8 +383,8 @@
                                     <label class="format-checkbox"><input type="checkbox" name="match_downstream_format" value="gemini"><img class="format-icon icon-gemini" src="icons/gemini.svg" alt="" aria-hidden="true"> Gemini</label>
                                 </div>
 
-                                <!-- Match Downstreams (multi-select) -->
-                                <label>Match Downstreams:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Limit this rule to specific providers. Leave empty to match any downstream.">?</span>
+                                <!-- Match Providers (multi-select) -->
+                                <label>Match Providers:<span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="Limit this rule to specific providers. Leave empty to match any provider.">?</span>
                                     <div id="rule-match-downstreams" class="model-multi-select"></div>
                                 </label>
 
@@ -426,7 +426,7 @@
                         <div class="settings-group">
                             <h3>Outbound Proxy</h3>
                             <p class="settings-description">
-                                Controls how outbound requests to downstream LLM providers are routed through HTTP proxies.
+                                Controls how outbound requests to LLM providers are routed through HTTP proxies.
                             </p>
                             <div class="settings-row">
                                 <label for="proxy-mode">Proxy Mode</label>
@@ -493,7 +493,7 @@
                         <div class="settings-group">
                             <h3>Payload Capture</h3>
                             <p class="settings-description">
-                                When enabled, Tresor stores the <strong>raw incoming request body</strong> and the <strong>raw downstream response body</strong> for the most recent <span id="capture-max-entries">100</span> requests in memory. Click a row in the <em>Logs</em> tab to inspect prompts, messages, and tool calls. The capture is always taken <strong>before</strong> any plugin runs &mdash; you see the original client payload and the original downstream response, not the plugin-transformed version.
+                                When enabled, Tresor stores the <strong>raw incoming request body</strong> and the <strong>raw provider response body</strong> for the most recent <span id="capture-max-entries">100</span> requests in memory. Click a row in the <em>Logs</em> tab to inspect prompts, messages, and tool calls. The capture is always taken <strong>before</strong> any plugin runs &mdash; you see the original client payload and the original provider response, not the plugin-transformed version.
                             </p>
                             <div class="settings-row">
                                 <label class="checkbox-label">
@@ -510,7 +510,7 @@
                             <div class="settings-row">
                                 <label class="checkbox-label">
                                     <input type="checkbox" id="setting-retry-on-empty"> Retry on empty response
-                                    <span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="When the downstream LLM returns an empty response
+                                    <span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover" data-tooltip="When the provider returns an empty response
                                     (http-200 but no content generated, even if it has thinking contents). Uses exponential backoff with up to 3 retries.
                                     Note that it will not retry on non-http-200 responses, since most LLM Apps already have well-designed non-http-200 retry mechanisms.">?</span>
                                 </label>
@@ -526,7 +526,7 @@
                                 <label for="default-tab">Default Tab</label>
                                 <select id="default-tab">
                                     <option value="dashboard">Dashboard</option>
-                                    <option value="downstreams">Downstreams</option>
+                                    <option value="downstreams">Providers</option>
                                     <option value="aliases">Aliases</option>
                                     <option value="rules">Rules</option>
                                     <option value="settings">Settings</option>
@@ -550,7 +550,7 @@
                         </div>
                     </div>
                     <div style="margin-bottom:1rem;">
-                        <input type="text" id="log-filter-input" placeholder="Filter logs (model, path, downstream, status, error)..." style="width:100%;padding:0.5rem;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:0.85rem;">
+                        <input type="text" id="log-filter-input" placeholder="Filter logs (model, path, provider, status, error)..." style="width:100%;padding:0.5rem;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:0.85rem;">
                     </div>
                     <div id="log-level-indicator" class="log-level-bar" style="margin-bottom:1rem;display:none;">Level: Info</div>
                     <div id="logs-container" class="logs-container">
@@ -616,6 +616,6 @@
     <script src="wrapper-detect.js?v=13"></script>
     <script src="content-normalise.js?v=14"></script>
     <script src="sse-reassembler.js?v=14"></script>
-    <script src="app.js?v=21"></script>
+    <script src="app.js?v=22"></script>
 </body>
 </html>

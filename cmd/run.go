@@ -374,7 +374,7 @@ func logMissingWire(id string, auth *config.DownstreamAuthCfg) {
 	}
 	log.Printf("warning: downstream %s: auth.wire %q is not provided by any installed plugin package "+
 		"(available: %s). Requests to this provider will fail until the package is installed "+
-		"(Dashboard > Downstreams > Browse providers).", id, auth.Wire, available)
+		"(Dashboard > Providers > Fetch Providers).", id, auth.Wire, available)
 }
 
 // migrateLegacyOAuthProvidersYAML clears the parsed legacy oauth_providers

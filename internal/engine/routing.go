@@ -60,25 +60,25 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 	if alias != nil {
 		ds, derr := e.store.GetDownstream(alias.DownstreamID)
 		if derr != nil {
-			return &modelResult{model: model, body: body}, &gatewayError{http.StatusBadGateway, fmt.Sprintf("error getting downstream %s for alias %s", alias.DownstreamID, alias.ID),
-				fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), "alias downstream missing", derr}
+			return &modelResult{model: model, body: body}, &gatewayError{http.StatusBadGateway, fmt.Sprintf("error getting provider %s for alias %s", alias.DownstreamID, alias.ID),
+				fmt.Sprintf("alias %q references missing provider %q", alias.ID, alias.DownstreamID), "alias downstream missing", derr}
 		}
 		// A disabled downstream behaves "as if deleted": ignore the alias and
 		// fall through to the other tiers.
 		if ds.IsEnabled {
-			e.logger.Debug("alias match (exact): model %q → alias %q → downstream %q (%s)", model, alias.ID, ds.ID, alias.OutputModelID)
+			e.logger.Debug("alias match (exact): model %q → alias %q → provider %q (%s)", model, alias.ID, ds.ID, alias.OutputModelID)
 			return &modelResult{ds: ds, alias: alias, model: model, resolvedModel: alias.OutputModelID, originalBody: append([]byte(nil), body...), body: rewriteModelInBody(body, alias.OutputModelID)}, nil
 		}
-		e.logger.Debug("exact alias match skipped: downstream %q is disabled", ds.ID)
+		e.logger.Debug("exact alias match skipped: provider %q is disabled", ds.ID)
 	}
 
 	// Tier 2: direct downstream by exact output_model_id.
 	ds, err := e.store.FindDownstreamByOutputModel(model)
 	if err != nil {
-		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up downstream for model %s", model), "internal error", "downstream lookup error", err}
+		return &modelResult{model: model, body: body}, &gatewayError{http.StatusInternalServerError, fmt.Sprintf("error looking up provider for model %s", model), "internal error", "provider lookup error", err}
 	}
 	if ds != nil {
-		e.logger.Debug("direct resolution: model %q → downstream %q (%s)", model, ds.ID, ds.Name)
+		e.logger.Debug("direct resolution: model %q → provider %q (%s)", model, ds.ID, ds.Name)
 		return &modelResult{ds: ds, model: model, resolvedModel: model, originalBody: append([]byte(nil), body...), body: body}, nil
 	}
 
@@ -123,14 +123,14 @@ func (e *Engine) resolveModel(r *http.Request) (*modelResult, *gatewayError) {
 				fmt.Sprintf("alias %q references missing downstream %q", alias.ID, alias.DownstreamID), "alias downstream missing", derr}
 		}
 		if rds.IsEnabled {
-			e.logger.Debug("alias match (regex %q): model %q → downstream %q (%s)", alias.InputModelID, model, rds.ID, alias.OutputModelID)
+			e.logger.Debug("alias match (regex %q): model %q → provider %q (%s)", alias.InputModelID, model, rds.ID, alias.OutputModelID)
 			return &modelResult{ds: rds, alias: alias, model: model, resolvedModel: alias.OutputModelID, originalBody: append([]byte(nil), body...), body: rewriteModelInBody(body, alias.OutputModelID)}, nil
 		}
-		e.logger.Debug("regex alias match skipped: downstream %q is disabled", rds.ID)
+		e.logger.Debug("regex alias match skipped: provider %q is disabled", rds.ID)
 	}
 
 	msg := fmt.Sprintf("unknown model %q", model)
-	e.logger.Debug("model %q did not match any alias or downstream output_model_ids", model)
+	e.logger.Debug("model %q did not match any alias or provider output_model_ids", model)
 	return &modelResult{model: model, body: body}, &gatewayError{http.StatusNotFound, msg, msg, "unknown model", nil}
 }
 
@@ -275,7 +275,7 @@ func (e *Engine) buildPipelineWithRegistry(path, model string, inputFormat strin
 					if streamT, ok := transformer.(StreamResponseTransformer); ok && !pluginInList[StreamResponseTransformer](pipeline.StreamResponseSteps, name) {
 						pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, streamT)
 					}
-					e.logger.Debug("auto-translating %s → downstream %s (formats: %v)", inputFormat, ds.ID, ds.ApiFormats)
+					e.logger.Debug("auto-translating %s → provider %s (formats: %v)", inputFormat, ds.ID, ds.ApiFormats)
 				}
 			}
 		}
@@ -293,7 +293,7 @@ func (e *Engine) buildPipelineWithRegistry(path, model string, inputFormat strin
 	// on every call.
 	if ds != nil && len(ds.Plugins) > 0 {
 		if err := e.applyDownstreamPlugins(&pipeline, ds, registry); err != nil {
-			log.Printf("warning: downstream %s: %v", ds.ID, err)
+			log.Printf("warning: provider %s: %v", ds.ID, err)
 		}
 	}
 
@@ -327,7 +327,7 @@ func (e *Engine) applyDownstreamPlugins(pipeline *Pipeline, ds *store.Downstream
 		pipeline.RequestSteps = append(pipeline.RequestSteps, p.RequestSteps...)
 		pipeline.ResponseSteps = append(pipeline.ResponseSteps, p.ResponseSteps...)
 		pipeline.StreamResponseSteps = append(pipeline.StreamResponseSteps, p.StreamResponseSteps...)
-		e.logger.Debug("applied downstream plugin %s for %s", pluginID, ds.ID)
+		e.logger.Debug("applied provider plugin %s for %s", pluginID, ds.ID)
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf("downstream plugin bindings unavailable: %s", strings.Join(failures, "; "))

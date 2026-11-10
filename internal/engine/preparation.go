@@ -34,7 +34,7 @@ func (e *Engine) prepareDownstreamContext(r *http.Request, result *modelResult, 
 	if ds.IsOAuth() {
 		tm := e.getTokenManager()
 		if tm == nil {
-			return nil, &gatewayError{http.StatusUnauthorized, "downstream " + ds.ID + " uses oauth but no oauth manager is configured", "provider is configured for OAuth but the daemon has no OAuth support enabled", "oauth not configured", nil}
+			return nil, &gatewayError{http.StatusUnauthorized, "provider " + ds.ID + " uses oauth but no oauth manager is configured", "provider is configured for OAuth but the daemon has no OAuth support enabled", "oauth not configured", nil}
 		}
 		token, extraHeaders, err := tm.ResolveValidToken(ds.ID)
 		if err != nil {
@@ -44,7 +44,7 @@ func (e *Engine) prepareDownstreamContext(r *http.Request, result *modelResult, 
 				msg := "provider token refresh is temporarily unavailable — please retry"
 				return nil, &gatewayError{http.StatusServiceUnavailable, msg, msg, "oauth refresh temporarily unavailable", err}
 			}
-			msg := "provider not connected — finish the OAuth login in the Tresor dashboard (Downstreams tab)"
+			msg := "provider not connected — finish the OAuth login in the Tresor dashboard (Providers tab)"
 			return nil, &gatewayError{http.StatusUnauthorized, msg, msg, "oauth not connected", err}
 		}
 		ctx.TargetDownstream.APIKey = token
@@ -79,7 +79,7 @@ func (e *Engine) prepareDownstreamContext(r *http.Request, result *modelResult, 
 				available = strings.Join(names, ", ")
 			}
 			msg := fmt.Sprintf("provider %s needs the %q provider dialect, which is not installed "+
-				"(available: %s). Install it from Downstreams > Browse providers.", ds.ID, ds.Auth.Wire, available)
+				"(available: %s). Install it from Providers > Fetch Providers.", ds.ID, ds.Auth.Wire, available)
 			return ctx, &gatewayError{http.StatusInternalServerError, msg, msg, "provider dialect not installed", nil}
 		}
 		ctx.Wire = adapter

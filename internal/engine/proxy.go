@@ -274,7 +274,7 @@ func (e *Engine) executeSelection(cw *statusCaptureWriter, r *http.Request, resu
 		for _, step := range pipeline.ExternalSteps {
 			step.request = currentReq
 		}
-		e.logger.Debug("forwarding %s %s → downstream %q (%s) with model %q (attempt %d)", r.Method, r.URL.Path, result.ds.ID, result.ds.Name, result.resolvedModel, attempt+1)
+		e.logger.Debug("forwarding %s %s → provider %q (%s) with model %q (attempt %d)", r.Method, r.URL.Path, result.ds.ID, result.ds.Name, result.resolvedModel, attempt+1)
 
 		// Forward request to downstream
 		resp, cancel, err := e.forwardRequest(currentReq, currentBody, ctx)

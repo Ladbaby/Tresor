@@ -186,7 +186,7 @@ var aliasActivateCmd = &cobra.Command{
 }
 
 var aliasCreateCmd = &cobra.Command{
-	Use:   "create [input-model-id] [downstream-id] [output-model-id]",
+	Use:   "create [input-model-id] [provider-id] [output-model-id]",
 	Short: "Create a new alias option",
 	Args:  cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -237,8 +237,8 @@ func init() {
 	ruleCmd.AddCommand(ruleListCmd)
 	ruleCmd.AddCommand(ruleCreateCmd)
 	ruleCreateCmd.Flags().StringVar(&matchFormat, "match-format", "", "Match input format (comma-separated, e.g. openai,anthropic)")
-	ruleCreateCmd.Flags().StringVar(&matchDownstreamFmt, "match-downstream-format", "", "Match downstream format (comma-separated)")
-	ruleCreateCmd.Flags().StringVar(&matchDownstreams, "match-downstreams", "", "Match downstreams (comma-separated)")
+	ruleCreateCmd.Flags().StringVar(&matchDownstreamFmt, "match-downstream-format", "", "Match provider API format (comma-separated)")
+	ruleCreateCmd.Flags().StringVar(&matchDownstreams, "match-downstreams", "", "Match provider IDs (comma-separated)")
 	ruleCreateCmd.Flags().StringVar(&matchModels, "pattern-models", "", "Match pattern models (comma-separated, OR logic)")
 	rootCmd.AddCommand(aliasCmd)
 	aliasCmd.AddCommand(aliasListCmd)

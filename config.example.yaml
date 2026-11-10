@@ -15,7 +15,7 @@ admin_password: "admin"               # Optional Bearer token for admin API auth
 proxy_api_keys:                        # Optional: require clients to authenticate
   - sk-proxy-123                       # Clients send "Authorization: Bearer sk-proxy-123"
 
-# Outbound proxy mode for downstream requests.
+# Outbound proxy mode for provider requests.
 # "auto" (default): Windows system proxy > env vars (HTTP_PROXY/HTTPS_PROXY) > direct
 # "env": Environment variables only
 # "windows": Windows registry proxy + env fallback
@@ -29,16 +29,16 @@ default_tab: "downstreams"
 # Request log verbosity: debug, info, warn, error (default: info)
 log_level: "info"
 
-# Capture the raw incoming request body and the raw downstream response body
+# Capture the raw incoming request body and the raw provider response body
 # for the most recent 100 requests in memory, and expose them via the Web UI
 # Logs tab (click any row to inspect). The capture is taken **before** any
 # plugin runs, so the inspector shows the original client payload and the
-# original downstream response, not the post-pipeline output. Disabled by
+# original provider response, not the post-pipeline output. Disabled by
 # default because it adds a small per-request memory cost (capped at ~1 MiB
 # per direction). Persisted to YAML so the choice survives daemon restarts.
 capture_payloads: true
 
-# Automatically retry requests when the downstream LLM returns an empty response (http-200 but no content generated). Uses exponential backoff with up to 3 retries.
+# Automatically retry requests when the provider LLM returns an empty response (http-200 but no content generated). Uses exponential backoff with up to 3 retries.
 retry_on_empty: false
 
 # Directory for cached model icon SVGs (fetched at runtime from a public CDN).
@@ -52,8 +52,8 @@ plugin_cache_dir: "~/.config/tresor/tresor-plugins/"
 # Cache for the online provider catalog (installable provider definitions).
 provider_cache_dir: "~/.config/tresor/tresor-providers/"
 
-# Downstream LLM providers
-# Example downstreams below. You can add more providers using similar format.
+# LLM providers
+# Example providers below. You can add more using a similar format.
 downstreams:
   - id: chatgpt
     name: ChatGPT subscription
@@ -173,15 +173,15 @@ downstreams:
 
 # Routing rules (OPTIONAL) — customize forwarding with transform pipelines.
 # Rules are NOT required for normal forwarding: model resolution uses aliases and
-# downstream output_model_ids automatically. Rules only add plugin pipelines;
-# they never override the resolved downstream. Multiple rules can match a single
+# provider output_model_ids automatically. Rules only add plugin pipelines;
+# they never override the resolved provider. Multiple rules can match a single
 # request; their pipelines are concatenated in priority order.
 #
 # Matching criteria (all optional, OR logic):
 #   pattern_models: list of model IDs to match (OR within the list)
 #   match_format: input request formats (e.g. [openai, anthropic])
-#   match_downstream_format: downstream API formats
-#   match_downstreams: downstream IDs to match against
+#   match_downstream_format: provider API formats
+#   match_downstreams: provider IDs to match against
 #
 # pattern_model (single string) is still accepted for backward compatibility
 # but pattern_models (list) is the recommended format for multi-model rules.
@@ -195,8 +195,8 @@ downstreams:
 #    name: Prevent Repetition
 #    pattern_path: /v1/chat/completions
 #    match_format: [openai]               # Only match OpenAI-format requests
-#    match_downstream_format: [openai]    # Only match OpenAI-format downstreams
-#    match_downstreams: [openai]          # Only match the "openai" downstream
+#    match_downstream_format: [openai]    # Only match OpenAI-format providers
+#    match_downstreams: [openai]          # Only match the "openai" provider
 #    pipeline_config:
 #      - plugin_id: break_repeat
 #    is_enabled: true

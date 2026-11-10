@@ -79,7 +79,7 @@ func (r *Router) handleProviders(w http.ResponseWriter, req *http.Request) {
 			}
 			if prov == nil {
 				writeError(w, http.StatusConflict,
-					"downstream "+segments[0]+" was not installed from a provider profile; delete it from the Downstreams tab")
+					"downstream "+segments[0]+" was not installed from a provider profile; delete it from the Providers tab")
 				return
 			}
 			existing, _ := r.store.GetDownstream(segments[0])

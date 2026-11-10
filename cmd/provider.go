@@ -69,8 +69,8 @@ func newProviderCmd() *cobra.Command {
 		Short:   "Install and manage provider profiles",
 		Long: "Provider profiles are declarative provider definitions: a base URL, API\n" +
 			"formats, model list, and optionally the plugins and aliases the provider\n" +
-			"needs. Installing one creates an ordinary downstream, so it shows up in\n" +
-			"`downstream list` and can be edited by hand afterwards.\n\n" +
+			"needs. Installing one creates an ordinary provider in the Providers tab, so\n" +
+			"`provider installed` lists it and it can be edited by hand afterwards.\n\n" +
 			"A profile never contains credentials; you supply them at install time.",
 	}
 
@@ -160,12 +160,12 @@ func newProviderCmd() *cobra.Command {
 	install.Flags().String("api-key", "", "Provider API key (or set TRESOR_PROVIDER_API_KEY)")
 	install.Flags().String("client-secret", "", "OAuth client secret, when the provider needs one")
 	install.Flags().Bool("allow-plugins", false, "Allow the profile to bind plugins")
-	install.Flags().String("downstream-id", "", "Use a specific downstream id instead of deriving one")
+	install.Flags().String("downstream-id", "", "Use a specific provider id instead of deriving one")
 	install.Flags().String("region", "", "Install at one of the profile's regions (see `provider list`)")
 	providers.AddCommand(install)
 
 	providers.AddCommand(&cobra.Command{
-		Use:   "update <downstream-id> <profile-id | file | ->",
+		Use:   "update <provider-id> <profile-id | file | ->",
 		Short: "Apply a newer profile version without discarding local edits",
 		Long: "Update an installed provider to a newer profile.\n\n" +
 			"Fields you have not changed are updated; fields you edited by hand are\n" +
@@ -192,8 +192,8 @@ func newProviderCmd() *cobra.Command {
 	})
 
 	providers.AddCommand(&cobra.Command{
-		Use:   "remove <downstream-id>",
-		Short: "Remove an installed provider and its downstream",
+		Use:   "remove <provider-id>",
+		Short: "Remove an installed provider",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if _, err := providerAPI(http.MethodDelete, "/api/providers/"+url.PathEscape(args[0]), nil); err != nil {

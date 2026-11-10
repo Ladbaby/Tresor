@@ -45,7 +45,7 @@ func (e *Engine) handleModels(w http.ResponseWriter) {
 	// Models from downstream output_model_ids
 	downstreams, err := e.store.ListDownstreams()
 	if err != nil {
-		log.Printf("Error listing downstreams for models: %v", err)
+		log.Printf("Error listing providers for models: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -155,7 +155,7 @@ func (e *Engine) handleGeminiModels(r *http.Request, w http.ResponseWriter) {
 
 	downstreams, err := e.store.ListDownstreams()
 	if err != nil {
-		log.Printf("Error listing downstreams for gemini models: %v", err)
+		log.Printf("Error listing providers for gemini models: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

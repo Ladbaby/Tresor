@@ -503,7 +503,7 @@ async function loadRules() {
                     if (ds) {
                         badges.push(`<span class="badge">ds:${esc(ds.name)}</span>`);
                     } else {
-                        badges.push(`<span class="badge badge-missing" title="Downstream ${esc(id)} no longer exists — this rule will never match">ds:${esc(id)} (missing)</span>`);
+                        badges.push(`<span class="badge badge-missing" title="Provider ${esc(id)} no longer exists — this rule will never match">ds:${esc(id)} (missing)</span>`);
                     }
                 });
 
@@ -631,7 +631,7 @@ function populateRuleMatchDownstreams(containerEl, selectedIds) {
     containerEl._hiddenSelectedDownstreams = sel.filter(id => disabledIds.has(id));
 
     if (dsList.length === 0) {
-        containerEl.innerHTML = '<div class="model-multi-empty">No downstreams available</div>';
+        containerEl.innerHTML = '<div class="model-multi-empty">No providers available</div>';
         return;
     }
 
@@ -835,7 +835,7 @@ document.getElementById('rule-form').addEventListener('submit', async (e) => {
     }
 });
 
-// ---- Downstreams ----
+// ---- Providers ----
 // Sidebar + detail-pane layout. The right pane is an INLINE EDITOR; every field
 // auto-saves on blur or on per-item action.
 let _currentDownstreamId = null;
@@ -858,7 +858,7 @@ async function loadDownstreams() {
         }
     } catch (err) {
         document.getElementById('downstreams-detail').innerHTML =
-            '<div class="downstreams-detail-empty">Error loading downstreams: ' + esc(err.message) + '</div>';
+            '<div class="downstreams-detail-empty">Error loading providers: ' + esc(err.message) + '</div>';
     }
 }
 
@@ -1130,7 +1130,7 @@ function renderDownstreamDetail(ds) {
                     <input type="checkbox" data-action="toggle-enabled"${enabled ? ' checked' : ''}>
                     <span class="ds-toggle-track"></span>
                 </label>
-                <button class="detail-header-delete" data-action="delete" title="Delete this downstream">🗑</button>
+                <button class="detail-header-delete" data-action="delete" title="Delete this provider">🗑</button>
             </div>
         </div>
         <div class="detail-section">
@@ -1895,7 +1895,7 @@ function showFetchModelsPopup(dsId, modelIds) {
 // Also close the fetch popup when clicking outside it (handled by .modal background click)
 
 async function deleteDownstream(id) {
-    if (!confirm('Delete this downstream?')) return;
+    if (!confirm('Delete this provider?')) return;
     try {
         await api('/downstreams/' + id, { method: 'DELETE' });
         loadDownstreams();
@@ -2324,7 +2324,7 @@ function shortPipeline(config) {
  * Fetch the downstream list used by alias-tab <select>s.
  *
  * Always hits the API — alias modals must reflect the latest
- * output_model_ids added via the Downstreams tab's "Fetch Models" popup
+ * output_model_ids added via the Providers tab's "Fetch Models" popup
  * (e.g. a freshly added model should appear in the tag picker the next
  * time the alias option modal is opened).
  */
@@ -2348,7 +2348,7 @@ const _openAliasModals = new Set();
 /**
  * Refresh any open alias modals: re-populate the downstream <select> and
  * model tag picker so newly-added models (e.g. just added via the
- * Downstreams tab's "Fetch Models" popup) appear immediately.
+ * Providers tab's "Fetch Models" popup) appear immediately.
  */
 function refreshOpenAliasModals() {
     for (const state of _openAliasModals) {
@@ -2639,7 +2639,7 @@ function renderAliasGroup(container, group) {
     // must not collide with any existing downstream or alias model ID —
     // validation is enforced server-side; we surface the error message below.
     //
-    // UX mirrors the Downstreams tab's "Add Model" flow: a header row with
+    // UX mirrors the Providers tab's "Add Model" flow: a header row with
     // the label and an "＋ Add" toggle, a chip list (or empty hint), and a
     // hidden inline row [input | Add | Cancel] that appears when toggled.
     if (isRegexGroup) {
@@ -2656,7 +2656,7 @@ function renderAliasGroup(container, group) {
         label.className = 'alias-announced-label';
         label.textContent = '(Optional) Announced names';
         label.appendChild(makeHelpIcon(
-            'The regex pattern will not appear in LLM Apps\' "Fetch Available Models" results (i.e., /v1/models results). Instead, you can specify concrete model IDs here that will appear in available models. (e.g., regex pattern "claude-sonnet.*" is not discoverable, but its announced names "claude-sonnet-4-6" and "claude-sonnet-5" are discoverable.)  Each name must match the regex pattern above, and must not collide with existing downstream model IDs or other aliases.'
+            'The regex pattern will not appear in LLM Apps\' "Fetch Available Models" results (i.e., /v1/models results). Instead, you can specify concrete model IDs here that will appear in available models. (e.g., regex pattern "claude-sonnet.*" is not discoverable, but its announced names "claude-sonnet-4-6" and "claude-sonnet-5" are discoverable.)  Each name must match the regex pattern above, and must not collide with existing provider model IDs or other aliases.'
         ));
         headerRow.appendChild(label);
 
@@ -3214,7 +3214,7 @@ document.getElementById('alias-form').addEventListener('submit', async (e) => {
     );
 
     if (!downstreamId || models.length === 0) {
-        alert('Select a downstream and at least one output model.');
+        alert('Select a provider and at least one output model.');
         return;
     }
 
@@ -3283,7 +3283,7 @@ document.getElementById('new-group-form').addEventListener('submit', async (e) =
     );
 
     if (!inputModelId || !downstreamId || models.length === 0) {
-        alert('Input model ID, downstream, and at least one output model are required.');
+        alert('Input model ID, provider, and at least one output model are required.');
         return;
     }
 
@@ -3449,7 +3449,7 @@ document.getElementById('btn-add-proxy-key').addEventListener('click', function 
     container.querySelector('.api-key-input:last-of-type').focus();
 });
 
-// ---- Settings: per-field auto-save (blur/change), like the Downstreams tab.
+// ---- Settings: per-field auto-save (blur/change), like the Providers tab.
 // Each control saves only its own field; the backend merges partial bodies so
 // untouched settings are preserved. A transient status line confirms each save.
 
@@ -3738,7 +3738,7 @@ function renderInspectBody() {
         bodyEl.appendChild(renderInspectSectionParsed('Response (parsed)', currentInspectData.response, currentInspectPath, 'response', respFmt, currentInspectData));
     } else {
         bodyEl.appendChild(renderInspectSection('Raw client request (before plugins)', currentInspectData.request));
-        bodyEl.appendChild(renderInspectSection(currentInspectData.task_id || currentInspectData.execution_id ? 'Raw client response' : 'Raw downstream response (before plugins)', currentInspectData.response));
+        bodyEl.appendChild(renderInspectSection(currentInspectData.task_id || currentInspectData.execution_id ? 'Raw client response' : 'Raw provider response (before plugins)', currentInspectData.response));
     }
     appendInspectFlow(bodyEl);
 }
@@ -3955,7 +3955,7 @@ function renderInspectMeta(d) {
         ['Status', d.status != null ? String(d.status) : ''],
         ['Model', d.model || ''],
         ['Resolved model', d.resolved_model || ''],
-        ['Downstream', downstream],
+        ['Provider', downstream],
         ['Client IP', d.client_ip || ''],
         ['Captured at', d.timestamp || ''],
     ];
@@ -5283,7 +5283,9 @@ function highlightDebugMessage(message) {
 function debugClassForKeyword(keyword) {
     if (keyword === 'model') return 'log-model-input';
     if (keyword === 'alias') return 'log-alias';
-    if (keyword === 'downstream') return 'log-downstream';
+    // Debug messages quote the target endpoint as `provider "X"`. Older log
+    // lines captured before the rename still say `downstream "X"`.
+    if (keyword === 'provider' || keyword === 'downstream') return 'log-downstream';
     return '';
 }
 
@@ -5678,7 +5680,7 @@ function renderDashboardSummary(total, captureOn, models, providers, ips) {
 
     // Top Provider card — mirror of Top Model: first row of the per-downstream
     // aggregate. Icon resolves using the human-friendly Name (same convention
-    // as the Downstreams tab — auto-generated UUID ids like "23695a12" don't
+    // as the Providers tab — auto-generated UUID ids like "23695a12" don't
     // pattern-match in the icon table, but names like "Anthropic" or
     // "Minimax" do via the first-segment fallback). Falls back to the ID
     // only if the Name is empty.
@@ -5844,7 +5846,7 @@ function renderDashboardProviders(providers, captureOn) {
 
         // Display the human-friendly Name, falling back to downstream_id
         // for orphaned rows (defensive only). Icon resolves via the Name
-        // — same convention as the Downstreams tab. Auto-generated UUID
+        // — same convention as the Providers tab. Auto-generated UUID
         // ids ("23695a12") don't pattern-match in the icon table, but
         // names like "Anthropic" / "Minimax" do via the first-segment
         // fallback in the icon resolver.

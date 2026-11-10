@@ -591,7 +591,7 @@ func (r *Router) fetchModels(ds *store.Downstream) ([]string, error) {
 		}
 		token, extraHeaders, err := r.oauthMgr.ResolveValidToken(ds.ID)
 		if err != nil {
-			return nil, fmt.Errorf("provider not connected — finish the OAuth login in the Downstreams tab")
+			return nil, fmt.Errorf("provider not connected — finish the OAuth login in the Providers tab")
 		}
 		in.Token = token
 		// The OAuth manager's headers carry the identity the runtime sends
