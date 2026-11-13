@@ -649,37 +649,49 @@ func TestStore_FindDownstreamByOutputModel(t *testing.T) {
 func TestStore_FindDownstreamByOutputModel_Deterministic(t *testing.T) {
 	s := newTestStore(t)
 
-	// Two downstreams share the same model — earliest created_at wins
-	d1 := &Downstream{
-		Name: "Provider A", BaseURL: "https://a.example.com/v1", Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key-a"},
-	}
-	if err := s.CreateDownstream(d1); err != nil {
-		t.Fatalf("create downstream: %v", err)
-	}
-	if err := s.AddOutputModelID(d1.ID, "shared-model"); err != nil {
-		t.Fatalf("add model id: %v", err)
+	// Two downstreams share the same model. created_at has one-second
+	// granularity (CURRENT_TIMESTAMP), so both rows almost always carry the same
+	// timestamp and the id breaks the tie. The winner is therefore the row
+	// ordered first by (created_at, id) — not necessarily the row inserted first.
+	var providers []*Downstream
+	for _, name := range []string{"Provider A", "Provider B"} {
+		d := &Downstream{
+			Name:      name,
+			BaseURL:   "https://" + name + ".example.com/v1",
+			Auth:      &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key"},
+			IsEnabled: true,
+		}
+		if err := s.CreateDownstream(d); err != nil {
+			t.Fatalf("create downstream: %v", err)
+		}
+		if err := s.AddOutputModelID(d.ID, "shared-model"); err != nil {
+			t.Fatalf("add model id: %v", err)
+		}
+		providers = append(providers, d)
 	}
 
-	d2 := &Downstream{
-		Name: "Provider B", BaseURL: "https://b.example.com/v1", Auth: &config.DownstreamAuthCfg{Type: "api_key", APIKey: "key-b"},
-	}
-	if err := s.CreateDownstream(d2); err != nil {
-		t.Fatalf("create downstream: %v", err)
-	}
-	if err := s.AddOutputModelID(d2.ID, "shared-model"); err != nil {
-		t.Fatalf("add model ids: %v", err)
+	// Compute the expected winner the same way the query orders rows.
+	expected := providers[0]
+	for _, d := range providers[1:] {
+		if d.CreatedAt.Before(expected.CreatedAt) ||
+			(d.CreatedAt.Equal(expected.CreatedAt) && d.ID < expected.ID) {
+			expected = d
+		}
 	}
 
-	// d1 was created first, so it should win
-	resolved, err := s.FindDownstreamByOutputModel("shared-model")
-	if err != nil {
-		t.Fatalf("find downstream: %v", err)
-	}
-	if resolved == nil {
-		t.Fatal("expected downstream for shared-model")
-	}
-	if resolved.ID != d1.ID {
-		t.Fatalf("expected first-created downstream %s, got %s", d1.ID, resolved.ID)
+	// The choice must be stable, never flipping between calls.
+	for i := 0; i < 5; i++ {
+		resolved, err := s.FindDownstreamByOutputModel("shared-model")
+		if err != nil {
+			t.Fatalf("find downstream: %v", err)
+		}
+		if resolved == nil {
+			t.Fatal("expected downstream for shared-model")
+		}
+		if resolved.ID != expected.ID {
+			t.Fatalf("call %d: expected %s (earliest created_at, then id), got %s",
+				i, expected.ID, resolved.ID)
+		}
 	}
 }
 

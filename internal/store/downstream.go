@@ -90,9 +90,12 @@ func decodeAuthJSON(d *Downstream, authJSON string) {
 }
 
 // ListDownstreams returns all downstreams with their output model IDs.
+// Rows are ordered by created_at, then id: created_at has one-second
+// granularity, so providers created in the same second would otherwise come
+// back in an unspecified order.
 func (s *Store) ListDownstreams() ([]Downstream, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon, created_at FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon, created_at FROM downstreams ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list downstreams: %w", err)
 	}
@@ -454,7 +457,11 @@ func (s *Store) ListAllModels() ([]string, error) {
 // FindDownstreamByOutputModel returns the first downstream whose
 // output_model_ids contains the given model name. Returns nil, nil
 // when no downstream claims the model. If multiple downstreams claim
-// the same model, the one with the earliest created_at wins (deterministic).
+// the same model, the one with the earliest created_at wins.
+//
+// created_at has one-second granularity, so ties are broken by id to keep the
+// choice stable across restarts. ids are random, so a same-second tie is
+// resolved arbitrarily but deterministically — never by insertion order.
 func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 	var d Downstream
 	var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
@@ -464,7 +471,7 @@ func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 		 FROM downstreams d
 		 JOIN output_model_ids o ON o.downstream_id = d.id
 		 WHERE o.model_id = ? AND d.is_enabled = 1
-		 ORDER BY d.created_at ASC
+		 ORDER BY d.created_at ASC, d.id ASC
 		 LIMIT 1`, model).
 		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon, &d.CreatedAt)
 	if err != nil {

@@ -1665,6 +1665,9 @@ function refreshDownstreamDetail() {
                 refreshDownstreamDetail();
                 selectSidebarItem(id);
                 showToast('Added ' + modelId);
+                // After the add is committed: offer to disambiguate the model if
+                // another provider already lists it.
+                await ensureSharedModelAliasGroup(modelId, id);
             } catch (err) {
                 showToast('Add failed: ' + err.message);
             }
@@ -1878,6 +1881,9 @@ function showFetchModelsPopup(dsId, modelIds) {
                         renderDownstreamDetail(_currentDownstream);
                         selectSidebarItem(dsId);
                     }
+                    // Last, and inside this try: the add already succeeded, and
+                    // ensureSharedModelAliasGroup never throws.
+                    await ensureSharedModelAliasGroup(m, dsId);
                 } catch (err) {
                     setNotAddedUI();
                     showToast('Add failed: ' + err.message);
@@ -1901,6 +1907,85 @@ async function deleteDownstream(id) {
         loadDownstreams();
     } catch (err) {
         alert(err.message);
+    }
+}
+
+/**
+ * Offer to disambiguate a model ID that several providers list.
+ *
+ * When two providers claim the same model, which one answers depends on
+ * provider creation order (with same-second ties resolved arbitrarily), so the
+ * winner is not something the user chose. A non-regex alias group named after
+ * the model is resolved before the providers' own model claims, so its active
+ * option — visible and switchable in the Aliases tab — decides instead.
+ *
+ * Two prompts, because there are two ways to become ambiguous:
+ *   - No group yet: offer to create one listing every provider.
+ *   - Group exists but does not list a provider claiming the model: that
+ *     provider would be shadowed with no trace, so offer to add it as an
+ *     option. This is the common case when a provider starts offering a model
+ *     after the group was built.
+ *
+ * Called right after a model is added to a provider. It deliberately never
+ * throws: the model add has already succeeded by then, and the fetch-models
+ * popup's caller would otherwise undo its "Added" state over an unrelated
+ * failure. Failures here are a toast.
+ */
+async function ensureSharedModelAliasGroup(modelId, dsId) {
+    try {
+        // Cache-bust: the add just changed both lists, and a stale cached GET
+        // would report the model as unique (or miss a group made moments ago).
+        const bust = '?v=' + Date.now();
+        const downstreams = await api('/downstreams' + bust);
+        // Every provider that claims the model, not just the others: this
+        // provider may itself be the one missing from an existing group.
+        const claimants = (downstreams || []).filter(d =>
+            (d.output_model_ids || []).includes(modelId));
+        if (!claimants.some(d => d.id !== dsId)) return;
+
+        const byId = new Map(claimants.map(d => [d.id, d]));
+        const label = d => '"' + d.name + '"' + (d.is_enabled === false ? ' (disabled)' : '');
+
+        const groups = await api('/aliases' + bust);
+        const group = (groups || []).find(g => g.input_model_id === modelId);
+        // Regex groups are deliberate user structure; the server leaves them
+        // alone, so do not offer to edit one.
+        if (group && group.is_regex) return;
+
+        let message;
+        if (group) {
+            const listed = new Set((group.options || []).map(o => o.downstream_id));
+            const missing = claimants.filter(d => !listed.has(d.id));
+            if (missing.length === 0) return;
+            message =
+                missing.map(label).join(', ') + ' also provides "' + modelId + '",\n' +
+                'but the alias group "' + modelId + '" does not include it yet —\n' +
+                'so its copy of the model would never be used.\n\n' +
+                'Add it as an option to the group?\n' +
+                'The provider that answers today stays active; switch any time in the Aliases tab.';
+        } else {
+            const others = claimants.filter(d => d.id !== dsId);
+            message =
+                '"' + modelId + '" is also provided by ' + others.map(label).join(', ') + '.\n\n' +
+                'Create an alias group "' + modelId + '" so routing is explicit?\n' +
+                'The provider that answers today stays active; switch it any time in the Aliases tab.';
+        }
+        if (!confirm(message)) return;
+
+        const result = await api('/downstreams/' + encodeURIComponent(dsId) + '/models/alias-group', {
+            method: 'POST',
+            body: JSON.stringify({ model_id: modelId }),
+        });
+        if (!result) return;
+        if (result.status === 'created') {
+            loadAliasGroups();
+            showToast('Created alias group ' + modelId);
+        } else if (result.status === 'extended') {
+            loadAliasGroups();
+            showToast('Added to alias group ' + modelId);
+        }
+    } catch (err) {
+        showToast('Alias group not updated: ' + err.message);
     }
 }
 

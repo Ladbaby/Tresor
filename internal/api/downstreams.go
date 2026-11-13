@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"tresor/internal/config"
@@ -211,6 +212,11 @@ func (r *Router) handleDownstreamByID(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		r.handleDownstreamModels(w, req, id, "")
+	case subResource == "models" && modelID == "alias-group" && req.Method == http.MethodPost:
+		// POST /api/downstreams/{id}/models/alias-group (disambiguate a model
+		// that several providers list). Matched before the DELETE case below so
+		// a model literally named "alias-group" stays deletable.
+		r.handleEnsureModelAliasGroup(w, req, id)
 	case subResource == "models" && modelID != "":
 		// DELETE /api/downstreams/{id}/models/{model_id}
 		if req.Method != http.MethodDelete {
@@ -452,6 +458,48 @@ func (r *Router) handleDownstreamModels(w http.ResponseWriter, req *http.Request
 	maskDownstreamAPIKey(ds)
 	r.requestConfigWrite()
 	writeJSON(w, http.StatusOK, ds)
+}
+
+// handleEnsureModelAliasGroup handles POST
+// /api/downstreams/{id}/models/alias-group. It creates the alias group named
+// after a model that several providers list, with the provider that answers
+// today left active. Idempotent: a group that already exists is reported as
+// "covered" rather than duplicated.
+func (r *Router) handleEnsureModelAliasGroup(w http.ResponseWriter, req *http.Request, id string) {
+	ds, err := r.store.GetDownstream(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	var body struct {
+		ModelID string `json:"model_id"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.ModelID == "" {
+		writeError(w, http.StatusBadRequest, "model_id is required")
+		return
+	}
+	// The caller adds models one provider at a time; requiring the provider to
+	// actually list the model keeps a stale UI from disambiguating a model this
+	// provider never claimed.
+	if !slices.Contains(ds.OutputModelIDs, body.ModelID) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("provider %s does not list model %q", id, body.ModelID))
+		return
+	}
+
+	result, err := r.store.EnsureAliasGroupForModel(body.ModelID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if result.Status == store.EnsureCreated {
+		r.requestConfigWrite()
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // --- OAuth handlers ---
