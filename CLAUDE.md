@@ -127,11 +127,11 @@ The codebase follows a clean layered structure with three core concerns:
 
 1. Client sends request to Tresor gateway → `HandleProxy` reads body, extracts model
 2. **Proxy Auth** (if `proxy_api_keys` configured): validate `Authorization: Bearer` or `x-api-key` header, strip auth from forwarded request
-3. **Model Resolution** (the forwarding gate):
-   - Try active exact alias via `FindActiveAlias(model)` — first tries exact `input_model_id` match
-   - If no exact match, try active regex aliases (`is_regex: true`) — pattern-matched against the model name
-   - If no alias, try direct resolution via `FindDownstreamByOutputModel(model)` — matches against downstream `output_model_ids`
-   - If neither resolves a downstream → return 404 "unknown model"
+3. **Model Resolution** (`resolveModel` in `internal/engine/routing.go`, most specific first):
+   - **Tier 1** — non-regex alias: an exact `input_model_id` match. Load-balance/fallback groups pick among their options; a default-mode group routes to its active option. Wins over everything, so a named alias can deliberately shadow a provider's own model ID.
+   - **Tier 2** — direct resolution via `FindDownstreamByOutputModel(model)` against downstream `output_model_ids` (earliest `created_at`, then `id`)
+   - **Tier 3** — regex aliases: announced names first, then pattern matches (the catch-all fallback)
+   - If nothing resolves a downstream → return 404 "unknown model"
 4. **Rule Matching** (for pipeline transforms):
    - `FindMatchingRules(path, model, inputFormat, dsID, dsFormats)` queries SQLite for all matching enabled rules (priority: exact path+model > exact path > wildcard `*`)
    - Rules are filtered by format criteria: `match_format`, `match_downstream_format`, `match_downstreams`
@@ -196,6 +196,7 @@ Install/enable packages with `plugin install` / `plugin enable`; only one versio
 | DELETE | `/api/downstreams/{id}` | Delete downstream (removes from rule match_downstreams, deletes referencing aliases) |
 | POST | `/api/downstreams/{id}/models` | Add a model ID to downstream |
 | DELETE | `/api/downstreams/{id}/models/{model_id}` | Remove a model ID from downstream |
+| POST | `/api/downstreams/{id}/models/alias-group` | Disambiguate a model that 2+ downstreams list: creates or extends an alias group named after the model, one option per claiming provider, with the currently-answering provider left active. Idempotent — reports `created`, `extended`, `covered`, `single`, or `no-enabled`. |
 | POST | `/api/downstreams/{id}/fetch-models` | Auto-discover models from provider |
 | GET | `/api/plugins` | List enabled executable external plugins (native converters are internal-only) |
 | GET | `/api/plugin-packages` | List installed versions and availability |
