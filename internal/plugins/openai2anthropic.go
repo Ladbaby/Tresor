@@ -346,15 +346,19 @@ type anthropicContent struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 }
 
+type anthropicUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+}
+
 type anthropicResponse struct {
-	ID      string             `json:"id"`
-	Model   string             `json:"model"`
-	Content []anthropicContent `json:"content"`
-	Usage   struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
-	StopReason string `json:"stop_reason"`
+	ID         string           `json:"id"`
+	Model      string           `json:"model"`
+	Content    []anthropicContent `json:"content"`
+	Usage      anthropicUsage   `json:"usage"`
+	StopReason string           `json:"stop_reason"`
 }
 
 type openAIChatChoice struct {
@@ -364,9 +368,11 @@ type openAIChatChoice struct {
 }
 
 type openAIChatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                `json:"prompt_tokens"`
+	CompletionTokens        int                `json:"completion_tokens"`
+	TotalTokens             int                `json:"total_tokens"`
+	PromptTokensDetails     *openAITokenDetails `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *openAITokenDetails `json:"completion_tokens_details,omitempty"`
 }
 
 type openAIChatResponse struct {
@@ -434,10 +440,15 @@ func (t *OpenAI2Anthropic) transformJSONResponse(body []byte) ([]byte, error) {
 			},
 		},
 		Usage: openAIChatUsage{
-			PromptTokens:     anthropicResp.Usage.InputTokens,
+			PromptTokens: anthropicResp.Usage.InputTokens + anthropicResp.Usage.CacheReadInputTokens,
 			CompletionTokens: anthropicResp.Usage.OutputTokens,
-			TotalTokens:      anthropicResp.Usage.InputTokens + anthropicResp.Usage.OutputTokens,
+			TotalTokens:      anthropicResp.Usage.InputTokens + anthropicResp.Usage.CacheReadInputTokens + anthropicResp.Usage.OutputTokens,
 		},
+	}
+	if anthropicResp.Usage.CacheReadInputTokens > 0 {
+		openAIResp.Usage.PromptTokensDetails = &openAITokenDetails{
+			CachedTokens: intPtr(anthropicResp.Usage.CacheReadInputTokens),
+		}
 	}
 
 	return json.Marshal(openAIResp)
@@ -446,6 +457,10 @@ func (t *OpenAI2Anthropic) transformJSONResponse(body []byte) ([]byte, error) {
 func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, error) {
 	// Convert Anthropic SSE events to OpenAI chat completion chunks
 	var id, model string
+	// Anthropic splits token accounting across message_start (prompt) and
+	// message_delta (completion + stop_reason). Both are accumulated here and
+	// emitted on the terminal chunk; dropping them left clients with no usage.
+	var usage anthropicUsage
 	var out bytes.Buffer
 
 	parseAnthropicSSE(body, func(eventType string, data []byte) bool {
@@ -455,6 +470,7 @@ func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 				Message struct {
 					ID    string `json:"id"`
 					Model string `json:"model"`
+					Usage anthropicUsage `json:"usage"`
 				} `json:"message"`
 			}
 			if err := json.Unmarshal(data, &msg); err != nil {
@@ -462,6 +478,14 @@ func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 			}
 			id = msg.Message.ID
 			model = msg.Message.Model
+			// Anthropic reports the prompt size on message_start; carry it through
+			// rather than dropping it, so the client sees real token counts.
+			usage = anthropicUsage{
+				InputTokens:              msg.Message.Usage.InputTokens,
+				OutputTokens:             msg.Message.Usage.OutputTokens,
+				CacheReadInputTokens:     msg.Message.Usage.CacheReadInputTokens,
+				CacheCreationInputTokens: msg.Message.Usage.CacheCreationInputTokens,
+			}
 
 			// First chunk with role
 			chunk := openAIChunk{
@@ -576,9 +600,23 @@ func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 					StopReason   string `json:"stop_reason"`
 					StopSequence string `json:"stop_sequence"`
 				} `json:"delta"`
+				Usage anthropicUsage `json:"usage"`
 			}
 			if err := json.Unmarshal(data, &md); err != nil {
 				return false
+			}
+			// Anthropic reports the completion count (and may restate the prompt
+			// size) on message_delta. Accumulate it so the terminal chunk can
+			// carry real usage instead of nothing.
+			usage.OutputTokens = md.Usage.OutputTokens
+			if md.Usage.InputTokens > 0 {
+				usage.InputTokens = md.Usage.InputTokens
+			}
+			if md.Usage.CacheReadInputTokens > 0 {
+				usage.CacheReadInputTokens = md.Usage.CacheReadInputTokens
+			}
+			if md.Usage.CacheCreationInputTokens > 0 {
+				usage.CacheCreationInputTokens = md.Usage.CacheCreationInputTokens
 			}
 			finishReason := mapAnthropicStopReasonToOpenAIFinishReason(md.Delta.StopReason)
 			chunk := openAIChunk{
@@ -586,6 +624,8 @@ func (t *OpenAI2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 				Object:  "chat.completion.chunk",
 				Model:   model,
 				Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{}, FinishReason: &finishReason}},
+				Usage: anthropicUsageToOpenAI(usage.InputTokens, usage.OutputTokens,
+					usage.CacheReadInputTokens, usage.CacheCreationInputTokens),
 			}
 			writeSSEData(&out, chunk)
 
@@ -611,8 +651,9 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	case "message_start":
 		var msg struct {
 			Message struct {
-				ID    string `json:"id"`
-				Model string `json:"model"`
+				ID    string         `json:"id"`
+				Model string         `json:"model"`
+				Usage anthropicUsage `json:"usage"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(chunk.Data, &msg); err != nil {
@@ -620,6 +661,7 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		}
 		state.ID = msg.Message.ID
 		state.Model = msg.Message.Model
+		state.Usage = msg.Message.Usage
 
 		outChunk := openAIChunk{
 			ID:      state.ID,
@@ -748,9 +790,20 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				StopReason   string `json:"stop_reason"`
 				StopSequence string `json:"stop_sequence"`
 			} `json:"delta"`
+			Usage anthropicUsage `json:"usage"`
 		}
 		if err := json.Unmarshal(chunk.Data, &md); err != nil {
 			return chunk, nil
+		}
+		state.Usage.OutputTokens = md.Usage.OutputTokens
+		if md.Usage.InputTokens > 0 {
+			state.Usage.InputTokens = md.Usage.InputTokens
+		}
+		if md.Usage.CacheReadInputTokens > 0 {
+			state.Usage.CacheReadInputTokens = md.Usage.CacheReadInputTokens
+		}
+		if md.Usage.CacheCreationInputTokens > 0 {
+			state.Usage.CacheCreationInputTokens = md.Usage.CacheCreationInputTokens
 		}
 		finishReason := mapAnthropicStopReasonToOpenAIFinishReason(md.Delta.StopReason)
 		outChunk := openAIChunk{
@@ -758,6 +811,8 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			Object:  "chat.completion.chunk",
 			Model:   state.Model,
 			Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{}, FinishReason: &finishReason}},
+			Usage: anthropicUsageToOpenAI(state.Usage.InputTokens, state.Usage.OutputTokens,
+				state.Usage.CacheReadInputTokens, state.Usage.CacheCreationInputTokens),
 		}
 		data, _ := json.Marshal(outChunk)
 		return engine.SSEChunk{EventType: "", Data: data}, nil
@@ -782,6 +837,9 @@ func (t *OpenAI2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 type openai2anthropicStreamState struct {
 	ID    string
 	Model string
+	// Anthropic splits token accounting across message_start (prompt) and
+	// message_delta (completion), so both are accumulated across chunks.
+	Usage anthropicUsage
 }
 
 // openAIPartsToAnthropicBlocks translates an OpenAI multimodal content-parts

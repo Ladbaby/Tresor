@@ -507,19 +507,35 @@ func (t *Anthropic2Gemini) transformStreamingResponse(body []byte) ([]byte, erro
 
 		// Emit message_start once.
 		if out.Len() == 0 {
+			// message_start carries the prompt size. Gemini's promptTokenCount is
+			// available on the first chunk, so it is reported here rather than
+			// left at a placeholder zero that nothing ever fills.
+			var startUsage map[string]interface{}
+			if chunk.UsageMetadata != nil {
+				input, _, cacheRead := geminiUsageToAnthropic(chunk.UsageMetadata)
+				startUsage = map[string]interface{}{
+					"input_tokens":  input,
+					"output_tokens": 0,
+				}
+				if cacheRead > 0 {
+					startUsage["cache_read_input_tokens"] = cacheRead
+				}
+			} else {
+				startUsage = map[string]interface{}{
+					"input_tokens":  0,
+					"output_tokens": 0,
+				}
+			}
 			startData := map[string]interface{}{
 				"type": "message_start",
 				"message": map[string]interface{}{
-					"id":      id,
-					"type":    "message",
-					"role":    "assistant",
-					"model":   model,
-					"content": []map[string]interface{}{},
+					"id":          id,
+					"type":        "message",
+					"role":        "assistant",
+					"model":       model,
+					"content":     []map[string]interface{}{},
 					"stop_reason": nil,
-					"usage": map[string]interface{}{
-						"input_tokens":  0,
-						"output_tokens": 0,
-					},
+					"usage":       startUsage,
 				},
 			}
 			emit("message_start", startData)
@@ -626,8 +642,13 @@ func (t *Anthropic2Gemini) transformStreamingResponse(body []byte) ([]byte, erro
 			// usageMetadata.
 			usage := map[string]interface{}{"output_tokens": 0}
 			if chunk.UsageMetadata != nil {
+				input, output, cacheRead := geminiUsageToAnthropic(chunk.UsageMetadata)
 				usage = map[string]interface{}{
-					"output_tokens": chunk.UsageMetadata.CandidatesTokenCount,
+					"input_tokens":  input,
+					"output_tokens": output,
+				}
+				if cacheRead > 0 {
+					usage["cache_read_input_tokens"] = cacheRead
 				}
 			}
 			emit("message_delta", map[string]interface{}{
@@ -758,19 +779,35 @@ func (t *Anthropic2Gemini) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 	// First chunk: emit message_start.
 	if !state.started {
 		state.started = true
+		// message_start carries the prompt size. Gemini's promptTokenCount is
+		// available on the first chunk, so report it instead of a placeholder
+		// zero that nothing ever fills.
+		var startUsage map[string]interface{}
+		if resp.UsageMetadata != nil {
+			input, _, cacheRead := geminiUsageToAnthropic(resp.UsageMetadata)
+			startUsage = map[string]interface{}{
+				"input_tokens":  input,
+				"output_tokens": 0,
+			}
+			if cacheRead > 0 {
+				startUsage["cache_read_input_tokens"] = cacheRead
+			}
+		} else {
+			startUsage = map[string]interface{}{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			}
+		}
 		return engine.SSEChunk{EventType: "message_start", Data: mustMarshal(map[string]interface{}{
 			"type": "message_start",
 			"message": map[string]interface{}{
-				"id":      state.ID,
-				"type":    "message",
-				"role":    "assistant",
-				"model":   state.Model,
-				"content": []map[string]interface{}{},
+				"id":          state.ID,
+				"type":        "message",
+				"role":        "assistant",
+				"model":       state.Model,
+				"content":     []map[string]interface{}{},
 				"stop_reason": nil,
-				"usage": map[string]interface{}{
-					"input_tokens":  0,
-					"output_tokens": 0,
-				},
+				"usage":       startUsage,
 			},
 		})}, nil
 	}
@@ -884,8 +921,13 @@ func (t *Anthropic2Gemini) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 		// present object even when Gemini didn't send usageMetadata.
 		usage := map[string]interface{}{"output_tokens": 0}
 		if resp.UsageMetadata != nil {
+			input, output, cacheRead := geminiUsageToAnthropic(resp.UsageMetadata)
 			usage = map[string]interface{}{
-				"output_tokens": resp.UsageMetadata.CandidatesTokenCount,
+				"input_tokens":  input,
+				"output_tokens": output,
+			}
+			if cacheRead > 0 {
+				usage["cache_read_input_tokens"] = cacheRead
 			}
 		}
 		emit("message_delta", map[string]interface{}{

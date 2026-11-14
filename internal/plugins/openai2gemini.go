@@ -492,24 +492,41 @@ func (t *OpenAI2Gemini) transformJSONResponse(body []byte) ([]byte, error) {
 
 	if geminiResp.UsageMetadata != nil {
 		openAIResp.Usage = openAIChatUsage{
-			PromptTokens:     geminiResp.UsageMetadata.PromptTokenCount,
-			CompletionTokens: geminiResp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:      geminiResp.UsageMetadata.TotalTokenCount,
+			PromptTokens:        geminiResp.UsageMetadata.PromptTokenCount,
+			CompletionTokens:    geminiResp.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:         geminiResp.UsageMetadata.TotalTokenCount,
+			PromptTokensDetails: cachedDetails(geminiResp.UsageMetadata.CachedContentTokenCount),
 		}
 	}
 
 	return json.Marshal(openAIResp)
 }
 
+// cachedDetails builds a prompt_tokens_details block, or nil when the upstream
+// reported no cached tokens — so an absent count stays absent rather than
+// becoming a fake zero.
+func cachedDetails(cached int) *openAITokenDetails {
+	if cached <= 0 {
+		return nil
+	}
+	return &openAITokenDetails{CachedTokens: intPtr(cached)}
+}
+
 func (t *OpenAI2Gemini) transformStreamingResponse(body []byte) ([]byte, error) {
 	var out bytes.Buffer
 	var id, model string
 	var roleSent bool
+	// Gemini reports usageMetadata on its final chunk; remember it so the
+	// terminal OpenAI chunk can carry real token accounting.
+	var usage *geminiUsageMetadata
 
 	parseGeminiSSE(body, func(data []byte) bool {
 		var chunk geminiGenerateContentResponse
 		if err := json.Unmarshal(data, &chunk); err != nil {
 			return true
+		}
+		if chunk.UsageMetadata != nil {
+			usage = chunk.UsageMetadata
 		}
 		if id == "" && chunk.ModelVersion != "" {
 			id = "chatcmpl-" + chunk.ModelVersion
@@ -578,6 +595,10 @@ func (t *OpenAI2Gemini) transformStreamingResponse(body []byte) ([]byte, error) 
 				Object:  "chat.completion.chunk",
 				Model:   model,
 				Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{}, FinishReason: &finish}},
+				// Token accounting is attached to the terminal chunk. Gemini
+				// reports it as usageMetadata on its final chunk, which this
+				// loop previously parsed and then dropped.
+				Usage: geminiUsageToOpenAI(usage),
 			}
 			writeSSEData(&out, outChunk)
 			writeDoneMarker(&out)
@@ -646,6 +667,12 @@ func (t *OpenAI2Gemini) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.
 		state.Model = resp.ModelVersion
 	}
 
+	// Capture accounting before the candidates check: Gemini may report
+	// usageMetadata on a chunk that carries no candidates.
+	if resp.UsageMetadata != nil {
+		state.Usage = geminiUsageToOpenAI(resp.UsageMetadata)
+	}
+
 	if len(resp.Candidates) == 0 {
 		return engine.SSEChunk{}, nil
 	}
@@ -712,6 +739,9 @@ func (t *OpenAI2Gemini) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.
 			Object:  "chat.completion.chunk",
 			Model:   state.Model,
 			Choices: []openAIChunkChoice{{Index: 0, Delta: openAIDelta{}, FinishReason: &finish}},
+			// Gemini reports usageMetadata on its final chunk, so the terminal
+			// OpenAI chunk is where the real accounting belongs.
+			Usage: state.Usage,
 		}
 		data, _ := json.Marshal(outChunk)
 		return engine.SSEChunk{EventType: "", Data: data}, nil
@@ -725,6 +755,9 @@ type oai2geminiStreamState struct {
 	ID       string
 	Model    string
 	roleSent bool
+	// Usage is the token accounting carried from Gemini's usageMetadata, emitted
+	// on the terminal chunk.
+	Usage *openAIChunkUsage
 }
 
 // Interface compliance.

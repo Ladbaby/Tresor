@@ -408,7 +408,11 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
     var out bytes.Buffer
     inContentBlock := false
     messageStarted := false
-    outputTextLen := 0 // accumulated output text length (for usage estimate)
+    // Token accounting is taken from the upstream's usage block. It is never
+    // estimated from the text length: a fabricated number is indistinguishable
+    // from a real one downstream and silently corrupts billing displays, whereas
+    // an absent or zero value is visibly absent.
+    var upstreamUsage *openAIChunkUsage
     // Track whether a thinking block is currently open. Reasoning models
     // (OpenAI o1/o3, DeepSeek-R1, etc.) emit `reasoning_content` alongside
     // `content`; we surface that as a thinking content block on the wire
@@ -447,6 +451,12 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
             return false
         }
 
+        // Capture usage before anything else: it may arrive on a chunk with no
+        // choices at all (OpenAI include_usage) or on the finish_reason chunk.
+        if chunk.Usage != nil {
+            upstreamUsage = chunk.Usage
+        }
+
         if !messageStarted {
             id = chunk.ID
             model = mapModel(chunk.Model)
@@ -467,6 +477,9 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
             }
             msg.Message.ID = id
             msg.Message.Model = model
+            if input, _, _ := openAIUsageToAnthropic(upstreamUsage); input > 0 {
+                msg.Message.Usage.InputTokens = input
+            }
             writeAnthropicSSE(&out, "message_start", msg)
         }
 
@@ -530,7 +543,6 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
                 }
                 msg.ContentBlock.Type = "text"
                 msg.ContentBlock.Text = choice.Delta.Content
-                outputTextLen += len(choice.Delta.Content)
                 writeAnthropicSSE(&out, "content_block_start", msg)
                 inContentBlock = true
             } else if choice.Delta.Content != "" {
@@ -562,7 +574,6 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
                 }{Type: "content_block_delta", Index: contentBlockIdx}
                 delta.Delta.Type = "text_delta"
                 delta.Delta.Text = choice.Delta.Content
-                outputTextLen += len(choice.Delta.Content)
                 writeAnthropicSSE(&out, "content_block_delta", delta)
             }
 
@@ -582,10 +593,7 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
                     }{Type: "content_block_stop", Index: contentBlockIdx})
                     inContentBlock = false
                 }
-                outputTokens := outputTextLen / 4
-                if outputTokens < 1 {
-                    outputTokens = 1
-                }
+                _, outputTokens, cacheReadTokens := openAIUsageToAnthropic(upstreamUsage)
                 msgDelta := struct {
                     Type  string `json:"type"`
                     Delta struct {
@@ -593,12 +601,15 @@ func (t *Anthropic2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
                         StopSequence string `json:"stop_sequence"`
                     } `json:"delta"`
                     Usage struct {
-                        OutputTokens int `json:"output_tokens"`
+                        InputTokens          int `json:"input_tokens,omitempty"`
+                        OutputTokens         int `json:"output_tokens"`
+                        CacheReadInputTokens int `json:"cache_read_input_tokens,omitempty"`
                     } `json:"usage"`
                 }{
                     Type: "message_delta",
                 }
                 msgDelta.Usage.OutputTokens = outputTokens
+                msgDelta.Usage.CacheReadInputTokens = cacheReadTokens
                 msgDelta.Delta.StopReason = stopReason
                 writeAnthropicSSE(&out, "message_delta", msgDelta)
                 writeAnthropicSSE(&out, "message_stop", struct{ Type string `json:"type"` }{Type: "message_stop"})
@@ -659,16 +670,23 @@ func (t *Anthropic2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
         stopReason = "max_tokens"
     }
 
+    // Anthropic's input_tokens counts only fresh prompt tokens, so the OpenAI
+    // prompt total (which includes cache hits) is split back into fresh input
+    // plus cache_read_input_tokens.
+    freshInput, _, cacheRead := openAIUsageToAnthropic(&openAIChunkUsage{
+        PromptTokens:        openAIResp.Usage.PromptTokens,
+        CompletionTokens:    openAIResp.Usage.CompletionTokens,
+        TotalTokens:         openAIResp.Usage.TotalTokens,
+        PromptTokensDetails: openAIResp.Usage.PromptTokensDetails,
+    })
     anthropicResp := anthropicResponse{
         ID:      openAIResp.ID,
         Model:   mapModel(openAIResp.Model),
         Content: content,
-        Usage: struct {
-            InputTokens  int `json:"input_tokens"`
-            OutputTokens int `json:"output_tokens"`
-        }{
-            InputTokens:  openAIResp.Usage.PromptTokens,
-            OutputTokens: openAIResp.Usage.CompletionTokens,
+        Usage: anthropicUsage{
+            InputTokens:          freshInput,
+            OutputTokens:         openAIResp.Usage.CompletionTokens,
+            CacheReadInputTokens: cacheRead,
         },
         StopReason: stopReason,
     }
@@ -694,10 +712,7 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
             writeAnthropicSSE(&out, "message_stop", struct{ Type string `json:"type"` }{Type: "message_stop"})
         } else {
             // No finish reason seen (some non-OpenAI servers omit it) — emit message_delta + message_stop.
-            outputTokens := state.outputTokens
-            if outputTokens < 1 {
-                outputTokens = 1
-            }
+            _, outputTokens, cacheReadTokens := openAIUsageToAnthropic(state.usage)
             msgDelta := struct {
                 Type  string `json:"type"`
                 Delta struct {
@@ -705,10 +720,13 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
                     StopSequence string `json:"stop_sequence"`
                 } `json:"delta"`
                 Usage struct {
-                    OutputTokens int `json:"output_tokens"`
+                    InputTokens          int `json:"input_tokens,omitempty"`
+                    OutputTokens         int `json:"output_tokens"`
+                    CacheReadInputTokens int `json:"cache_read_input_tokens,omitempty"`
                 } `json:"usage"`
             }{Type: "message_delta"}
             msgDelta.Usage.OutputTokens = outputTokens
+            msgDelta.Usage.CacheReadInputTokens = cacheReadTokens
             msgDelta.Delta.StopReason = "end_turn"
             writeAnthropicSSE(&out, "message_delta", msgDelta)
             writeAnthropicSSE(&out, "message_stop", struct{ Type string `json:"type"` }{Type: "message_stop"})
@@ -721,6 +739,12 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
     if err := json.Unmarshal(chunk.Data, &oaiChunk); err != nil {
         // Not valid JSON — pass through unchanged
         return chunk, nil
+    }
+
+    // Capture usage before anything else: it may arrive on a chunk with no
+    // choices at all (OpenAI include_usage) or on the finish_reason chunk.
+    if oaiChunk.Usage != nil {
+        state.usage = oaiChunk.Usage
     }
 
     // First chunk: emit message_start
@@ -745,6 +769,9 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
         }{Type: "message_start"}
         msg.Message.ID = state.ID
         msg.Message.Model = state.Model
+        if input, _, _ := openAIUsageToAnthropic(state.usage); input > 0 {
+            msg.Message.Usage.InputTokens = input
+        }
         writeAnthropicSSE(&out, "message_start", msg)
     }
 
@@ -808,7 +835,6 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
             }{Type: "content_block_start", Index: state.contentBlockIdx}
             msg.ContentBlock.Type = "text"
             msg.ContentBlock.Text = choice.Delta.Content
-            state.outputTokens += len(choice.Delta.Content)
             writeAnthropicSSE(&out, "content_block_start", msg)
             state.inContentBlock = true
         } else if choice.Delta.Content != "" {
@@ -859,7 +885,6 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
             }{Type: "content_block_delta", Index: state.contentBlockIdx}
             delta.Delta.Type = "text_delta"
             delta.Delta.Text = choice.Delta.Content
-            state.outputTokens += len(choice.Delta.Content)
             writeAnthropicSSE(&out, "content_block_delta", delta)
         }
 
@@ -983,10 +1008,7 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
             }
             state.toolCallAcc = nil
 
-            outputTokens := state.outputTokens / 4
-            if outputTokens < 1 {
-                outputTokens = 1
-            }
+            _, outputTokens, cacheReadTokens := openAIUsageToAnthropic(state.usage)
             msgDelta := struct {
                 Type  string `json:"type"`
                 Delta struct {
@@ -994,10 +1016,13 @@ func (t *Anthropic2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
                     StopSequence string `json:"stop_sequence"`
                 } `json:"delta"`
                 Usage struct {
-                    OutputTokens int `json:"output_tokens"`
+                    InputTokens          int `json:"input_tokens,omitempty"`
+                    OutputTokens         int `json:"output_tokens"`
+                    CacheReadInputTokens int `json:"cache_read_input_tokens,omitempty"`
                 } `json:"usage"`
             }{Type: "message_delta"}
             msgDelta.Usage.OutputTokens = outputTokens
+            msgDelta.Usage.CacheReadInputTokens = cacheReadTokens
             msgDelta.Delta.StopReason = stopReason
             writeAnthropicSSE(&out, "message_delta", msgDelta)
             state.messageDeltaSent = true
@@ -1023,7 +1048,11 @@ type anthropic2openaiStreamState struct {
     inContentBlock   bool
     inThinkingBlock  bool
     messageDeltaSent bool
-    outputTokens     int // accumulated output text (rough estimate for usage)
+
+    // usage is the upstream's token accounting, taken verbatim. It is never
+    // estimated from the text length — a fabricated number looks real to every
+    // downstream consumer and silently corrupts billing displays.
+    usage *openAIChunkUsage
 
     // Tool call tracking across chunks
     contentBlockIdx int                    // sequential content block index across the message

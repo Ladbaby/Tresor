@@ -252,7 +252,21 @@ rules:
 
 const streamPort = 9200
 
+// mockChatUsagePromptTokens and mockChatUsageCompletionTokens are the token
+// counts the mock upstream reports. Tests assert the gateway forwards these
+// rather than emitting zeros.
+const (
+	mockChatUsagePromptTokens     = 36
+	mockChatUsageCompletionTokens = 12
+	mockChatUsageCachedTokens     = 10
+	mockChatCreated               = 1794579718
+	mockChatPredictedPerSecond    = 30.1
+)
+
 // mockChatSSE writes an OpenAI-format streaming response with the given words.
+// The final chunk carries a usage block and a llama.cpp/vLLM-style timings
+// block, mirroring what real upstreams send so the e2e suite can detect
+// converters that drop or zero out metadata.
 func mockChatSSE(w http.ResponseWriter, words []string, model, respID string) {
 	flusher := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -267,6 +281,7 @@ func mockChatSSE(w http.ResponseWriter, words []string, model, respID string) {
 		chunk := map[string]interface{}{
 			"id":      respID,
 			"object":  "chat.completion.chunk",
+			"created": mockChatCreated,
 			"model":   model,
 			"choices": []map[string]interface{}{{"index": 0, "delta": delta}},
 		}
@@ -277,8 +292,22 @@ func mockChatSSE(w http.ResponseWriter, words []string, model, respID string) {
 	finish := map[string]interface{}{
 		"id":      respID,
 		"object":  "chat.completion.chunk",
+		"created": mockChatCreated,
 		"model":   model,
 		"choices": []map[string]interface{}{{"index": 0, "delta": map[string]string{}, "finish_reason": "stop"}},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     mockChatUsagePromptTokens,
+			"completion_tokens": mockChatUsageCompletionTokens,
+			"total_tokens":      mockChatUsagePromptTokens + mockChatUsageCompletionTokens,
+			"prompt_tokens_details": map[string]interface{}{
+				"cached_tokens": mockChatUsageCachedTokens,
+			},
+		},
+		"timings": map[string]interface{}{
+			"prompt_n":             mockChatUsagePromptTokens,
+			"predicted_n":          mockChatUsageCompletionTokens,
+			"predicted_per_second": mockChatPredictedPerSecond,
+		},
 	}
 	writeMockSSE(w, finish)
 	flusher.Flush()
@@ -515,6 +544,87 @@ downstreams:
 		if count != 1 {
 			t.Errorf("Expected exactly 1 %q event, got %d (duplicate termination bug)", et, count)
 		}
+	}
+
+	// Response metadata must survive the Chat Completions -> Responses hop. The
+	// converter used to hardcode zero usage and omit model/created_at, so a
+	// client could not tell how many tokens were spent or which model answered.
+	created := findEvent(typed, "response.created")
+	if created == nil {
+		t.Fatal("response.created missing")
+	}
+	var createdPayload struct {
+		Response struct {
+			Model     string `json:"model"`
+			CreatedAt int64  `json:"created_at"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(created.Data), &createdPayload); err != nil {
+		t.Fatalf("response.created is not valid JSON: %v", err)
+	}
+	if createdPayload.Response.Model == "" {
+		t.Error("response.created has no model — the upstream model name was dropped")
+	}
+	if createdPayload.Response.CreatedAt == 0 {
+		t.Error("response.created has no created_at — strict Responses SDKs reject this")
+	}
+
+	completed := findEvent(typed, "response.completed")
+	if completed == nil {
+		t.Fatal("response.completed missing")
+	}
+	var payload struct {
+		Response struct {
+			Model     string `json:"model"`
+			CreatedAt int64  `json:"created_at"`
+			Usage     struct {
+				InputTokens        int64 `json:"input_tokens"`
+				OutputTokens       int64 `json:"output_tokens"`
+				TotalTokens        int64 `json:"total_tokens"`
+				InputTokensDetails struct {
+					CachedTokens int64 `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
+			} `json:"usage"`
+			Timings map[string]interface{} `json:"timings"`
+			Output  []interface{}          `json:"output"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(completed.Data), &payload); err != nil {
+		t.Fatalf("response.completed is not valid JSON: %v", err)
+	}
+
+	if payload.Response.Usage.InputTokens != mockChatUsagePromptTokens {
+		t.Errorf("usage.input_tokens = %d, want %d (hardcoded-zero regression)",
+			payload.Response.Usage.InputTokens, mockChatUsagePromptTokens)
+	}
+	if payload.Response.Usage.OutputTokens != mockChatUsageCompletionTokens {
+		t.Errorf("usage.output_tokens = %d, want %d (hardcoded-zero regression)",
+			payload.Response.Usage.OutputTokens, mockChatUsageCompletionTokens)
+	}
+	if payload.Response.Usage.TotalTokens != mockChatUsagePromptTokens+mockChatUsageCompletionTokens {
+		t.Errorf("usage.total_tokens = %d, want %d",
+			payload.Response.Usage.TotalTokens, mockChatUsagePromptTokens+mockChatUsageCompletionTokens)
+	}
+	if payload.Response.Usage.InputTokensDetails.CachedTokens != mockChatUsageCachedTokens {
+		t.Errorf("usage.input_tokens_details.cached_tokens = %d, want %d",
+			payload.Response.Usage.InputTokensDetails.CachedTokens, mockChatUsageCachedTokens)
+	}
+	if payload.Response.Model == "" {
+		t.Error("response.completed has no model")
+	}
+	if payload.Response.CreatedAt == 0 {
+		t.Error("response.completed has no created_at")
+	}
+	// Decode speed has no equivalent in any of the four wire formats, so it is
+	// forwarded verbatim rather than dropped.
+	if payload.Response.Timings == nil {
+		t.Error("timings not forwarded — upstream decode speed was dropped")
+	} else if got := payload.Response.Timings["predicted_per_second"]; got != mockChatPredictedPerSecond {
+		t.Errorf("timings.predicted_per_second = %v, want %v", got, mockChatPredictedPerSecond)
+	}
+	// The replayed output array is what the SDK builds the final response from.
+	if len(payload.Response.Output) == 0 {
+		t.Error("response.completed has an empty output array")
 	}
 }
 

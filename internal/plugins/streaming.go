@@ -54,11 +54,53 @@ func (c flexibleContent) MarshalJSON() ([]byte, error) {
 }
 
 // openAIChunk represents an OpenAI chat completion streaming chunk.
+//
+// It is used both as a parser (responses2openai, anthropic2openai,
+// gemini2openai read upstream chunks through it) and as an encoder
+// (openai2anthropic, openai2gemini build outgoing chunks from it). Every field
+// beyond the original four is a pointer or `omitempty` so that encoder output is
+// byte-identical when the field is unset.
 type openAIChunk struct {
 	ID      string             `json:"id"`
 	Object  string             `json:"object"`
 	Model   string             `json:"model"`
+	Created int64              `json:"created,omitempty"`
 	Choices []openAIChunkChoice `json:"choices"`
+
+	// SystemFingerprint and ServiceTier are upstream response metadata that the
+	// Chat Completions spec allows on chunks. They are carried through instead of
+	// being dropped so a converted response keeps the upstream's identity.
+	SystemFingerprint string `json:"system_fingerprint,omitempty"`
+	ServiceTier       string `json:"service_tier,omitempty"`
+
+	// Usage is the token accounting block. Upstreams send it either on the
+	// finish_reason chunk (llama.cpp, vLLM) or on a trailing chunk with empty
+	// choices (OpenAI's include_usage mode), so parsers must look at every chunk.
+	Usage *openAIChunkUsage `json:"usage,omitempty"`
+
+	// Timings is not part of any OpenAI spec. llama.cpp and vLLM attach it next
+	// to usage to report decode throughput (predicted_per_second, draft_n, ...).
+	// It is passed through verbatim for clients that want the number; deleting
+	// this field reverts to dropping it.
+	Timings map[string]any `json:"timings,omitempty"`
+}
+
+// openAIChunkUsage is the Chat Completions token accounting block. The Details
+// sub-objects are pointers so "upstream did not report it" stays distinguishable
+// from "upstream reported zero" — absent data must not become a fake zero.
+type openAIChunkUsage struct {
+	PromptTokens            int                `json:"prompt_tokens"`
+	CompletionTokens        int                `json:"completion_tokens"`
+	TotalTokens             int                `json:"total_tokens"`
+	PromptTokensDetails     *openAITokenDetails `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *openAITokenDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// openAITokenDetails carries the nested detail counters that some upstreams
+// report alongside the top-level token counts.
+type openAITokenDetails struct {
+	CachedTokens    *int `json:"cached_tokens,omitempty"`
+	ReasoningTokens *int `json:"reasoning_tokens,omitempty"`
 }
 
 // openAIChunkChoice represents one streaming choice.

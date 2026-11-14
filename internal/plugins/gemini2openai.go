@@ -499,11 +499,12 @@ func (t *Gemini2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 	}
 
 	if oaiResp.Usage.TotalTokens > 0 {
-		geminiResp.UsageMetadata = &geminiUsageMetadata{
-			PromptTokenCount:     oaiResp.Usage.PromptTokens,
-			CandidatesTokenCount: oaiResp.Usage.CompletionTokens,
-			TotalTokenCount:      oaiResp.Usage.TotalTokens,
-		}
+		geminiResp.UsageMetadata = openAIUsageToGemini(&openAIChunkUsage{
+			PromptTokens:        oaiResp.Usage.PromptTokens,
+			CompletionTokens:    oaiResp.Usage.CompletionTokens,
+			TotalTokens:         oaiResp.Usage.TotalTokens,
+			PromptTokensDetails: oaiResp.Usage.PromptTokensDetails,
+		})
 	}
 
 	return json.Marshal(geminiResp)
@@ -512,10 +513,21 @@ func (t *Gemini2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 func (t *Gemini2OpenAI) transformStreamingResponse(body []byte) ([]byte, error) {
 	var out bytes.Buffer
 
+	// Usage may arrive on the finish_reason chunk or on a trailing chunk with
+	// empty choices (OpenAI include_usage). Gemini clients read it from
+	// usageMetadata on the final chunk, so it is accumulated here and attached
+	// to the chunk that carries finishReason.
+	var usage *openAIChunkUsage
+
 	parseOpenAISSE(body, func(data []byte) bool {
 		var chunk openAIChunk
 		if err := json.Unmarshal(data, &chunk); err != nil {
 			return true
+		}
+		// Capture usage before the choices check: a usage-only chunk has no
+		// choices and would otherwise be discarded.
+		if chunk.Usage != nil {
+			usage = chunk.Usage
 		}
 		if len(chunk.Choices) == 0 {
 			return true
@@ -556,6 +568,9 @@ func (t *Gemini2OpenAI) transformStreamingResponse(body []byte) ([]byte, error) 
 		}
 		if choice.FinishReason != nil {
 			resp.Candidates[0].FinishReason = mapOpenAIFinishReasonToGemini(*choice.FinishReason)
+			// Attach accounting to the terminal chunk, where Gemini clients look
+			// for it.
+			resp.UsageMetadata = openAIUsageToGemini(usage)
 		}
 		writeSSEData(&out, resp)
 		return true
@@ -580,6 +595,14 @@ func mapOpenAIFinishReasonToGemini(r string) string {
 	}
 }
 
+// g2oStreamState tracks state across SSE chunks for one stream session.
+type g2oStreamState struct {
+	// Usage is the upstream's token accounting. It may be reported on the
+	// finish_reason chunk or on a trailing chunk with empty choices, so it is
+	// remembered and attached to the terminal Gemini chunk.
+	Usage *openAIChunkUsage
+}
+
 // TransformStreamChunk converts a single OpenAI SSE chunk into a Gemini
 // SSE chunk (one JSON object per data: line).
 func (t *Gemini2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.PipelineContext) (engine.SSEChunk, error) {
@@ -595,6 +618,18 @@ func (t *Gemini2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.
 	var oaiChunk openAIChunk
 	if err := json.Unmarshal(chunk.Data, &oaiChunk); err != nil {
 		return chunk, nil
+	}
+
+	state := &g2oStreamState{}
+	if existing, ok := ctx.Variables["g2o_stream"]; ok {
+		state = existing.(*g2oStreamState)
+	}
+	defer func() { ctx.Variables["g2o_stream"] = state }()
+
+	// Capture usage before the choices check: a usage-only chunk has no choices
+	// and would otherwise be discarded without ever being inspected.
+	if oaiChunk.Usage != nil {
+		state.Usage = oaiChunk.Usage
 	}
 	if len(oaiChunk.Choices) == 0 {
 		return engine.SSEChunk{}, nil
@@ -633,6 +668,9 @@ func (t *Gemini2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engine.
 	}
 	if choice.FinishReason != nil {
 		resp.Candidates[0].FinishReason = mapOpenAIFinishReasonToGemini(*choice.FinishReason)
+		// Attach accounting to the terminal chunk, where Gemini clients look for
+		// it.
+		resp.UsageMetadata = openAIUsageToGemini(state.Usage)
 	}
 	data, _ := json.Marshal(resp)
 	return engine.SSEChunk{EventType: "", Data: data}, nil

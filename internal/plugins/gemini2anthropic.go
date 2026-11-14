@@ -419,8 +419,15 @@ func (t *Gemini2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 				Delta struct {
 					StopReason string `json:"stop_reason"`
 				} `json:"delta"`
+				Usage anthropicUsage `json:"usage"`
 			}
 			if err := json.Unmarshal(data, &d); err == nil {
+				// Anthropic reports the completion count (and may restate the
+				// prompt size) on message_delta. Carry it through as
+				// usageMetadata on the terminal Gemini chunk instead of dropping
+				// it, so Gemini clients see real token accounting.
+				usage := anthropicUsageToOpenAI(d.Usage.InputTokens, d.Usage.OutputTokens,
+					d.Usage.CacheReadInputTokens, d.Usage.CacheCreationInputTokens)
 				if d.Delta.StopReason != "" {
 					writeSSEData(&out, geminiGenerateContentResponse{
 						ModelVersion: model,
@@ -429,6 +436,7 @@ func (t *Gemini2Anthropic) transformStreamingResponse(body []byte) ([]byte, erro
 							FinishReason: mapAnthropicFinishReasonToGemini(d.Delta.StopReason),
 							Index:        0,
 						}},
+						UsageMetadata: openAIUsageToGemini(usage),
 					})
 				}
 			}
@@ -508,14 +516,20 @@ func (t *Gemini2Anthropic) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			Delta struct {
 				StopReason string `json:"stop_reason"`
 			} `json:"delta"`
+			Usage anthropicUsage `json:"usage"`
 		}
 		if err := json.Unmarshal(chunk.Data, &d); err == nil && d.Delta.StopReason != "" {
+			// Carry Anthropic's accounting through as usageMetadata on the
+			// terminal Gemini chunk instead of dropping it.
+			usage := anthropicUsageToOpenAI(d.Usage.InputTokens, d.Usage.OutputTokens,
+				d.Usage.CacheReadInputTokens, d.Usage.CacheCreationInputTokens)
 			resp := geminiGenerateContentResponse{
 				Candidates: []geminiCandidate{{
 					Content:      geminiContent{Role: "model"},
 					FinishReason: mapAnthropicFinishReasonToGemini(d.Delta.StopReason),
 					Index:        0,
 				}},
+				UsageMetadata: openAIUsageToGemini(usage),
 			}
 			data, _ := json.Marshal(resp)
 			return engine.SSEChunk{EventType: "", Data: data}, nil

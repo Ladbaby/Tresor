@@ -142,17 +142,24 @@ type chatCompletionChoice struct {
 }
 
 type chatCompletionUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                `json:"prompt_tokens"`
+	CompletionTokens        int                `json:"completion_tokens"`
+	TotalTokens             int                `json:"total_tokens"`
+	PromptTokensDetails     *openAITokenDetails `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *openAITokenDetails `json:"completion_tokens_details,omitempty"`
 }
 
 type chatCompletionResponse struct {
 	ID      string                 `json:"id"`
 	Object  string                 `json:"object"`
 	Model   string                 `json:"model"`
+	Created int64                  `json:"created,omitempty"`
 	Choices []chatCompletionChoice `json:"choices"`
 	Usage   *chatCompletionUsage   `json:"usage,omitempty"`
+
+	SystemFingerprint string         `json:"system_fingerprint,omitempty"`
+	ServiceTier       string         `json:"service_tier,omitempty"`
+	Timings           map[string]any `json:"timings,omitempty"`
 }
 
 // PluginName returns the stable type name for deduplication.
@@ -703,15 +710,17 @@ func (t *Responses2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 	final = append(final, output...)
 	output = final
 
-	usage := map[string]any{
-		"input_tokens":  0,
-		"output_tokens": 0,
-		"total_tokens":  0,
-	}
+	// Usage is translated rather than zeroed: the upstream's token accounting is
+	// the only source for it, and clients bill and display from this object.
+	var usage *openAIChunkUsage
 	if oaiResp.Usage != nil {
-		usage["input_tokens"] = oaiResp.Usage.PromptTokens
-		usage["output_tokens"] = oaiResp.Usage.CompletionTokens
-		usage["total_tokens"] = oaiResp.Usage.TotalTokens
+		usage = &openAIChunkUsage{
+			PromptTokens:            oaiResp.Usage.PromptTokens,
+			CompletionTokens:        oaiResp.Usage.CompletionTokens,
+			TotalTokens:             oaiResp.Usage.TotalTokens,
+			PromptTokensDetails:     oaiResp.Usage.PromptTokensDetails,
+			CompletionTokensDetails: oaiResp.Usage.CompletionTokensDetails,
+		}
 	}
 
 	out := map[string]any{
@@ -720,7 +729,24 @@ func (t *Responses2OpenAI) transformJSONResponse(body []byte) ([]byte, error) {
 		"status": "completed",
 		"model":  oaiResp.Model,
 		"output": output,
-		"usage":  usage,
+		"usage":  openAIUsageToResponses(usage),
+	}
+	// Preserve the upstream's response identity and timing metadata. created_at
+	// is part of the Responses API response object; without it strict SDKs cannot
+	// build a synthetic initial response.
+	if oaiResp.Created != 0 {
+		out["created_at"] = oaiResp.Created
+	}
+	if oaiResp.SystemFingerprint != "" {
+		out["system_fingerprint"] = oaiResp.SystemFingerprint
+	}
+	if oaiResp.ServiceTier != "" {
+		out["service_tier"] = oaiResp.ServiceTier
+	}
+	// Non-standard llama.cpp/vLLM decode throughput. No four-format spec field can
+	// carry it, so it rides along verbatim; delete this block to stop forwarding.
+	if oaiResp.Timings != nil {
+		out["timings"] = oaiResp.Timings
 	}
 
 	return json.Marshal(out)
@@ -764,6 +790,20 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 	// history on the next turn, and silently hangs after the first reply.
 	finalItems := make(map[int]map[string]any)
 
+	// Upstream response identity and accounting. These are accumulated as the
+	// stream is parsed and replayed into response.created / response.completed;
+	// without them the client sees no model name, no created_at, and zero usage.
+	// Usage may arrive on the finish_reason chunk (llama.cpp, vLLM) or on a
+	// trailing chunk with empty choices (OpenAI include_usage), so the last
+	// non-nil value wins and the final event is emitted after the whole body has
+	// been parsed.
+	var model string
+	var createdAt int64
+	var systemFingerprint, serviceTier string
+	var usage *openAIChunkUsage
+	var timings map[string]any
+	var finishSeen bool
+
 	parseOpenAISSE(body, func(data []byte) bool {
 		if string(bytes.TrimSpace(data)) == "[DONE]" {
 			return false
@@ -774,25 +814,40 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 			return true
 		}
 
+		// Capture identity/accounting before the choices loop: a usage-only chunk
+		// carries no choices and would otherwise never be inspected.
+		if model == "" {
+			model = chunk.Model
+		}
+		if createdAt == 0 {
+			createdAt = chunk.Created
+		}
+		if systemFingerprint == "" {
+			systemFingerprint = chunk.SystemFingerprint
+		}
+		if serviceTier == "" {
+			serviceTier = chunk.ServiceTier
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		if chunk.Timings != nil {
+			timings = chunk.Timings
+		}
+
 		if !messageStarted {
 			id = chunk.ID
 			reasoningID = id + "_reasoning_0"
 			messageStarted = true
 
 			writeResponsesSSE(&out, "response.created", map[string]any{
-				"type": "response.created",
-				"response": map[string]any{
-					"id":     id,
-					"status": "in_progress",
-				},
+				"type":     "response.created",
+				"response": responsesLifecycleResponse(id, createdAt, model),
 			})
 
 			writeResponsesSSE(&out, "response.in_progress", map[string]any{
-				"type": "response.in_progress",
-				"response": map[string]any{
-					"id":     id,
-					"status": "in_progress",
-				},
+				"type":     "response.in_progress",
+				"response": responsesLifecycleResponse(id, createdAt, model),
 			})
 		}
 
@@ -1092,37 +1147,83 @@ func (t *Responses2OpenAI) transformStreamingResponse(body []byte) ([]byte, erro
 					finalItems[messageOutputIdx] = msgItem
 				}
 
-				// Replay the final `output` array (in output_index order) into
-				// response.completed so the OpenAI Responses SDK can build a
-				// non-empty ParsedResponse. Without this, the SDK returns
-				// an empty response — Codex drops the assistant turn, fails
-				// to reconstruct conversation history on the next turn, and
-				// silently hangs after the first reply.
-				output := make([]map[string]any, 0, len(finalItems))
-				for i := 0; i < nextOutputIdx; i++ {
-					if item, ok := finalItems[i]; ok {
-						output = append(output, item)
-					}
-				}
-
-				writeResponsesSSE(&out, "response.completed", map[string]any{
-					"type": "response.completed",
-					"response": map[string]any{
-						"id":     id,
-						"status": "completed",
-						"output": output,
-						"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-					},
-				})
+				// The terminal event itself is emitted after the whole body has
+				// been parsed (see below) so that a trailing include_usage chunk
+				// can still contribute token accounting.
+				finishSeen = true
 			}
 		}
 		return true
 	})
 
+	// Replay the final `output` array (in output_index order) into
+	// response.completed so the OpenAI Responses SDK can build a non-empty
+	// ParsedResponse. Without this, the SDK returns an empty response — Codex
+	// drops the assistant turn, fails to reconstruct conversation history on the
+	// next turn, and silently hangs after the first reply.
+	if finishSeen {
+		output := make([]map[string]any, 0, len(finalItems))
+		for i := 0; i < nextOutputIdx; i++ {
+			if item, ok := finalItems[i]; ok {
+				output = append(output, item)
+			}
+		}
+
+		completed := map[string]any{
+			"id":     id,
+			"status": "completed",
+			"output": output,
+			"usage":  openAIUsageToResponses(usage),
+		}
+		if createdAt != 0 {
+			completed["created_at"] = createdAt
+		}
+		if model != "" {
+			completed["model"] = model
+		}
+		if systemFingerprint != "" {
+			completed["system_fingerprint"] = systemFingerprint
+		}
+		if serviceTier != "" {
+			completed["service_tier"] = serviceTier
+		}
+		// Non-standard llama.cpp/vLLM decode throughput, forwarded verbatim.
+		// Delete this block to stop forwarding it.
+		if timings != nil {
+			completed["timings"] = timings
+		}
+
+		writeResponsesSSE(&out, "response.completed", map[string]any{
+			"type":     "response.completed",
+			"response": completed,
+		})
+	}
+
 	return out.Bytes(), nil
 }
 
 // --- StreamResponseTransformer: per-chunk Chat Completions → Responses API ---
+
+// responsesLifecycleResponse builds the `response` object carried by
+// response.created / response.in_progress.
+//
+// The Responses API requires created_at and model here. Vercel AI SDK validates
+// every chunk against a Zod schema and emits an error part when they are missing,
+// discarding the event; other SDKs build their synthetic initial response from
+// them. They are omitted only when the upstream genuinely did not report them.
+func responsesLifecycleResponse(id string, createdAt int64, model string) map[string]any {
+	resp := map[string]any{
+		"id":     id,
+		"status": "in_progress",
+	}
+	if createdAt != 0 {
+		resp["created_at"] = createdAt
+	}
+	if model != "" {
+		resp["model"] = model
+	}
+	return resp
+}
 
 type r2oStreamToolCall struct {
 	ID            string
@@ -1147,6 +1248,16 @@ type r2oStreamState struct {
 	ReasoningItemSent bool
 	ReasoningOutputIdx int // output_index used when the reasoning item was added
 	SummaryPartSent   bool
+
+	// Upstream response identity and accounting, carried into the lifecycle and
+	// terminal events. Usage may arrive on the finish_reason chunk or on a
+	// trailing chunk with empty choices, so it is captured outside the choices
+	// loop and the last non-nil value wins.
+	CreatedAt         int64
+	SystemFingerprint string
+	ServiceTier       string
+	Usage             *openAIChunkUsage
+	Timings           map[string]any
 	// nextOutputIdx is the next free index in the output[] array. We
 	// allocate it lazily when a new item is first emitted so the
 	// streaming case (where we don't know in advance which items the
@@ -1271,27 +1382,9 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				})
 				state.FinalItems[state.MessageOutputIdx] = msgItem
 			}
-			// Replay the final `output` array (in output_index order) into
-			// response.completed so the OpenAI Responses SDK can build a
-			// non-empty ParsedResponse from the authoritative `response`
-			// payload. Without this, the SDK returns an empty response —
-			// Codex drops the assistant turn, fails to reconstruct
-			// conversation history on the next turn, and silently hangs
-			// after the first reply.
-			output := make([]map[string]any, 0, len(state.FinalItems))
-			for i := 0; i < state.nextOutputIdx; i++ {
-				if item, ok := state.FinalItems[i]; ok {
-					output = append(output, item)
-				}
-			}
 			writeResponsesSSE(&out, "response.completed", map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{
-					"id":     state.ResponseID,
-					"status": "completed",
-					"output": output,
-					"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-				},
+				"type":     "response.completed",
+				"response": state.completedResponse(),
 			})
 			return engine.SSEChunk{Data: out.Bytes()}, nil
 		}
@@ -1305,6 +1398,27 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 
 	var out bytes.Buffer
 
+	// Capture identity/accounting before the choices loop: a usage-only chunk
+	// (OpenAI include_usage) carries no choices and would otherwise be dropped.
+	if oaiChunk.Model != "" {
+		state.Model = oaiChunk.Model
+	}
+	if oaiChunk.Created != 0 {
+		state.CreatedAt = oaiChunk.Created
+	}
+	if oaiChunk.SystemFingerprint != "" {
+		state.SystemFingerprint = oaiChunk.SystemFingerprint
+	}
+	if oaiChunk.ServiceTier != "" {
+		state.ServiceTier = oaiChunk.ServiceTier
+	}
+	if oaiChunk.Usage != nil {
+		state.Usage = oaiChunk.Usage
+	}
+	if oaiChunk.Timings != nil {
+		state.Timings = oaiChunk.Timings
+	}
+
 	// First chunk: emit lifecycle events
 	if !state.Created {
 		state.ResponseID = oaiChunk.ID
@@ -1312,25 +1426,24 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 			state.ResponseID = fmt.Sprintf("resp_%d", time.Now().UnixMilli())
 		}
 		state.Model = oaiChunk.Model
+		// The Responses API requires created_at on the lifecycle events; fall back
+		// to now when the upstream did not report one.
+		if state.CreatedAt == 0 {
+			state.CreatedAt = time.Now().Unix()
+		}
 		state.Created = true
 		state.ToolCallAcc = make(map[int]*r2oStreamToolCall)
 		state.ToolCallOutputIdx = make(map[int]int)
 		state.FinalItems = make(map[int]map[string]any)
 
 		writeResponsesSSE(&out, "response.created", map[string]any{
-			"type": "response.created",
-			"response": map[string]any{
-				"id":     state.ResponseID,
-				"status": "in_progress",
-			},
+			"type":     "response.created",
+			"response": responsesLifecycleResponse(state.ResponseID, state.CreatedAt, state.Model),
 		})
 
 		writeResponsesSSE(&out, "response.in_progress", map[string]any{
-			"type": "response.in_progress",
-			"response": map[string]any{
-				"id":     state.ResponseID,
-				"status": "in_progress",
-			},
+			"type":     "response.in_progress",
+			"response": responsesLifecycleResponse(state.ResponseID, state.CreatedAt, state.Model),
 		})
 	}
 
@@ -1641,26 +1754,9 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 				})
 				state.FinalItems[state.MessageOutputIdx] = msgItem
 			}
-			// Replay the final `output` array (in output_index order) into
-			// response.completed so the OpenAI Responses SDK can build a
-			// non-empty ParsedResponse. Without this, the SDK returns an
-			// empty response — Codex drops the assistant turn, fails to
-			// reconstruct conversation history on the next turn, and
-			// silently hangs after the first reply.
-			output := make([]map[string]any, 0, len(state.FinalItems))
-			for i := 0; i < state.nextOutputIdx; i++ {
-				if item, ok := state.FinalItems[i]; ok {
-					output = append(output, item)
-				}
-			}
 			writeResponsesSSE(&out, "response.completed", map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{
-					"id":     state.ResponseID,
-					"status": "completed",
-					"output": output,
-					"usage":  map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-				},
+				"type":     "response.completed",
+				"response": state.completedResponse(),
 			})
 			state.Terminated = true
 		}
@@ -1673,6 +1769,47 @@ func (t *Responses2OpenAI) TransformStreamChunk(chunk engine.SSEChunk, ctx *engi
 }
 
 // --- Helpers ---
+
+// completedResponse builds the `response` object for the response.completed
+// event from accumulated stream state.
+//
+// The Responses SDK takes this payload as the source of truth for the final
+// ParsedResponse, so the replayed `output` array must be present. Usage, model
+// and created_at come from the upstream rather than being zeroed: clients bill
+// and display from them.
+func (s *r2oStreamState) completedResponse() map[string]any {
+	output := make([]map[string]any, 0, len(s.FinalItems))
+	for i := 0; i < s.nextOutputIdx; i++ {
+		if item, ok := s.FinalItems[i]; ok {
+			output = append(output, item)
+		}
+	}
+
+	resp := map[string]any{
+		"id":     s.ResponseID,
+		"status": "completed",
+		"output": output,
+		"usage":  openAIUsageToResponses(s.Usage),
+	}
+	if s.CreatedAt != 0 {
+		resp["created_at"] = s.CreatedAt
+	}
+	if s.Model != "" {
+		resp["model"] = s.Model
+	}
+	if s.SystemFingerprint != "" {
+		resp["system_fingerprint"] = s.SystemFingerprint
+	}
+	if s.ServiceTier != "" {
+		resp["service_tier"] = s.ServiceTier
+	}
+	// Non-standard llama.cpp/vLLM decode throughput, forwarded verbatim.
+	// Delete this block to stop forwarding it.
+	if s.Timings != nil {
+		resp["timings"] = s.Timings
+	}
+	return resp
+}
 
 // writeResponsesSSE writes a Responses-API SSE event. Framing is identical to
 // Anthropic SSE (event: / data: / blank line), so it delegates.
