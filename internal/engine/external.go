@@ -58,6 +58,13 @@ func decodePayload(value any) ([]byte, error) {
 	return decodePayloadLimit(value, externalValueLimit, false)
 }
 
+// decodeRequestPayload accepts the ceiling the request hook was actually given.
+// A plugin echoing back an unchanged conversation must not be rejected just
+// because that conversation is larger than an ordinary value patch.
+func decodeRequestPayload(value any, limit int) ([]byte, error) {
+	return decodePayloadLimit(value, limit, true)
+}
+
 // Collection bodies have a decoded-byte ceiling, including base64 bodies.
 // Ordinary patches retain their existing encoded-value ceiling.
 func decodePayloadLimit(value any, limit int, collection bool) ([]byte, error) {
@@ -165,7 +172,7 @@ func (p *ExternalPlugin) call(name string, input map[string]any) (map[string]any
 		return nil, nil
 	}
 	if configured, ok := p.runtime.(interface{ SetLimits(jsplugins.Limits) }); ok && p.ctx != nil {
-		configured.SetLimits(jsplugins.EffectiveLimits(p.ctx.execution().Large))
+		configured.SetLimits(p.ctx.pluginLimits())
 	}
 	result, err := p.runtime.Invoke(name, input)
 	if err != nil {
@@ -268,7 +275,7 @@ func (p *ExternalPlugin) transformRequest(req *http.Request, body []byte, ctx *P
 	}
 	outBody := body
 	if value, ok := result["body"]; ok {
-		outBody, err = decodePayload(value)
+		outBody, err = decodeRequestPayload(value, ctx.pluginLimits().BodyBytes)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -416,7 +423,7 @@ func (t externalResponse) TransformResponse(resp *http.Response, body []byte, ct
 	if err != nil {
 		return nil, err
 	}
-	limits := jsplugins.EffectiveLimits(ctx.execution().Large)
+	limits := ctx.pluginLimits()
 	out, err := applyResponseLimit(result, resp, body, true, limits.BodyBytes, true, ctx)
 	return out, t.p.invocationFailure("response", err)
 }

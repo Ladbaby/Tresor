@@ -67,6 +67,20 @@ func nullable(s string) any {
 	}
 	return s
 }
+
+// pluginLimits selects the host-enforced plugin input bounds for the current
+// phase. A request hook receives the whole conversation, which grows with every
+// attached image, so it uses the same ceiling as collection; refusing it before
+// its code runs would fail the request for a body the gateway itself accepts.
+// Other phases keep the ordinary value ceiling.
+//
+// The published context.limits and the enforced SetLimits both read this, so a
+// plugin can never be told a bound the host does not apply.
+func (ctx *PipelineContext) pluginLimits() jsplugins.Limits {
+	e := ctx.execution()
+	return jsplugins.EffectiveLimits(e.Large || e.Phase == "request")
+}
+
 func (ctx *PipelineContext) invocationContext() map[string]any {
 	e := ctx.execution()
 	client, planned := "buffered", "buffered"
@@ -79,7 +93,7 @@ func (ctx *PipelineContext) invocationContext() map[string]any {
 		owner = ctx.ExternalCollector.PluginName()
 	}
 	return map[string]any{"phase": e.Phase, "stage": e.Stage, "formats": map[string]any{"client": nullable(ctx.ClientFormat), "downstream": nullable(ctx.DownstreamFormat), "current": nullable(e.CurrentFormat)},
-		"transport": map[string]any{"carrier": "http", "client": client, "requested": e.Requested, "observed": e.Observed, "reportedContentType": nullable(e.ReportedType), "classification": e.Classification, "plannedDelivery": planned, "effectiveDelivery": e.Delivery, "collector": owner}, "limits": jsplugins.EffectiveLimits(e.Large)}
+		"transport": map[string]any{"carrier": "http", "client": client, "requested": e.Requested, "observed": e.Observed, "reportedContentType": nullable(e.ReportedType), "classification": e.Classification, "plannedDelivery": planned, "effectiveDelivery": e.Delivery, "collector": owner}, "limits": ctx.pluginLimits()}
 }
 func (ctx *PipelineContext) termination(reason string) map[string]any {
 	e := ctx.execution()

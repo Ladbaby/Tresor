@@ -2,6 +2,7 @@ package jsplugins
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -128,6 +129,32 @@ func TestRuntimeExecutionIsUntimed(t *testing.T) {
 		if out["body"].(map[string]any)["data"] != "completed" {
 			t.Fatal(out)
 		}
+	}
+}
+
+// A hook refused before it ran must say why. Reporting an oversized input as
+// invalid_effect sent authors hunting for a contract bug in their own source.
+func TestOversizeInputReportedAsLimit(t *testing.T) {
+	pkg := fixture(t, `module.exports={request(){return {body:{encoding:'utf8',data:'ok'}}}}`)
+	instance, err := NewInstance(pkg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("x", EffectiveLimits(false).BodyBytes+1)
+	for _, tc := range []struct {
+		name  string
+		input map[string]any
+	}{
+		{"body", map[string]any{"body": map[string]any{"encoding": "utf8", "data": big}}},
+		{"event", map[string]any{"body": map[string]any{"encoding": "utf8", "data": "ok"}, "event": map[string]any{"data": big}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := instance.Invoke("request", tc.input)
+			var fault *InvocationError
+			if !errors.As(err, &fault) || fault.Code != "input_limit" || fault.Hook != "request" {
+				t.Fatalf("want input_limit, got %v", err)
+			}
+		})
 	}
 }
 

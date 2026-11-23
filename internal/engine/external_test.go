@@ -299,3 +299,30 @@ func TestSSELogicalFields(t *testing.T) {
 		t.Fatal(wire)
 	}
 }
+
+// A request hook receives the whole conversation, so it must be given the large
+// ceiling: image-heavy histories routinely pass the ordinary value bound, and
+// refusing them before plugin code runs fails requests the gateway accepts.
+func TestRequestHookAcceptsLargeBody(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("x", externalValueLimit+1024) + `"}]}`)
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(""))
+	ctx := &PipelineContext{}
+	var seen int
+	runtime := &fakeExternal{hooks: map[string]func(map[string]any) (map[string]any, error){
+		"request": func(input map[string]any) (map[string]any, error) {
+			seen = len(input["body"].(map[string]any)["data"].(string))
+			// Echo the body back unchanged: the patch decoder must accept it too.
+			return map[string]any{"body": input["body"]}, nil
+		},
+	}}
+	outReq, outBody, err := NewExternalPlugin(runtime).transformRequest(req, body, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen != len(body) || len(outBody) != len(body) || outReq == nil {
+		t.Fatalf("large body not preserved: seen=%d out=%d", seen, len(outBody))
+	}
+	if ctx.pluginLimits().BodyBytes <= externalValueLimit {
+		t.Fatal("request phase must publish the large ceiling")
+	}
+}

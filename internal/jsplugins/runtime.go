@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -469,7 +470,7 @@ func (i *Instance) Invoke(name string, input map[string]any) (map[string]any, er
 			return nil, fmt.Errorf("invalid input encoding")
 		}
 		if !ok || len(text) > bodyLimit {
-			return nil, fmt.Errorf("body input exceeds limit")
+			return nil, &InvocationError{Code: "input_limit", Plugin: i.PluginName(), Hook: name, Cause: fmt.Errorf("body input exceeds limit")}
 		}
 		obj := i.vm.NewObject()
 		obj.Set("encoding", b["encoding"])
@@ -478,7 +479,7 @@ func (i *Instance) Invoke(name string, input map[string]any) (map[string]any, er
 	}
 	if ev, ok := input["event"].(map[string]any); ok {
 		if s, ok := ev["data"].(string); !ok || len(s) > limits.EventBytes {
-			return nil, fmt.Errorf("event input exceeds limit")
+			return nil, &InvocationError{Code: "input_limit", Plugin: i.PluginName(), Hook: name, Cause: fmt.Errorf("event input exceeds limit")}
 		}
 	}
 	data, err := json.Marshal(inputCopy)
@@ -496,7 +497,7 @@ func (i *Instance) Invoke(name string, input map[string]any) (map[string]any, er
 		}
 		text := out.String()
 		if len(text) > limits.WireBytes {
-			return fmt.Errorf("result exceeds limit")
+			return &InvocationError{Code: "input_limit", Plugin: i.PluginName(), Hook: name, Cause: fmt.Errorf("result exceeds limit")}
 		}
 		return json.Unmarshal([]byte(text), &result)
 	}()
@@ -510,6 +511,12 @@ func (i *Instance) Invoke(name string, input map[string]any) (map[string]any, er
 		return nil, &InvocationError{Code: i.hostFault, Plugin: i.PluginName(), Hook: name, Cause: fmt.Errorf("host contract violation")}
 	}
 	if err != nil {
+		// Limit failures are classified before the hook result is unmarshalled, so
+		// their code must survive instead of collapsing into plugin_failure.
+		var limit *InvocationError
+		if errors.As(err, &limit) {
+			return nil, limit
+		}
 		return nil, &InvocationError{Code: "plugin_failure", Plugin: i.PluginName(), Hook: name, Cause: err}
 	}
 	if code, ok := result["__hostFailure"].(string); ok {
