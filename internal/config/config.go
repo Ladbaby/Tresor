@@ -107,6 +107,11 @@ type DownstreamCfg struct {
 	// hand-made downstream, which resolves one from its name instead.
 	Icon string `yaml:"icon,omitempty"`
 
+	// Console is the provider's account-management URL from the installed
+	// profile: where a user tops up or rotates a key. Public, so it round-trips
+	// through the config file and the UI links to it.
+	Console string `yaml:"console,omitempty"`
+
 	// legacyAPIKey reads the old top-level api_key field for one-shot back-
 	// compat. Private so it is never written back; folded into Auth in Load.
 	legacyAPIKey string `yaml:"api_key,omitempty"`
@@ -137,6 +142,13 @@ type DownstreamCfg struct {
 	// take precedence. A binding that names a missing or incompatible plugin
 	// degrades to a reported diagnostic instead of failing every request.
 	Plugins []PipelineStep `yaml:"plugins,omitempty"`
+
+	// Quota declares how to read this provider's remaining balance and
+	// rate-limit windows. Optional: a provider that declares none is simply not
+	// asked, and its allowance is shown nowhere in the UI — not as zero, not as
+	// unknown, not as an error. Fetching is a separate best-effort read, never
+	// part of a proxied request.
+	Quota *QuotaCfg `yaml:"quota,omitempty"`
 
 	// ApiFormat is a legacy field accepted for backward-compatible YAML loading.
 	// It gets converted to ApiFormats during the sanitize step.

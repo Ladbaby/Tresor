@@ -18,6 +18,7 @@ import (
 	"tresor/internal/middleware"
 	"tresor/internal/oauth"
 	"tresor/internal/providers"
+	"tresor/internal/quota"
 	"tresor/internal/store"
 	"tresor/internal/wire"
 )
@@ -52,6 +53,10 @@ type Router struct {
 	// OAuth providers are configured; all oauth routes degrade gracefully.
 	oauthMgr      *oauth.Manager
 	pluginManager *jsplugins.Manager
+
+	// quotaFetcher reads provider allowances. Nil (tests) makes /api/quotas
+	// report no readings at all, which is the same as no provider declaring one.
+	quotaFetcher *quota.Fetcher
 
 	// Config write debounce: delays YAML write-back to avoid excessive disk I/O
 	// when multiple mutations occur in rapid succession.
@@ -241,6 +246,14 @@ func (r *Router) Handler() http.Handler {
 			r.handlePlugins(w, req)
 		case path == "fetch-models":
 			r.handleFetchModels(w, req)
+		case path == "quotas":
+			// GET serves what is cached; POST re-reads every enabled provider
+			// first, which is what opening the provider list asks for.
+			if req.Method == http.MethodPost {
+				r.handleQuotasRefreshAll(w, req)
+				return
+			}
+			r.handleQuotas(w, req)
 		case path == "config":
 			r.handleConfig(w, req)
 		case path == "icons/refresh":
@@ -273,6 +286,7 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/plugin-packages", protected)
 	mux.Handle("/api/plugin-packages/", protected)
 	mux.Handle("/api/fetch-models", protected)
+	mux.Handle("/api/quotas", protected)
 	mux.Handle("/api/config", protected)
 	mux.Handle("/api/icons/refresh", protected)
 	mux.Handle("/api/logs/stream", protected)

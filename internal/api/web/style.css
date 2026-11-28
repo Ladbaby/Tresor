@@ -2254,6 +2254,269 @@ html[data-theme="light"] form select {
     border-color: rgba(255, 255, 255, 0.5);
 }
 
+/* Balance chip in the provider list.
+   Matches the ON/OFF pill it sits beside: same size, same outline, so a row reads
+   as one line rather than two shapes. Quiet by design — it is a figure the user
+   glances at, not a status to notice. */
+.downstreams-list .ds-balance-pill {
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    padding: 0.12rem 0.5rem;
+    border-radius: 999px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    /* A stale figure is visibly softer, so an old number is never mistaken for a
+       current one. */
+    transition: opacity 0.2s ease;
+}
+.downstreams-list .ds-balance-pill.stale {
+    opacity: 0.55;
+}
+.downstreams-list li.selected .ds-balance-pill {
+    border-color: rgba(255, 255, 255, 0.5);
+    color: #fff;
+}
+
+/* Allowance meters in the provider detail pane. A thin track, no legend: the
+   label and the reading either side carry the meaning. */
+/* Label and its Console action share a line: the label keeps the uppercase
+   section style, the link sits flush right where a secondary action belongs. */
+.quota-label-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.4rem;
+}
+/* The label is nested one level deeper than .detail-section > label, so it
+   needs the section's own type style restated: uppercase, small, secondary. */
+.quota-label-row > label {
+    margin-bottom: 0;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+}
+
+.quota-console {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-decoration: none;
+    letter-spacing: 0.02em;
+    transition: color 0.15s ease;
+}
+.quota-console:hover { color: var(--accent); }
+
+.quota-balance {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.quota-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.quota-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.78rem;
+}
+.quota-row-label {
+    flex-shrink: 0;
+    width: 92px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.quota-row-track {
+    flex: 1;
+    height: 6px;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.quota-row-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.4s ease;
+}
+/* A window close to its limit turns warm, so the one that matters stands out
+   without needing a second label. */
+.quota-row-fill.warn {
+    background: var(--warning-text, #d97706);
+}
+.quota-row-value {
+    flex-shrink: 0;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.quota-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.15rem;
+}
+
+/* Allowance declaration editor, inside the advanced block.
+   Laid out like the extra-headers rows it sits beneath: a small caption column
+   and monospace fields, so the advanced panel reads as one group of knobs
+   rather than a browser form dropped into the middle of it. */
+.quota-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+.quota-field {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.quota-field-label {
+    flex: 0 0 5.5rem;
+    font-size: 0.76rem;
+    color: var(--text-secondary);
+}
+.quota-field input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.35rem 0.55rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    box-sizing: border-box;
+}
+.quota-field input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.quota-field input::placeholder {
+    color: var(--text-muted);
+    font-style: italic;
+}
+/* The currency code is a short label, not a path: it gets a fixed narrow column
+   so the balance path keeps the rest of the row. */
+.quota-field input.quota-currency-input {
+    flex: 0 0 5rem;
+    font-family: inherit;
+    text-transform: uppercase;
+}
+/* An inline validation message: only appears when the declaration is incomplete,
+   so a working editor stays silent. */
+.quota-editor-note {
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+.quota-editor-note.warn {
+    color: var(--warning-text, #d97706);
+}
+.quota-editor-note:empty {
+    display: none;
+}
+.quota-editor-note code {
+    padding: 0.05rem 0.3rem;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text-secondary);
+}
+/* A found-but-ambiguous balance: each choice shows what it would display, so the
+   pick is made on the reading rather than on a path. */
+.quota-candidates {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+.quota-candidate {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.3rem 0.6rem;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-variant-numeric: tabular-nums;
+}
+.quota-candidate:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+.quota-candidates:empty {
+    display: none;
+}
+/* Real providers, so the fields explain themselves without a manual. */
+.quota-examples {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+.quota-examples summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+}
+.quota-examples dl {
+    margin: 0.4rem 0 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.25rem 0.6rem;
+}
+.quota-examples dt {
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+.quota-examples dd {
+    margin: 0;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+.quota-examples code {
+    padding: 0.05rem 0.3rem;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text-primary);
+}
+.quota-examples p {
+    margin: 0.5rem 0 0;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+.quota-examples p strong {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+.quota-examples pre {
+    margin: 0.5rem 0 0;
+    padding: 0.6rem 0.7rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 0.7rem;
+    line-height: 1.5;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text-secondary);
+}
+
 .btn-add-downstream-sidebar {
     margin: 0.5rem;
     margin-top: 0;

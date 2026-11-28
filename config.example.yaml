@@ -152,6 +152,24 @@ downstreams:
     auth:
       type: api_key
       api_key: ""
+    quota:
+      url: /user/balance
+      # `$` marks money (shown with its currency sign), `%` marks a 0-100 share, and a digit segment selects from a list. A quoted number is fine.
+      balance: $balance_infos.0.total_balance
+      currency: CNY
+      # `scale` divides the value, for relays that count quota in their own units
+      # (a new-api relay counts 1 as 500000 of a dollar):  scale: 500000
+      #
+      # Optional rate-limit windows, each shown as its own meter:
+      # windows:
+      #   - name: 5h
+      #     used: current_interval_used_percent%     # what is spent, 0-100
+      #     resets_at: current_interval_end_at       # unix seconds, unix millis, or RFC 3339
+      #   - name: video / day
+      #     used: used                               # a count ...
+      #     limit: total                             # ... out of a limit
+      #     unit: videos
+      #     invert: true                             # the vendor reports what is LEFT
     output_model_ids:
       - deepseek-v4-pro
       - deepseek-flash

@@ -3,6 +3,7 @@ package providers
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -170,6 +171,9 @@ type appliedSnapshot struct {
 	// that reset a deliberately chosen region would look like drift, report a
 	// conflict, and leave the provider pointing somewhere the user did not pick.
 	Region string `json:"region,omitempty"`
+	// Quota is the allowance declaration the recipe supplied, so an update can
+	// tell a recipe-owned declaration from one the user wrote or changed.
+	Quota *config.QuotaCfg `json:"quota,omitempty"`
 }
 
 // snapshotOf builds the snapshot for the downstream a profile describes, at the
@@ -189,6 +193,7 @@ func (p *Profile) snapshotOf(plugins []config.PipelineStep, regionID string) app
 		Models:      append([]string{}, region.Models...),
 		Plugins:     plugins,
 		Region:      regionID,
+		Quota:       region.Quota,
 	}
 	if p.Provider.Auth != nil {
 		s.AuthType = p.Provider.Auth.Type
@@ -292,6 +297,13 @@ func (in *Installer) Install(p *Profile, opts InstallOptions) (*Result, error) {
 		// reach a slug like "ai302-color".
 		Icon:           p.Icon,
 		OutputModelIDs: append([]string{}, region.Models...),
+		// The recipe's allowance declaration, so the provider reports a balance
+		// the moment a key is supplied. A recipe without one installs a provider
+		// that reports nothing, which the UI renders as silence.
+		Quota: region.Quota,
+		// The provider's account page, so the detail pane can link straight to it
+		// instead of every user searching for where to top up.
+		Console: region.Console,
 	}
 	if opts.AllowPlugins {
 		ds.Plugins = bindingsToSteps(p.Plugins)
@@ -480,6 +492,11 @@ func (in *Installer) Update(downstreamID string, p *Profile, opts InstallOptions
 	// auth structure (never credentials)
 	applyAuth(next.Auth, ds.Auth, prev, want, res)
 
+	// allowance declaration. A recipe that gains (or changes) a quota block
+	// applies it only when the user has not written one of their own, the same
+	// rule the other recipe-owned fields follow.
+	applyQuota(&next.Quota, ds.Quota, prev.Quota, want.Quota, res)
+
 	// plugin bindings
 	if opts.AllowPlugins {
 		wantSteps := bindingsToSteps(p.Plugins)
@@ -502,6 +519,11 @@ func (in *Installer) Update(downstreamID string, p *Profile, opts InstallOptions
 	// brand's slug should move the icon with it.
 	if p.Icon != "" {
 		next.Icon = p.Icon
+	}
+	// The console page follows the recipe too: it is a URL the vendor owns, not a
+	// field a user edits, so an update that corrects it should correct the link.
+	if p.Provider.Console != "" {
+		next.Console = p.Provider.Console
 	}
 
 	// Credentials the user supplied replace what is stored; absent ones stay.
@@ -538,6 +560,9 @@ func (in *Installer) Update(downstreamID string, p *Profile, opts InstallOptions
 	if !contains(res.Applied, "plugins") {
 		snap.Plugins = prev.Plugins
 	}
+	if !contains(res.Applied, "quota") {
+		snap.Quota = prev.Quota
+	}
 	applied, err := store.MarshalApplied(snap)
 	if err != nil {
 		return nil, err
@@ -563,6 +588,38 @@ func (in *Installer) Update(downstreamID string, p *Profile, opts InstallOptions
 }
 
 // applyMapField applies the three-way rule to one map-valued field.
+// applyQuota reconciles the stored allowance declaration with the recipe's.
+//
+// The three-way comparison is the same one every other recipe-owned field uses:
+// if the downstream still holds what the last install wrote, the new recipe's
+// declaration wins; if the user changed it, theirs is kept and the difference is
+// reported. Taking a locally edited declaration away would silently stop a
+// provider reporting a balance the user deliberately configured.
+func applyQuota(next **config.QuotaCfg, current, prev, want *config.QuotaCfg, res *Result) {
+	if equalQuota(current, prev) {
+		if !equalQuota(current, want) {
+			*next = want
+			res.Applied = append(res.Applied, "quota")
+		}
+		return
+	}
+	if !equalQuota(current, want) {
+		res.Kept = append(res.Kept, "quota")
+		res.Conflicts = append(res.Conflicts, "the quota declaration was edited locally; kept it")
+	}
+}
+
+// equalQuota compares two declarations by value. Nil and an empty declaration are
+// the same thing — "this provider reports nothing" — so clearing a block and
+// omitting one compare equal.
+func equalQuota(a, b *config.QuotaCfg) bool {
+	if a.IsEmpty() || b.IsEmpty() {
+		return a.IsEmpty() && b.IsEmpty()
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+// applyMapField reconciles a map-valued field the same way.
 func applyMapField(name string, current, prev, want map[string]string, dst *map[string]string, res *Result) {
 	if equalMaps(current, prev) {
 		if !equalMaps(current, want) {

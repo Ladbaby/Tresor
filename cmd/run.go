@@ -21,6 +21,7 @@ import (
 	"tresor/internal/plugins"
 	"tresor/internal/providers"
 	"tresor/internal/proxy"
+	"tresor/internal/quota"
 	"tresor/internal/store"
 
 	"github.com/spf13/cobra"
@@ -234,6 +235,13 @@ func runDaemon(cfg *config.AppConfig) error {
 	}()
 	adminRouter.SetOAuthManager(oauthMgr)
 	adminRouter.SetPluginManager(pluginManager)
+
+	// Allowance readings. Nothing is fetched at startup: a reading is taken the
+	// first time the UI asks and none is fresh, so a daemon nobody is looking at
+	// makes no outbound calls. The OAuth manager supplies credentials for a
+	// provider that reports usage against a token rather than a key.
+	adminRouter.SetQuotaFetcher(quota.New(s, oauthMgr, proxy.Mode(cfg.ProxyMode)))
+
 	webHandler := api.WebHandler()
 
 	// Configure retry-on-empty setting on the engine

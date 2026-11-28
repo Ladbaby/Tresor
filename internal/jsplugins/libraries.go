@@ -45,6 +45,12 @@ var capabilityFeatures = []string{
 	"json.patch.v1",
 	"integration.prepare.v1", "integration.intercept.v1", "tools.host.v1",
 	"wire.v3",
+	// "quota" is not a plugin capability but a provider-recipe one: it marks a
+	// build that understands a recipe's quota block. It lives in this allowlist
+	// because that list is what a recipe's `requires.features` is checked
+	// against, and a recipe carrying a quota declaration must not install on a
+	// build that would silently drop it.
+	"quota",
 }
 
 // gatedFeature reports the manifest feature a module requires. The second result

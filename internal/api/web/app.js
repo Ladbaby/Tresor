@@ -94,6 +94,23 @@ function activateTab(tabId) {
             dashboardRefreshTimer = null;
         }
     }
+
+    // Allowance readings refresh only while the provider list is on screen: a
+    // balance is stale the moment it is read, but nobody is looking at a tab
+    // they are not on. The daemon does the poll-side work, so this timer is only
+    // a nudge.
+    if (tabId === 'downstreams') {
+        if (!quotaRefreshTimer) {
+            // Read on open: the list is being looked at for the first time, so a
+            // cached figure is either missing or describes a key the user has
+            // since replaced. The interval is only the keep-fresh nudge after that.
+            loadQuotas(true);
+            quotaRefreshTimer = setInterval(() => loadQuotas(), 5 * 60 * 1000);
+        }
+    } else if (quotaRefreshTimer) {
+        clearInterval(quotaRefreshTimer);
+        quotaRefreshTimer = null;
+    }
 }
 
 document.querySelectorAll('.tab').forEach(tab => {
@@ -840,6 +857,285 @@ document.getElementById('rule-form').addEventListener('submit', async (e) => {
 // auto-saves on blur or on per-item action.
 let _currentDownstreamId = null;
 
+// Provider allowance readings, keyed by downstream id.
+//
+// A provider that is not in this map reports nothing, and must therefore render
+// nothing about its allowance: no chip, no section, no "unavailable" hint. That
+// is the whole contract — the daemon omits the entry for a provider that declares
+// no quota, has never been read, or has not been read successfully within its
+// grace window, and the UI simply has nothing to draw.
+let _quotaReadings = {};
+
+/**
+ * Fetch every provider's allowance reading.
+ *
+ * One call for all providers, because they are all on screen at once. Silent on
+ * failure: an allowance is a convenience, and a daemon that cannot read one must
+ * not produce a banner over the provider list.
+ */
+async function loadQuotas(readNow) {
+    // Opening the tab and loading the list can both ask at once. Sharing the
+    // in-flight call keeps one read per open, not two.
+    if (readNow && _quotaReadInFlight) return _quotaReadInFlight;
+    const run = (async () => {
+        try {
+            // readNow re-reads every enabled provider; the plain GET only serves
+            // what is cached. Opening the provider list uses readNow so the pane
+            // has figures immediately instead of filling in on a later poll.
+            const res = await api('/quotas', readNow ? { method: 'POST' } : undefined);
+            _quotaReadings = (res && res.quotas) || {};
+        } catch (err) {
+            // Keep whatever is already cached rather than blanking the chips.
+            return;
+        }
+        renderDownstreamSidebar(cachedDownstreams);
+        if (_currentDownstream) renderDownstreamQuota();
+    })();
+    if (readNow) {
+        _quotaReadInFlight = run;
+        run.finally(() => { _quotaReadInFlight = null; });
+    }
+    return run;
+}
+
+/** The reading for a downstream, or null when it reports nothing. */
+function quotaReadingFor(id) {
+    const r = _quotaReadings[id];
+    if (!r) return null;
+    // A reading with neither a balance nor a window is nothing to show.
+    if (!r.balance && (!r.windows || r.windows.length === 0)) return null;
+    return r;
+}
+
+/**
+ * The compact balance chip for the provider list.
+ *
+ * Only a balance gets a chip. A provider that reports windows but no balance has
+ * no single figure to show at a glance, and inventing one from "42% used" would
+ * be misleading next to an actual currency amount.
+ */
+function quotaChipHTML(id) {
+    const r = quotaReadingFor(id);
+    if (!r || !r.balance || !r.balance.text) return '';
+    return `<span class="ds-balance-pill${r.stale ? ' stale' : ''}"`
+        + `>${esc(r.balance.text)}</span>`;
+}
+
+/**
+ * The allowance section of the provider detail pane, or '' when there is nothing
+ * to show.
+ * Returning '' rather than a placeholder is deliberate: a provider that reports
+ * no allowance gets no section, no divider and no explanatory text. Someone who
+ * has not configured this must never learn it exists.
+ */
+/**
+ * A "Console" link to the provider's account page, or nothing. The URL travels
+ * with the installed recipe, so a provider that declares none shows no link —
+ * never a dead one.
+ */
+function consoleLinkHTML(ds) {
+    const url = ds && ds.console;
+    if (!url) return '';
+    return `<a class="quota-console" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Console</a>`;
+}
+
+function quotaSectionHTML(ds) {
+    const id = typeof ds === 'string' ? ds : (ds && ds.id);
+    const r = quotaReadingFor(id);
+    if (!r) {
+        // A provider may publish a console page without reporting an allowance —
+        // OpenRouter only states credits granted and used, so what is left is a
+        // subtraction this declaration language does not do. The link is still
+        // worth showing, and it is the only thing here, so no card is implied.
+        const href = ds && ds.console;
+        if (!href) return '';
+        return `<div class="detail-section quota-section" data-role="quota-section">
+            <div class="quota-label-row">
+                <label>Account</label>${consoleLinkHTML(ds)}
+            </div>
+        </div>`;
+    }
+    const rows = (r.windows || []).map(w => {
+        const meter = typeof w.meter === 'number' ? w.meter : null;
+        const warn = meter !== null && meter >= 0.9 ? ' warn' : '';
+        const bar = meter === null ? '' : `
+                <div class="quota-row-track"><div class="quota-row-fill${warn}" style="width:${Math.round(meter * 100)}%"></div></div>`;
+        // A window with no meter (an uncapped counter) still shows its reading,
+        // left-aligned where the track would have been.
+        return `<div class="quota-row">
+                <span class="quota-row-label" title="${esc(w.name || '')}">${esc(w.name || '')}</span>${bar}
+                <span class="quota-row-value">${esc(w.text || '')}</span>
+            </div>`;
+    }).join('');
+    const balance = r.balance && r.balance.text
+        ? `<div class="quota-balance">${esc(r.balance.text)}</div>` : '';
+    return `<div class="detail-section quota-section" data-role="quota-section">
+            <div class="quota-label-row">
+                <label>Allowance</label>${consoleLinkHTML(ds)}
+            </div>
+            ${balance}
+            ${rows}
+        </div>`;
+}
+
+/** Re-render just the allowance section, so a poll never rebuilds the editor. */
+function renderDownstreamQuota() {
+    const host = document.querySelector('[data-role="quota-host"]');
+    if (!host || !_currentDownstream) return;
+    host.innerHTML = quotaSectionHTML(_currentDownstream);
+}
+
+/**
+ * Add the allowance editor to the advanced block of a rendered downstream.
+ *
+ * Editing the declaration is an advanced concern, so it sits with the other
+ * wire-shaping knobs. It is always present but collapsed with the block, so
+ * someone who never opens Advanced never meets it.
+ */
+/**
+ * Add the allowance row to the advanced block of a rendered downstream.
+ *
+ * One field: an endpoint. Nothing else is asked for, because asking somebody to
+ * author a path expression into a vendor's JSON is not a reasonable request — the
+ * daemon reads the reply and finds the figure itself. On blur the endpoint is
+ * saved and discovery runs immediately, so the balance appears without any
+ * further action.
+ *
+ * Everything else about an allowance (windows, scale, a currency override) is
+ * config-file territory and is deliberately absent here rather than shown
+ * read-only: a field nobody can edit is a field nobody should have to look at.
+ */
+function mountQuotaEditor(ds) {
+    const content = document.querySelector('[data-role="advanced-settings"] .detail-advanced-content');
+    if (!content || content.querySelector('[data-role="quota-editor"]')) return;
+    const q = ds.quota || {};
+    content.insertAdjacentHTML('beforeend', `
+        <div class="detail-section quota-editor" data-role="quota-editor">
+            <label>Balance endpoint
+                <span class="help-icon" tabindex="0" role="button" aria-label="Help" aria-describedby="help-popover"
+                    data-tooltip="The URL that reports this provider's remaining balance, e.g. /user/balance.">?</span>
+            </label>
+            <div class="quota-field">
+                <input type="text" class="quota-url-input" value="${esc(q.url || '')}" placeholder="/user/balance" autocomplete="off">
+            </div>
+            <div class="quota-editor-note" data-role="quota-note"></div>
+            <div class="quota-candidates" data-role="quota-candidates"></div>
+        </div>`);
+
+    // Bound directly rather than through the shared delegated handler: a commit
+    // re-renders the section, which would otherwise re-enter it.
+    const input = content.querySelector('[data-role="quota-editor"] .quota-url-input');
+    input.addEventListener('blur', () => commitQuotaEndpoint(ds.id));
+}
+
+/**
+ * Save the endpoint and let the daemon find the balance.
+ *
+ * This is the whole interaction: type an endpoint, tab away. The declaration is
+ * discovered, saved and read in one step, so there is no manual refresh to click.
+ */
+async function commitQuotaEndpoint(id) {
+    const editor = document.querySelector('[data-role="quota-editor"]');
+    if (!editor || !_currentDownstream) return;
+    const host = editor.parentElement;
+    if (!host || host.dataset.quotaCommitting === '1') return;
+    host.dataset.quotaCommitting = '1';
+    try {
+        await commitQuotaEndpointLocked(editor, id);
+    } finally {
+        host.dataset.quotaCommitting = '0';
+    }
+}
+
+async function commitQuotaEndpointLocked(editor, id) {
+    const url = editor.querySelector('.quota-url-input').value.trim();
+    const note = editor.querySelector('[data-role="quota-note"]');
+    const candidates = editor.querySelector('[data-role="quota-candidates"]');
+    const existing = _currentDownstream.quota || {};
+    candidates.innerHTML = '';
+
+    if (url === (existing.url || '')) return;
+
+    // Clearing the endpoint removes the declaration, which is how a provider
+    // stops reporting a balance at all.
+    if (!url) {
+        note.textContent = '';
+        note.classList.remove('warn');
+        await autoSaveDownstreamField(id, { quota: {} });
+        _currentDownstream.quota = null;
+        delete _quotaReadings[id];
+        renderDownstreamSidebar(cachedDownstreams);
+        renderDownstreamQuota();
+        return;
+    }
+
+    // Discover before saving: an endpoint on its own is not a valid declaration
+    // (it would read nothing), so the endpoint is sent with the request and the
+    // complete declaration is written once a balance has been found.
+    note.textContent = 'Reading…';
+    note.classList.remove('warn');
+
+    let result;
+    try {
+        result = await api('/downstreams/' + encodeURIComponent(id) + '/quota/discover', {
+            method: 'POST',
+            body: JSON.stringify({ endpoint: url }),
+        });
+    } catch (err) {
+        // The endpoint may simply report no balance, which is an ordinary state
+        // rather than something to alarm somebody about.
+        note.textContent = 'No balance found there. Check the endpoint, or leave it empty.';
+        note.classList.add('warn');
+        return;
+    }
+
+    if (result.adopted) {
+        // One clear figure: nothing to choose, so it was saved and read already.
+        const fresh = await api('/downstreams/' + encodeURIComponent(id));
+        _currentDownstream.quota = fresh.quota || null;
+        await loadQuotas();
+        renderDownstreamNote();
+        return;
+    }
+    renderQuotaCandidates(id, candidates, note, url, result.candidates || []);
+}
+
+/** Clear the editor's note. It carries only a problem worth acting on. */
+function renderDownstreamNote() {
+    const note = document.querySelector('[data-role="quota-note"]');
+    if (!note) return;
+    note.textContent = '';
+    note.classList.remove('warn');
+}
+
+/** Offer the figures discovery found, phrased as what each would show. */
+function renderQuotaCandidates(id, container, note, endpoint, candidates) {
+    if (!candidates.length) {
+        note.textContent = 'No balance found at that endpoint.';
+        note.classList.add('warn');
+        return;
+    }
+    note.textContent = 'Which of these is the balance?';
+    note.classList.remove('warn');
+    container.innerHTML = candidates.map((c, i) => `
+        <button type="button" class="quota-candidate" data-index="${i}" data-path="${esc(c.path)}">${esc(c.label)}</button>`).join('');
+    container.querySelectorAll('.quota-candidate').forEach(btn => {
+        btn.onclick = async () => {
+            const chosen = candidates[Number(btn.dataset.index)];
+            const base = _currentDownstream.quota || {};
+            const quota = Object.assign({}, base, { url: endpoint, balance: btn.dataset.path });
+            if (!quota.currency && chosen && chosen.currency) quota.currency = chosen.currency;
+            await autoSaveDownstreamField(id, { quota: quota }, (err) => {
+                if (err) return;
+                _currentDownstream.quota = quota;
+            });
+            container.innerHTML = '';
+            renderDownstreamNote();
+            await loadQuotas();
+        };
+    });
+}
+
 async function loadDownstreams() {
     try {
         const ds = await api('/downstreams');
@@ -856,6 +1152,9 @@ async function loadDownstreams() {
             document.getElementById('downstreams-detail').innerHTML =
                 '<div class="downstreams-detail-empty">No providers yet. Click ＋ Add Provider.</div>';
         }
+        // Load readings alongside the list so a chip appears with the row it
+        // belongs to rather than a moment later.
+        await loadQuotas();
     } catch (err) {
         document.getElementById('downstreams-detail').innerHTML =
             '<div class="downstreams-detail-empty">Error loading providers: ' + esc(err.message) + '</div>';
@@ -875,6 +1174,7 @@ function renderDownstreamSidebar(list) {
         <li data-id="${esc(d.id)}" class="${d.id === _currentDownstreamId ? 'selected' : ''}">
             ${iconHTMLFor(d)}
             <span class="ds-name">${esc(d.name)}</span>
+            ${quotaChipHTML(d.id)}
             <span class="ds-on-pill${d.is_enabled === false ? ' off' : ''}">${d.is_enabled === false ? 'OFF' : 'ON'}</span>
         </li>`).join('');
     ul.querySelectorAll('li[data-id]').forEach(li => {
@@ -1133,6 +1433,7 @@ function renderDownstreamDetail(ds) {
                 <button class="detail-header-delete" data-action="delete" title="Delete this provider">🗑</button>
             </div>
         </div>
+        <div id="downstream-quota" data-role="quota-host">${quotaSectionHTML(ds)}</div>
         <div class="detail-section">
             <label>API Formats</label>
             <div class="format-checkboxes">
@@ -1214,6 +1515,7 @@ function renderDownstreamDetail(ds) {
     // prior render.
     _keyRevealed = false;
     if (isOAuth) refreshOAuthStatus(ds.id, { silent: true });
+    mountQuotaEditor(ds);
 }
 
 // --- OAuth connect flow ---
@@ -1469,6 +1771,13 @@ function refreshDownstreamDetail() {
                 if (eye) { eye.classList.remove('shown'); eye.textContent = '👁'; }
                 _keyRevealed = false;
             });
+            // A new key points at an account the previous reading knows nothing
+            // about, and the save just dropped that reading. Read it back now so
+            // the allowance matches the key instead of sitting blank until the
+            // next background poll. A failure here is not worth a toast: the
+            // provider may legitimately report nothing, which the pane already
+            // renders as silence.
+            await loadQuotas(true);
         } else if (t.closest('.extra-headers-section')) {
             // Declared headers apply to api_key and OAuth alike, so preserve the
             // existing auth type instead of rewriting it to oauth.
@@ -5609,6 +5918,10 @@ let dashboardCurrentRange = 'last_7_days';
 let dashboardInitialized = false;
 let dashboardActive = false;
 let dashboardRefreshTimer = null;
+// Refreshes allowance readings, but only while the providers tab is open.
+let quotaRefreshTimer = null;
+// The read triggered by opening the provider list, while it is still running.
+let _quotaReadInFlight = null;
 
 function initDashboard() {
     if (dashboardInitialized) return;

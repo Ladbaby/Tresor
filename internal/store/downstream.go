@@ -48,8 +48,17 @@ type Downstream struct {
 	// hand-made downstream, which then falls back to resolving an icon from its
 	// name. Storing it is what keeps an installed provider's icon correct: the
 	// name alone cannot identify the brand, so the daemon would otherwise guess.
-	Icon      string    `json:"icon,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Icon string `json:"icon,omitempty"`
+	// Console is the provider's account-management URL, taken from the profile it
+	// was installed from: where a user tops up or rotates a key. Public data, so
+	// it travels with the recipe and saves every user of that provider a search.
+	Console string `json:"console,omitempty"`
+	// Quota declares how to read this provider's remaining balance and
+	// rate-limit windows. Nil means the provider reports none, and nothing about
+	// its allowance is shown — the UI has no card, no placeholder and no warning
+	// for it.
+	Quota     *config.QuotaCfg `json:"quota,omitempty"`
+	CreatedAt time.Time        `json:"created_at"`
 }
 
 // EffectiveAPIKey returns the static API key when the downstream uses api_key
@@ -95,7 +104,7 @@ func decodeAuthJSON(d *Downstream, authJSON string) {
 // back in an unspecified order.
 func (s *Store) ListDownstreams() ([]Downstream, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon, created_at FROM downstreams ORDER BY created_at, id`)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon, COALESCE(console,''), quota, created_at FROM downstreams ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list downstreams: %w", err)
 	}
@@ -104,14 +113,15 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 	var ds []Downstream
 	for rows.Next() {
 		var d Downstream
-		var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
+		var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON, quotaJSON string
 		var enabled int
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon, &d.Console, &quotaJSON, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		decodeDownstreamJSON(&d, formatsJSON, urlsJSON, pathsJSON)
 		decodeAuthJSON(&d, authJSON)
 		d.Plugins = decodePluginsJSON(pluginsJSON)
+		d.Quota = decodeQuotaJSON(quotaJSON)
 		d.IsEnabled = enabled == 1
 		d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 		ds = append(ds, d)
@@ -122,17 +132,18 @@ func (s *Store) ListDownstreams() ([]Downstream, error) {
 // GetDownstream returns a single downstream by ID with output model IDs.
 func (s *Store) GetDownstream(id string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
+	var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON, quotaJSON string
 	var enabled int
 	err := s.db.QueryRow(
-		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon, created_at FROM downstreams WHERE id = ?`, id).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon, &d.CreatedAt)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon, COALESCE(console,''), quota, created_at FROM downstreams WHERE id = ?`, id).
+		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon, &d.Console, &quotaJSON, &d.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get downstream %s: %w", id, err)
 	}
 	decodeDownstreamJSON(&d, formatsJSON, urlsJSON, pathsJSON)
 	decodeAuthJSON(&d, authJSON)
 	d.Plugins = decodePluginsJSON(pluginsJSON)
+	d.Quota = decodeQuotaJSON(quotaJSON)
 	d.IsEnabled = enabled == 1
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil
@@ -186,6 +197,38 @@ func pluginsJSONColumn(steps []config.PipelineStep) string {
 	return string(b)
 }
 
+// quotaJSONColumn returns the JSON blob stored in the downstreams.quota column.
+// A nil or empty declaration normalizes to "{}", which reads back as "this
+// provider reports no allowance".
+func quotaJSONColumn(q *config.QuotaCfg) string {
+	if q == nil || q.IsEmpty() {
+		return "{}"
+	}
+	b, err := json.Marshal(q)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// decodeQuotaJSON parses the downstreams.quota column. A corrupt value degrades
+// to "no declaration" rather than making the downstream unreadable or producing
+// an error the UI would have to show: an unreadable quota block must look
+// exactly like an absent one.
+func decodeQuotaJSON(quotaJSON string) *config.QuotaCfg {
+	if quotaJSON == "" || quotaJSON == "{}" {
+		return nil
+	}
+	var q config.QuotaCfg
+	if err := json.Unmarshal([]byte(quotaJSON), &q); err != nil {
+		return nil
+	}
+	if q.IsEmpty() {
+		return nil
+	}
+	return &q
+}
+
 // CreateDownstream inserts a new downstream and its output model IDs.
 func (s *Store) CreateDownstream(d *Downstream) error {
 	if d.ID == "" {
@@ -217,8 +260,8 @@ func (s *Store) CreateDownstream(d *Downstream) error {
 	authJSON := authJSONColumn(d)
 
 	_, err = tx.Exec(
-		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon) VALUES (?, ?, ?, '', ?, ?, ?, 1, ?, ?, ?)`,
-		d.ID, d.Name, d.BaseURL, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, pluginsJSONColumn(d.Plugins), d.Icon)
+		`INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon, console, quota) VALUES (?, ?, ?, '', ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+		d.ID, d.Name, d.BaseURL, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, pluginsJSONColumn(d.Plugins), d.Icon, d.Console, quotaJSONColumn(d.Quota))
 	if err != nil {
 		return fmt.Errorf("create downstream: %w", err)
 	}
@@ -270,8 +313,8 @@ func (s *Store) UpdateDownstream(d *Downstream) error {
 	}
 
 	res, err := tx.Exec(
-		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ?, plugins = ?, icon = ? WHERE id = ?`,
-		d.Name, d.BaseURL, d.EffectiveAPIKey(), string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSONColumn(d.Plugins), d.Icon, d.ID)
+		`UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ?, plugins = ?, icon = ?, console = ?, quota = ? WHERE id = ?`,
+		d.Name, d.BaseURL, d.EffectiveAPIKey(), string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSONColumn(d.Plugins), d.Icon, d.Console, quotaJSONColumn(d.Quota), d.ID)
 	if err != nil {
 		return fmt.Errorf("update downstream: %w", err)
 	}
@@ -464,16 +507,16 @@ func (s *Store) ListAllModels() ([]string, error) {
 // resolved arbitrarily but deterministically — never by insertion order.
 func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 	var d Downstream
-	var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
+	var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON, quotaJSON string
 	var enabled int
 	err := s.db.QueryRow(
-		`SELECT d.id, d.name, d.base_url, d.api_formats, d.format_urls, d.format_paths, d.is_enabled, d.auth, d.plugins, d.icon, d.created_at
+		`SELECT d.id, d.name, d.base_url, d.api_formats, d.format_urls, d.format_paths, d.is_enabled, d.auth, d.plugins, d.icon, COALESCE(d.console,''), d.quota, d.created_at
 		 FROM downstreams d
 		 JOIN output_model_ids o ON o.downstream_id = d.id
 		 WHERE o.model_id = ? AND d.is_enabled = 1
 		 ORDER BY d.created_at ASC, d.id ASC
 		 LIMIT 1`, model).
-		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon, &d.CreatedAt)
+		Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon, &d.Console, &quotaJSON, &d.CreatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -483,6 +526,7 @@ func (s *Store) FindDownstreamByOutputModel(model string) (*Downstream, error) {
 	decodeDownstreamJSON(&d, formatsJSON, urlsJSON, pathsJSON)
 	decodeAuthJSON(&d, authJSON)
 	d.Plugins = decodePluginsJSON(pluginsJSON)
+	d.Quota = decodeQuotaJSON(quotaJSON)
 	d.IsEnabled = enabled == 1
 	d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 	return &d, nil

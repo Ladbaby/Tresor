@@ -72,6 +72,16 @@ func (r *Router) handleDownstreams(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// A quota declaration is checked here, at declare time, so a malformed
+		// path is rejected while someone is looking at the form rather than
+		// becoming a provider that silently reports nothing.
+		if err := ds.Quota.Validate("quota"); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid quota: "+err.Error())
+			return
+		}
+		if ds.Quota != nil && ds.Quota.IsEmpty() {
+			ds.Quota = nil
+		}
 		plugins, err := validateDownstreamPlugins(ds.Plugins)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -251,6 +261,17 @@ func (r *Router) handleDownstreamByID(w http.ResponseWriter, req *http.Request) 
 		default:
 			http.NotFound(w, req)
 		}
+	case subResource == "quota":
+		switch modelID {
+		case "refresh":
+			// POST /api/downstreams/{id}/quota/refresh
+			r.handleQuotaRefresh(w, req, id)
+		case "discover":
+			// POST /api/downstreams/{id}/quota/discover
+			r.handleQuotaDiscover(w, req, id)
+		default:
+			http.NotFound(w, req)
+		}
 	case subResource == "oauth-status":
 		// GET /api/downstreams/{id}/oauth-status
 		if req.Method != http.MethodGet {
@@ -295,6 +316,7 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 			IsEnabled      *bool                     `json:"is_enabled"`
 			Auth           *config.DownstreamAuthCfg `json:"auth"`
 			Plugins        *[]config.PipelineStep    `json:"plugins"`
+			Quota          *config.QuotaCfg          `json:"quota"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -368,6 +390,9 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 				patch.Auth.ClientSecret = existing.Auth.ClientSecret
 			}
 			existing.Auth = patch.Auth
+			// A reading was taken with the old credentials; it says nothing about
+			// the account the new ones point at.
+			r.forgetQuota(id)
 		}
 
 		// Downstream-scoped plugin bindings. A non-nil Plugins replaces the
@@ -379,6 +404,24 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 				return
 			}
 			existing.Plugins = plugins
+		}
+
+		// Quota: a non-nil declaration replaces the whole block; an empty one
+		// clears it, which is how the UI stops a provider from reporting an
+		// allowance. Validated at declare time so a malformed path is a 400 here
+		// rather than a silently empty card later.
+		if patch.Quota != nil {
+			if err := patch.Quota.Validate("quota"); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid quota: "+err.Error())
+				return
+			}
+			existing.Quota = nil
+			if !patch.Quota.IsEmpty() {
+				existing.Quota = patch.Quota
+			}
+			// A reading taken against the old declaration says nothing about the
+			// new one, so it is dropped rather than shown as the wrong figure.
+			r.forgetQuota(id)
 		}
 
 		if existing.BaseURL != "" {
@@ -407,6 +450,7 @@ func (r *Router) handleDownstreamByIDDirect(w http.ResponseWriter, req *http.Req
 		if existing != nil {
 			r.removeOrphanedPlugins(existing.Plugins, id)
 		}
+		r.forgetQuota(id)
 		r.requestConfigWrite()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 

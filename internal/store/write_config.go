@@ -23,15 +23,15 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 	// --- Downstreams with output_model_ids ---
 	var downstreams []config.DownstreamCfg
 	rows, err := s.db.Query(
-		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, COALESCE(icon,'') FROM downstreams ORDER BY created_at`)
+		`SELECT id, name, base_url, api_formats, format_urls, format_paths, is_enabled, auth, plugins, COALESCE(icon,''), COALESCE(console,''), COALESCE(quota,'{}') FROM downstreams ORDER BY created_at`)
 	if err != nil {
 		return fmt.Errorf("query downstreams: %w", err)
 	}
 	for rows.Next() {
 		var d config.DownstreamCfg
-		var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON string
+		var formatsJSON, urlsJSON, pathsJSON, authJSON, pluginsJSON, quotaJSON string
 		var enabled int
-		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.BaseURL, &formatsJSON, &urlsJSON, &pathsJSON, &enabled, &authJSON, &pluginsJSON, &d.Icon, &d.Console, &quotaJSON); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan downstream: %w", err)
 		}
@@ -77,6 +77,11 @@ func (s *Store) WriteConfig(cfg *config.AppConfig) error {
 		// Downstream-scoped plugin bindings round-trip so an installed provider
 		// stays self-contained in YAML.
 		d.Plugins = decodePluginsJSON(pluginsJSON)
+		// The quota declaration round-trips too. Decoding is deliberately lenient
+		// here, unlike the auth blob above: a corrupt quota block means "this
+		// provider reports no allowance", which is a state the daemon handles
+		// everywhere, so it must not fail the whole config write.
+		d.Quota = decodeQuotaJSON(quotaJSON)
 		d.OutputModelIDs = s.listOutputModelIDs(d.ID)
 		if d.OutputModelIDs == nil {
 			d.OutputModelIDs = []string{}

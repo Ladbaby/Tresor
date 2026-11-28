@@ -322,6 +322,11 @@ func (r *Router) handleConfig(w http.ResponseWriter, req *http.Request) {
 		if r.catalog != nil {
 			r.catalog.SetProxyMode(mode)
 		}
+		// Allowance reads go out on their own client, so they follow the proxy
+		// change too.
+		if r.quotaFetcher != nil {
+			r.quotaFetcher.SetProxyMode(mode)
+		}
 
 		// Update auth middleware password live (only when explicitly provided).
 		if passwordProvided {

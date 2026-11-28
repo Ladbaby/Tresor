@@ -31,11 +31,11 @@ const SchemaName = "tresor-provider-v1"
 
 // Profile is one provider definition.
 type Profile struct {
-	Schema   string            `json:"schema"`
-	ID       string            `json:"id"`
-	Version  int               `json:"version"`
-	Name     string            `json:"name"`
-	Icon     string            `json:"icon,omitempty"`
+	Schema  string `json:"schema"`
+	ID      string `json:"id"`
+	Version int    `json:"version"`
+	Name    string `json:"name"`
+	Icon    string `json:"icon,omitempty"`
 	// Category groups the recipe in the catalog: who operates the endpoint. It is
 	// written in the recipe rather than inferred here, because the daemon cannot
 	// tell a first-party API from a relay by looking at a URL, and guessing from
@@ -57,6 +57,17 @@ type ProviderSpec struct {
 	FormatPaths map[string]string `json:"format_paths,omitempty"`
 	Auth        *AuthSpec         `json:"auth,omitempty"`
 	Models      []string          `json:"models,omitempty"`
+	// Quota declares how to read this provider's remaining allowance. It rides
+	// along with the recipe because a vendor's usage endpoint and JSON shape are
+	// facts about the vendor, not about a user's install: without it, every person
+	// configuring that provider would have to rediscover the same path
+	// expression. A recipe that omits it installs a provider that reports no
+	// allowance, which shows as nothing at all.
+	Quota *config.QuotaCfg `json:"quota,omitempty"`
+	// Console is where the user manages this provider's account: a top-up page,
+	// an API-key dashboard. Public by definition, so it is safe to publish in a
+	// recipe, and it saves every user of that provider from hunting for it.
+	Console string `json:"console,omitempty"`
 	// Regions are the endpoint choices a vendor sells the same provider at —
 	// a cloud's regions, a vendor's plans, a relay's national endpoints. One
 	// recipe serves all of them, because the differences are only where the
@@ -96,6 +107,11 @@ type Region struct {
 	FormatURLs map[string]string `json:"format_urls,omitempty"`
 	// FormatPaths are merged over the provider's, the same way.
 	FormatPaths map[string]string `json:"format_paths,omitempty"`
+	// Console replaces the provider's account page for this region. A provider
+	// that spans several vendor portals (Alibaba sells Qwen through Model Studio,
+	// Qwen Cloud and Qianwen AI) has no single correct link, so the region that
+	// was installed is the one that should link to the dashboard that owns it.
+	Console string `json:"console,omitempty"`
 	// Models replaces the provider's model list when non-empty. A cloud region or
 	// a vendor's plan often serves a different set, and Python-style inheritance
 	// of "the same models" would advertise ids the endpoint does not have.
@@ -127,6 +143,14 @@ func (p *ProviderSpec) resolved(r Region) ProviderSpec {
 		FormatPaths: mergeFormatMap(p.FormatPaths, r.FormatPaths),
 		Auth:        p.Auth,
 		Models:      append([]string{}, p.Models...),
+		// A quota declaration is inherited unchanged, because the endpoint it
+		// names is usually root-relative and therefore already follows the
+		// region. A vendor whose regions genuinely differ here can still write an
+		// absolute URL.
+		Quota: p.Quota,
+		// A region's console wins over the provider's, because the dashboard that
+		// manages a key is the one belonging to the platform the key was issued on.
+		Console: cmp.Or(r.Console, p.Console),
 	}
 	if len(r.Models) > 0 {
 		out.Models = append([]string{}, r.Models...)
@@ -428,6 +452,15 @@ func (p *ProviderSpec) validateRegions() error {
 		if r.UnknownModels && len(r.Models) > 0 {
 			return fmt.Errorf("region %q declares both models and unknown_models; keep one", r.ID)
 		}
+		// A region's console is held to the same bar as the provider's: a recipe
+		// is published data, so a plaintext or scheme-less URL would be a silent
+		// downgrade for every user who clicks it.
+		if c := strings.TrimSpace(r.Console); c != "" {
+			u, err := url.Parse(c)
+			if err != nil || u.Scheme != "https" || u.Host == "" {
+				return fmt.Errorf("regions[%d].console must be an https URL, got %q", i, c)
+			}
+		}
 	}
 	return nil
 }
@@ -503,6 +536,23 @@ func (p *Profile) Validate() error {
 	// install a downstream that fails at request time.
 	if err := config.ValidateHeaderValues(p.Provider.Auth.ExtraHeaders); err != nil {
 		return fmt.Errorf("provider profile %s: %w", p.ID, err)
+	}
+	// The quota declaration is checked at parse time, so a recipe cannot install a
+	// provider whose allowance path is malformed and only fails silently later.
+	if c := strings.TrimSpace(p.Provider.Console); c != "" {
+		u, err := url.Parse(c)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("provider.console must be an https URL, got %q", c)
+		}
+		p.Provider.Console = c
+	}
+	if err := p.Provider.Quota.Validate("provider.quota"); err != nil {
+		return fmt.Errorf("provider profile %s: %w", p.ID, err)
+	}
+	// An empty block means "no allowance here", which must not reach the store as
+	// a present-but-empty declaration.
+	if p.Provider.Quota.IsEmpty() {
+		p.Provider.Quota = nil
 	}
 	// A dialect name is only checked for syntax here, not availability: a recipe
 	// that carries its own dialect package names a dialect that does not exist

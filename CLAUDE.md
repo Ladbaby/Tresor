@@ -20,53 +20,6 @@ Tresor is configured entirely via a single YAML config file. See [config.example
 
 To get started: `cp config.example.yaml config.yaml`, then edit as needed.
 
-### YAML Structure
-
-```yaml
-bind_addr: "127.0.0.1:11510"         # TCP address for gateway
-socket_path: "/tmp/tresor.sock"  # Optional Unix socket (admin only)
-db_path: "./tresor.db"          # SQLite database path
-admin_password: "secret"        # Optional: admin password for cookie-based session auth
-proxy_api_keys:                 # Optional: require clients to authenticate proxy requests
-  - sk-proxy-123
-proxy_mode: "auto"              # Outbound proxy: auto, env, windows, none
-default_tab: "downstreams"      # Dashboard tab on load (values: downstreams, aliases, rules, settings, about)
-log_level: "info"               # Request logging verbosity: debug, info, warn, error
-capture_payloads: false         # Capture raw request/response bodies for the Logs inspector (claude-tap-style)
-icon_cache_dir: "~/.config/tresor/tresor-icons/"  # Cache directory for model icon SVGs (~ expands to home dir)
-retry_on_empty: false           # Automatically retry requests when the downstream returns an empty response (HTTP 200 but no content)
-
-downstreams:                    # LLM provider endpoints
-  - id: my-provider
-    name: My Provider
-    base_url: https://api.example.com
-    api_key: sk-...
-    api_formats: [openai]       # API format(s): openai, anthropic, openai_responses, gemini
-    is_enabled: true            # ON/OFF toggle; OFF hides the provider + its models "as if deleted"
-    output_model_ids:           # Models this downstream can handle (required for forwarding)
-      - gpt-4o
-
-rules:                          # Routing rules (OPTIONAL — only for transforms)
-  - id: my-rule
-    name: Chat Rule
-    pattern_path: /v1/chat/completions
-    pattern_model: gpt-4o       # Optional model filter
-    match_format: [openai]      # Match input request format
-    match_downstream_format: [anthropic]  # Match downstream API format
-    match_downstreams: [my-provider]      # Match specific downstreams
-    pipeline_config: []         # Optional installed user plugins; format conversion is automatic
-    is_enabled: true
-
-aliases:                        # Model name mappings (hot-switchable, ordered by array position)
-  - input_model_id: gpt-4o
-    is_regex: false             # Treat input_model_id as regex (group-level, optional)
-    options:
-      - id: alias-gpt4o-anthropic
-        downstream_id: my-provider
-        output_model_id: claude-sonnet-4-20250514
-```
-
-
 ## Build and Run
 
 ```bash
@@ -120,6 +73,7 @@ The codebase follows a clean layered structure with three core concerns:
 | `internal/middleware/` | Cookie-based session auth middleware for admin API (with rate limiting and multi-session support) |
 | `internal/icons/` | Model icon fetching, pattern matching, and CDN caching via `@lobehub/icons-static-svg` |
 | `internal/inspect/` | Bounded in-memory store of raw gateway request/response bodies for the Logs inspector |
+| `internal/quota/` | Reads provider balances/rate-limit windows from a declarative `quota` block, with a lazy stale-while-revalidate cache. `discover.go` infers the balance path from a reply, so the UI only asks for an endpoint |
 | `internal/proxy/` | Outbound proxy mode configuration (auto, env, windows, none) + URL validation |
 | `internal/api/web/` | Embedded SPA: `index.html`, `style.css`, `app.js` |
 
@@ -218,6 +172,10 @@ Install/enable packages with `plugin install` / `plugin enable`; only one versio
 | GET | `/api/logs/{id}/inspect` | Get captured raw request and response bodies for a log entry (only when `capture_payloads: true`; 404 if evicted or capture was off) |
 | GET | `/api/icons/{modelID}` | Serve a cached model icon SVG (public; falls back to generic icon if not found) |
 | POST | `/api/icons/refresh` | Force an out-of-band refresh of the local CDN icon index (admin auth required) |
+| GET | `/api/quotas` | Every provider's current balance/rate-limit reading. Serves the cache and refreshes stale entries in the background. A provider that declares no quota, has never been read, or has not been read within its grace window is **absent from the map** — there is no "unsupported" flag and no error field, so the UI renders nothing for it |
+| POST | `/api/quotas` | Re-reads every **enabled** provider that declares a quota, in parallel, then answers in the same shape. This is what opening the Providers tab calls, so figures are present on first paint instead of filling in on a later poll |
+| POST | `/api/downstreams/{id}/quota/discover` | Body `{endpoint}`. GETs that endpoint, ranks the reply's numeric fields, and — when one figure clearly wins — saves the balance path and reads it, returning `{adopted: true, reading}`. Otherwise returns `{candidates: [{path, label, value, currency}]}`. **The caller never writes a path**; `path` is opaque and returned only so a picked choice can be saved |
+| POST | `/api/downstreams/{id}/quota/refresh` | Re-read one provider's allowance (internal/API use; the UI has no button for it) |
 | GET | `/v1/models` | Aggregated model listing (OpenAI format, gateway path) |
 
 

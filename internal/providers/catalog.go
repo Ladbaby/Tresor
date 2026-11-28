@@ -85,6 +85,10 @@ type CatalogEntry struct {
 	// reads the profile and validates the id against it there, so a stale index
 	// costs a wrong label rather than a wrong endpoint.
 	Regions []CatalogRegion `json:"regions,omitempty"`
+	// HasQuota mirrors whether the profile declares how to read the provider's
+	// remaining allowance, so the list can say "shows a balance" without
+	// downloading every recipe.
+	HasQuota bool `json:"has_quota,omitempty"`
 }
 
 // CatalogRegion is one entry of an index's region list: enough to label a choice.

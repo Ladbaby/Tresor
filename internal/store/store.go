@@ -461,6 +461,15 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Add the console column: the provider's account-management URL from the
+	// profile it was installed from. Empty for a hand-made downstream, which
+	// then shows no Console link at all.
+	if !s.columnExists("downstreams", "console") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN console TEXT DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate add console: %w", err)
+		}
+	}
+
 	// Add plugins column (downstream-scoped transformers). Default '[]' means
 	// the downstream contributes no transforms of its own, so existing rows and
 	// rule-based pipelines behave exactly as before this column existed.
@@ -494,6 +503,18 @@ func (s *Store) migrate() error {
 		}
 		if err := s.migrateBackfillAuth(); err != nil {
 			return fmt.Errorf("migrate backfill auth: %w", err)
+		}
+	}
+
+	// Add the `quota` JSON column: how to read this provider's remaining
+	// balance and rate-limit windows. Default '{}' means no declaration, which is
+	// the correct reading for every row that predates the feature — such a
+	// provider reports nothing, and Tresor shows nothing about it. No backfill is
+	// possible or wanted: whether a vendor answers a balance query is knowledge
+	// only its recipe carries.
+	if !s.columnExists("downstreams", "quota") {
+		if _, err := s.db.Exec(`ALTER TABLE downstreams ADD COLUMN quota TEXT DEFAULT '{}'`); err != nil {
+			return fmt.Errorf("migrate add quota: %w", err)
 		}
 	}
 
@@ -1184,6 +1205,11 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 			}
 		}
 
+		// The quota declaration round-trips from YAML so a hand-written config can
+		// declare one. A nil or empty block marshals to "{}", which reads back as
+		// "this provider reports no allowance".
+		quotaJSON := quotaJSONColumn(d.Quota)
+
 		// Check if this downstream already exists
 		var exists bool
 		if err := tx.QueryRow("SELECT COUNT(*) > 0 FROM downstreams WHERE id = ?", d.ID).Scan(&exists); err != nil {
@@ -1200,13 +1226,13 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 					enabled = 1
 				}
 				if _, err := tx.Exec(
-					"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ?, plugins = ?, icon = ? WHERE id = ?",
-					d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON, d.Icon, d.ID); err != nil {
+					"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, is_enabled = ?, auth = ?, plugins = ?, icon = ?, console = ?, quota = ? WHERE id = ?",
+					d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON, d.Icon, d.Console, quotaJSON, d.ID); err != nil {
 					return fmt.Errorf("update downstream %s: %w", d.ID, err)
 				}
 			} else if _, err := tx.Exec(
-				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, auth = ?, plugins = ?, icon = ? WHERE id = ?",
-				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, pluginsJSON, d.Icon, d.ID); err != nil {
+				"UPDATE downstreams SET name = ?, base_url = ?, api_key = ?, api_formats = ?, format_urls = ?, format_paths = ?, auth = ?, plugins = ?, icon = ?, console = ?, quota = ? WHERE id = ?",
+				d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), authJSON, pluginsJSON, d.Icon, d.Console, quotaJSON, d.ID); err != nil {
 				return fmt.Errorf("update downstream %s: %w", d.ID, err)
 			}
 			// Replace output_model_ids from YAML
@@ -1232,8 +1258,8 @@ func (s *Store) upsertDownstreams(downstreams []config.DownstreamCfg) error {
 				enabled = 0
 			}
 			if _, err := tx.Exec(
-				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON, d.Icon); err != nil {
+				"INSERT INTO downstreams (id, name, base_url, api_key, api_formats, format_urls, format_paths, is_enabled, auth, plugins, icon, console, quota) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				d.ID, d.Name, d.BaseURL, legacyKey, string(formatsJSON), string(urlsJSON), string(pathsJSON), enabled, authJSON, pluginsJSON, d.Icon, d.Console, quotaJSON); err != nil {
 				return fmt.Errorf("insert downstream %s: %w", d.ID, err)
 			}
 			if len(d.OutputModelIDs) > 0 {
